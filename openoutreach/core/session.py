@@ -49,33 +49,6 @@ class OperatorSession:
             "country_code": SiteConfig.load().country_code or "",
         }
 
-    @cached_property
-    def active_timezone(self) -> str | None:
-        """IANA zone for the active-hours window — the ``ACTIVE_TIMEZONE`` conf
-        override, else inferred from the operator's country (from onboarding),
-        else None (no gating)."""
-        from openoutreach.core.conf import ACTIVE_TIMEZONE
-        from openoutreach.core.models import SiteConfig
-        from openoutreach.core.tz_country import timezone_for_country
-
-        if ACTIVE_TIMEZONE:
-            return ACTIVE_TIMEZONE
-        return timezone_for_country(SiteConfig.load().country_code)
-
-    def active_timezone_provenance(self) -> str:
-        """Human-readable note on where ``active_timezone`` came from — shown in
-        the daemon's active-hours log."""
-        from openoutreach.core.conf import ACTIVE_TIMEZONE
-        from openoutreach.core.models import SiteConfig
-
-        if ACTIVE_TIMEZONE:
-            return f"{ACTIVE_TIMEZONE} (configured via ACTIVE_TIMEZONE)"
-        country = (SiteConfig.load().country_code or "?").upper()
-        tz = self.active_timezone
-        if tz:
-            return f"{tz} (inferred from operator country {country}; override with ACTIVE_TIMEZONE)"
-        return "unset (no country and no ACTIVE_TIMEZONE) — not gating"
-
     def __repr__(self) -> str:
         return self.django_user.email or self.django_user.username
 

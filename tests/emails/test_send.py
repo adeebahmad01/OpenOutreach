@@ -130,12 +130,21 @@ class TestFlushEmailQueue:
         _box()
         assert flush_email_queue(fake_session, fake_session.campaign, allowance=_UNCAPPED) == 0
 
-    def test_creates_one_slot_per_queued_deal(self, fake_session):
+    def test_mints_one_slot_however_deep_the_pool(self, fake_session):
+        # Single-slot by design: a batch would schedule the whole day up front and
+        # bury anything minted after it, follow-ups included.
         _box(daily_limit=10)
         _ready(fake_session.campaign, "x@c.com")
         _ready(fake_session.campaign, "y@c.com")
-        assert flush_email_queue(fake_session, fake_session.campaign, allowance=_UNCAPPED) == 2
-        assert self._pending_emails(fake_session.campaign) == 2
+        assert flush_email_queue(fake_session, fake_session.campaign, allowance=_UNCAPPED) == 1
+        assert self._pending_emails(fake_session.campaign) == 1
+
+    def test_does_not_mint_a_second_while_one_is_pending(self, fake_session):
+        _box(daily_limit=10)
+        _ready(fake_session.campaign, "x@c.com")
+        _ready(fake_session.campaign, "y@c.com")
+        flush_email_queue(fake_session, fake_session.campaign, allowance=_UNCAPPED)
+        assert flush_email_queue(fake_session, fake_session.campaign, allowance=_UNCAPPED) == 0
 
     def test_capped_by_pool_headroom(self, fake_session):
         _box(daily_limit=1)

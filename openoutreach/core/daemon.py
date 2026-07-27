@@ -3,20 +3,16 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import timedelta
 from typing import Callable
-from zoneinfo import ZoneInfo
 
-from django.utils import timezone
 from pydantic_ai.exceptions import ModelHTTPError
 
 from termcolor import colored
 
 from openoutreach.core.conf import (
-    ACTIVE_END_HOUR,
-    ACTIVE_START_HOUR,
     CAMPAIGN_CONFIG,
-    ENABLE_ACTIVE_HOURS,
+    MIN_SEND_INTERVAL_SECONDS,
+    SEND_INTERVAL_JITTER_SECONDS,
 )
 from openoutreach.core.ml.qualifier import BayesianQualifier, KitQualifier
 from openoutreach.core.models import Task
@@ -127,36 +123,6 @@ def _build_qualifiers(campaigns, cfg, kit_model=None):
 
 
 # ------------------------------------------------------------------
-# Active-hours schedule guard
-# ------------------------------------------------------------------
-
-
-def seconds_until_active(tz_name: str | None) -> float:
-    """Return seconds to wait before the next active window, or 0 if active now.
-
-    Single contiguous daily window — no weekend skip. Returns 0 (never gate)
-    when active hours are disabled or ``tz_name`` is None — the timezone is
-    resolved from the operator's onboarding country, and an unknown country
-    leaves it None rather than guessing UTC.
-    """
-    if not ENABLE_ACTIVE_HOURS or tz_name is None:
-        return 0.0
-    tz = ZoneInfo(tz_name)
-    now = timezone.localtime(timezone=tz)
-
-    if ACTIVE_START_HOUR <= now.hour < ACTIVE_END_HOUR:
-        return 0.0
-
-    candidate = timezone.make_aware(
-        now.replace(hour=ACTIVE_START_HOUR, minute=0, second=0, microsecond=0, tzinfo=None),
-        timezone=tz,
-    )
-    if candidate <= now:
-        candidate += timedelta(days=1)
-    return (candidate - now).total_seconds()
-
-
-# ------------------------------------------------------------------
 # Task queue worker
 # ------------------------------------------------------------------
 
@@ -200,13 +166,10 @@ def run_daemon(session):
         len(campaigns),
     )
 
-    if ENABLE_ACTIVE_HOURS:
-        logger.info(
-            "Active hours %02d:00–%02d:00 — timezone %s",
-            ACTIVE_START_HOUR, ACTIVE_END_HOUR, session.active_timezone_provenance(),
-        )
-    else:
-        logger.info("Active hours disabled — running 24/7")
+    logger.info(
+        "Sends paced ≥%ds apart (+ up to %ds jitter)",
+        MIN_SEND_INTERVAL_SECONDS, SEND_INTERVAL_JITTER_SECONDS,
+    )
 
     heartbeat = Heartbeat()
 
@@ -220,19 +183,6 @@ def run_daemon(session):
     # Single-threaded: one task at a time, no concurrent enqueuing,
     # so sleeping until the next scheduled_at is safe.
     while True:
-        pause = seconds_until_active(session.active_timezone)
-        if pause > 0:
-            logger.info(
-                "Outside active hours (%02d:00–%02d:00 %s) — next window in %s",
-                ACTIVE_START_HOUR, ACTIVE_END_HOUR,
-                session.active_timezone, _hm(pause),
-            )
-            sleep_with_heartbeat(
-                pause, heartbeat,
-                lambda left: f"outside active hours, {_hm(left)} left",
-            )
-            continue
-
         task = Task.objects.claim_next()
         if task is None:
             # Nothing ready — reconcile the queue from CRM state. Any deal

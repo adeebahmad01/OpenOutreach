@@ -43,7 +43,6 @@ from pathlib import Path
 from typing import Callable, TypeVar
 
 from openoutreach.core import onboarding_wizard as wiz
-from openoutreach.core.conf import DEFAULT_EMAIL_DAILY_LIMIT
 
 logger = logging.getLogger(__name__)
 
@@ -310,7 +309,7 @@ def _run_mailbox() -> None:
                 return
             raise
 
-        box, reason = Mailbox.objects.create_verified(**entry, daily_limit=DEFAULT_EMAIL_DAILY_LIMIT)
+        box, reason = Mailbox.objects.create_verified(**entry)
         if box is None:
             _say(f"  ✗ {entry['from_address']}: {reason}", "fg:red")
             continue  # re-ask with the same values pre-filled — never rewinds

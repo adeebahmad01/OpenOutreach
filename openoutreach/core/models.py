@@ -39,9 +39,9 @@ class SiteConfig(models.Model):
     # The operator's ISO-3166 alpha-2 country, collected at onboarding (self-hosted
     # = one operator, so it lives on the config singleton, not a separate account
     # model — identity like email/name stays on the Django ``User``). Drives the
-    # active-hours timezone (tz_country) and the email-jurisdiction rules
-    # (core/geo.py): newsletter opt-in default + whether we contribute to the
-    # contacts store (derived, ``not is_eea_located`` — never a stored toggle).
+    # email-jurisdiction rules (core/geo.py): newsletter opt-in default + whether
+    # we contribute to the contacts store (derived, ``not is_eea_located`` — never
+    # a stored toggle).
     country_code = models.CharField(max_length=2, blank=True, default="")
 
     class Meta:

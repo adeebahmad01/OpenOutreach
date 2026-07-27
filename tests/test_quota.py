@@ -16,8 +16,8 @@ from openoutreach.core.models import Campaign, Task
 from openoutreach.core.quota import (
     allocate, opener_counts, realized_share, weights,
 )
-from openoutreach.core.scheduler import reconcile
-from openoutreach.crm.models import DealState
+from openoutreach.core.scheduler import opener_allowances, reconcile
+from openoutreach.crm.models import Deal, DealState
 from openoutreach.emails.models import Mailbox
 from tests.factories import DealFactory, LeadFactory
 
@@ -179,9 +179,41 @@ class TestReconcileSplitsOpeners:
             task_type=Task.TaskType.EMAIL, payload__campaign_id=campaign.pk,
         ).count()
 
+    def _follow_up_slots(self, campaign):
+        return Task.objects.filter(
+            task_type=Task.TaskType.FOLLOW_UP, payload__campaign_id=campaign.pk,
+        ).count()
+
+    def _openers_sent(self, campaign):
+        return Deal.objects.filter(
+            campaign=campaign, email_sent_at__isnull=False,
+        ).count()
+
+    def _send_pending_openers(self):
+        """Stand in for the EMAIL handler: mark one queued deal per pending slot
+        as sent, so the quota ledger advances the way a real send would."""
+        for task in Task.objects.filter(
+            task_type=Task.TaskType.EMAIL, status=Task.Status.PENDING,
+        ):
+            deal = Deal.objects.filter(
+                campaign_id=task.payload["campaign_id"],
+                state=DealState.READY_TO_EMAIL,
+            ).first()
+            if deal:
+                deal.state = DealState.EMAILED
+                deal.email_sent_at = timezone.now()
+                deal.save(update_fields=["state", "email_sent_at"])
+            task.status = Task.Status.COMPLETED
+            task.save(update_fields=["status"])
+
     def test_freemium_gets_its_fraction_not_the_race(self, fake_session):
         """Both pools are deep enough to swallow the whole day; before the quota
-        whichever campaign drained first took it all."""
+        whichever campaign drained first took it all.
+
+        Slots are minted one per reconcile under send pacing, so the split shows
+        up across the opener *stream* rather than in one batch — which is the
+        stronger property: the ratio holds at every prefix, not just at day's end.
+        """
         own = fake_session.campaign
         promo = _campaign("Promo", freemium=True, fraction=0.2)
         promo.users.add(fake_session.django_user)
@@ -191,10 +223,12 @@ class TestReconcileSplitsOpeners:
         self._ready(own, 10)
         self._ready(promo, 10)
 
-        reconcile(fake_session)
+        for _ in range(10):
+            reconcile(fake_session)
+            self._send_pending_openers()
 
-        assert self._email_slots(own) == 8
-        assert self._email_slots(promo) == 2
+        assert self._openers_sent(own) == 8
+        assert self._openers_sent(promo) == 2
 
     def test_due_follow_ups_are_reserved_off_the_top(self, fake_session):
         """A follow-up is not new reach: it sits outside the quota and keeps its
@@ -212,4 +246,8 @@ class TestReconcileSplitsOpeners:
 
         reconcile(fake_session)
 
-        assert self._email_slots(own) == 4  # 5 headroom − 1 owed follow-up
+        # The follow-up takes the earlier slot; the opener drain still mints its
+        # one slot behind it, and the reservation shows in the allowance.
+        assert self._follow_up_slots(own) == 1
+        assert self._email_slots(own) == 1
+        assert opener_allowances([own])[own.pk] == 4  # 5 headroom − 1 owed follow-up

@@ -138,6 +138,25 @@ def allocate(campaigns, slots: int, sent: dict[int, int]) -> dict[int, int]:
     return grant
 
 
+def by_hunger(campaigns, sent: dict[int, int]) -> list:
+    """*campaigns* ordered by how far below their weighted share they are.
+
+    The single-slot form of ``allocate``: openers are minted one at a time under
+    send pacing, so rather than splitting a day's budget up front the scheduler
+    asks who is owed the *next* one. Same Bresenham comparison, so the
+    ``|sent - w*total| < 1`` invariant is unchanged.
+
+    Ordering rather than picking a single winner keeps the drain work-conserving:
+    the hungriest campaign may have nothing ready to send, and the slot should
+    fall through to the next one rather than be wasted. Zero-weight campaigns are
+    excluded — they still count toward the stream total, but never receive.
+    """
+    target = weights(campaigns)
+    total = sum(sent.values()) + 1
+    eligible = [c for c in campaigns if target[c.pk] > 0]
+    return sorted(eligible, key=lambda c: target[c.pk] * total - sent[c.pk], reverse=True)
+
+
 def log_shares(campaigns) -> None:
     """Log realized vs target opener share — the audit that was missing.
 

@@ -120,8 +120,20 @@ def _mint_message_id(from_address: str) -> str:
 
 
 def _deliver(mailbox, message: EmailMessage) -> None:
-    """Log into the mailbox over SMTP+STARTTLS and send one message."""
-    with smtplib.SMTP(mailbox.host, mailbox.port, timeout=SMTP_TIMEOUT_SECONDS) as smtp:
-        smtp.starttls()
-        smtp.login(mailbox.username, mailbox.password)
-        smtp.send_message(message)
+    """Log into the mailbox over SMTP+STARTTLS and send one message.
+
+    A failure is recorded as a ``SendVerdict`` on the way past and then re-raised
+    unchanged: the task still fails and is still retried, but the receiver's
+    answer — the one direct statement anyone makes about this mailbox's standing
+    — is kept instead of dying in the traceback.
+    """
+    from openoutreach.emails.delivery_policy import record_failure
+
+    try:
+        with smtplib.SMTP(mailbox.host, mailbox.port, timeout=SMTP_TIMEOUT_SECONDS) as smtp:
+            smtp.starttls()
+            smtp.login(mailbox.username, mailbox.password)
+            smtp.send_message(message)
+    except (smtplib.SMTPException, OSError) as exc:
+        record_failure(mailbox, exc)
+        raise

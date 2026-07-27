@@ -31,15 +31,79 @@ caps itself by that as well as by the pool. Follow-ups are outside the quota
 from __future__ import annotations
 
 import logging
+import random
 from datetime import timedelta
 
+from django.db.models import Min
 from django.utils import timezone
 
 from openoutreach.crm.models import DealState
 from openoutreach.core import quota
+from openoutreach.core.conf import MIN_SEND_INTERVAL_SECONDS, SEND_INTERVAL_JITTER_SECONDS
 from openoutreach.core.models import Task
 
 logger = logging.getLogger(__name__)
+
+
+# ── Send pacing ───────────────────────────────────────────────────────
+
+
+def _last_send_anchor():
+    """The clock the next send must be spaced from, or None if nothing is queued
+    or sent yet.
+
+    Two things can put a send in the recent past or near future, and the anchor
+    is the later of them: a message already *sent* (the newest outgoing
+    ChatMessage) and a send already *scheduled* (the furthest-out pending email
+    or follow-up slot). Reading only the first would let two reconcile passes
+    each stack a burst onto an empty-looking queue; reading only the second
+    would let a restart forget everything sent before it.
+    """
+    from openoutreach.chat.models import ChatMessage
+
+    sent = ChatMessage.objects.filter(is_outgoing=True).order_by("-creation_date").first()
+    scheduled = (
+        Task.objects
+        .filter(
+            task_type__in=(Task.TaskType.EMAIL, Task.TaskType.FOLLOW_UP),
+            status=Task.Status.PENDING,
+        )
+        .order_by("-scheduled_at")
+        .first()
+    )
+    stamps = [s for s in (
+        sent.creation_date if sent else None,
+        scheduled.scheduled_at if scheduled else None,
+    ) if s is not None]
+    return max(stamps) if stamps else None
+
+
+def _paced_slots(count: int) -> list:
+    """``count`` send times, each at least ``MIN_SEND_INTERVAL_SECONDS`` after the
+    one before it and after whatever was last sent or scheduled.
+
+    Pool-wide, not per-campaign or per-mailbox: the receiver rate-limits the
+    sending infrastructure, so two campaigns draining at once must share one
+    rhythm rather than each keeping its own. Each gap draws fresh jitter — the
+    spacing has to vary, or a fixed 180s cadence is its own machine signature.
+
+    The first slot is ``now`` when nothing has been sent recently, so an idle
+    daemon still sends immediately on startup; the floor only bites once there
+    is a previous send to be spaced from.
+    """
+    now = timezone.now()
+    cursor = _last_send_anchor()
+    slots = []
+    for _ in range(count):
+        if cursor is None:
+            cursor = now  # nothing to space from — send the first one immediately
+        else:
+            cursor = max(now, cursor + timedelta(
+                seconds=MIN_SEND_INTERVAL_SECONDS
+                + random.uniform(0, SEND_INTERVAL_JITTER_SECONDS),
+            ))
+        slots.append(cursor)
+    return slots
 
 
 # ── Slot creation primitives ──────────────────────────────────────────
@@ -122,89 +186,93 @@ def flush_find_email_queue(session, campaign, allowance: int) -> int:
 
 
 def flush_email_queue(session, campaign, allowance: int) -> int:
-    """Drain the READY_TO_EMAIL pool for *campaign* into immediate task slots.
+    """Mint **one** paced opener slot for *campaign*. Returns 0 or 1.
 
-    The eager counterpart to the window drains: email has no anti-bot rhythm to
-    fake, so every queued deal is emitted as an immediate slot (scheduled ``now``,
-    no spacing) and drains back-to-back. Two throttles: the pool-wide per-box daily
-    cap (``Mailbox.objects.remaining_today()``, re-checked at send time) and this
-    campaign's *allowance* — its share of today's openers under
-    ``core/quota.py``. This is the drain the freemium fraction governs, because an
-    opener is one new person contacted.
+    One slot per call, matching ``flush_find_email_queue``: under send pacing a
+    batch would schedule the whole day up front, which puts the last opener hours
+    out and drags the shared pacing anchor with it — a follow-up minted behind
+    that batch would then wait behind every opener in it, silently overriding the
+    claim priority that puts follow-ups first. Minting one at a time keeps the
+    queue no more than one interval deep, so priority is decided by
+    ``Task.pending()`` again rather than by whoever was minted first.
 
-    No-op when a PENDING email task already exists, no box has headroom, the
-    campaign is out of allowance, or the pool is empty. Count is scoped to
-    ``campaign.pk`` directly because ``reconcile`` does not set ``session.campaign``
-    before invoking it.
+    It also keeps the queue honest: a 40-slot batch bakes in this morning's
+    capacity, while one slot per call re-reads the daily cap, the receiver's
+    verdicts and the quota split every time.
+
+    Two throttles besides the pacing: the pool-wide per-box daily cap
+    (``Mailbox.objects.remaining_today()``, re-checked at send time) and this
+    campaign's *allowance* — its share of today's openers under ``core/quota.py``.
+    This is the drain the freemium fraction governs, because an opener is one new
+    person contacted. Which campaign is offered the slot is ``quota.by_hunger``'s
+    call, in ``reconcile``.
+
+    No-op when a PENDING email task already exists for this campaign, no box has
+    headroom, the campaign is out of allowance, or the pool is empty.
     """
     from openoutreach.crm.models import Deal
     from openoutreach.emails.models import Mailbox
 
     if _has_pending(Task.TaskType.EMAIL, campaign.pk):
         return 0
-
-    remaining = min(Mailbox.objects.remaining_today(), allowance)
-    if remaining <= 0:
+    if min(Mailbox.objects.remaining_today(), allowance) <= 0:
         return 0
 
     queued = Deal.objects.filter(
         campaign_id=campaign.pk,
         state=DealState.READY_TO_EMAIL,
         lead__disqualified=False,
-    ).count()
-    n = min(queued, remaining)
-    if n <= 0:
+    ).exists()
+    if not queued:
         return 0
 
-    now = timezone.now()
-    created = _create_lazy_slots(Task.TaskType.EMAIL, campaign.pk, [now] * n)
-    logger.info(
-        "[%s] flushed %d email slots to send now (queued=%d, budget=%d, allowance=%d)",
-        campaign, created, queued, remaining, allowance,
-    )
-    return created
+    slot = _paced_slots(1)[0]
+    _create_lazy_slots(Task.TaskType.EMAIL, campaign.pk, [slot])
+    logger.info("[%s] flushed 1 email slot for %s (allowance=%d)",
+                campaign, timezone.localtime(slot).strftime("%H:%M"), allowance)
+    return 1
 
 
-def flush_follow_up_queue(session, campaign) -> int:
-    """Drain due EMAILED deals for *campaign* into immediate follow-up slots.
+def flush_follow_up_queue(campaign) -> int:
+    """Mint **one** paced follow-up slot for *campaign*. Returns 0 or 1.
 
-    The follow-up counterpart to ``flush_email_queue``: a follow-up has no anti-bot
-    rhythm to fake, so every EMAILED deal whose countdown (``next_follow_up_at``)
-    is due is emitted as an immediate slot, capped by the pool-wide per-box daily
-    headroom (re-checked at send time). Reading the thread happens inside the
-    handler at that slot — exactly when the countdown fires.
+    Single-slot for the same reason as the opener drain, and minted *before* it in
+    ``reconcile`` so a reply owed to a human takes the earlier slot in the shared
+    rhythm — the time-domain counterpart of ``Task.pending()`` claiming
+    ``follow_up`` first and of ``reconcile`` reserving due follow-ups off the top
+    of the opener budget. Follow-ups ride outside the quota (a reply owed to a
+    human is not new reach), so there is no allowance here, only the pool-wide
+    per-box headroom (re-checked at send time).
 
-    No-op when a PENDING follow-up task already exists, no box has headroom, or
-    nothing is due.
+    Reading the thread happens inside the handler at that slot, so the pacing
+    delay is also fresher thread state.
+
+    No-op when a PENDING follow-up task already exists for this campaign, no box
+    has headroom, or nothing is due.
     """
     from openoutreach.crm.models import Deal
     from openoutreach.emails.models import Mailbox
 
     if _has_pending(Task.TaskType.FOLLOW_UP, campaign.pk):
         return 0
-
-    remaining = Mailbox.objects.remaining_today()
-    if remaining <= 0:
+    if Mailbox.objects.remaining_today() <= 0:
         return 0
 
-    now = timezone.now()
     due = Deal.objects.filter(
         campaign_id=campaign.pk,
         state=DealState.EMAILED,
         outcome="",
         lead__disqualified=False,
-        next_follow_up_at__lte=now,
-    ).count()
-    n = min(due, remaining)
-    if n <= 0:
+        next_follow_up_at__lte=timezone.now(),
+    ).exists()
+    if not due:
         return 0
 
-    created = _create_lazy_slots(Task.TaskType.FOLLOW_UP, campaign.pk, [now] * n)
-    logger.info(
-        "[%s] flushed %d follow_up slots to run now (due=%d, cap_remaining=%d)",
-        campaign, created, due, remaining,
-    )
-    return created
+    slot = _paced_slots(1)[0]
+    _create_lazy_slots(Task.TaskType.FOLLOW_UP, campaign.pk, [slot])
+    logger.info("[%s] flushed 1 follow_up slot for %s",
+                campaign, timezone.localtime(slot).strftime("%H:%M"))
+    return 1
 
 
 # ── Bound poll (collect leg) ──────────────────────────────────────────
@@ -231,6 +299,24 @@ def schedule_collect_email(payload: dict, delay_seconds: float) -> None:
 
 
 # ── Reconciliation ────────────────────────────────────────────────────
+
+
+def _refresh_capacities() -> None:
+    """Re-measure every mailbox's warm capacity, once a day.
+
+    Runs here rather than at send time because it costs an IMAP round trip:
+    reconcile is the once-per-idle-cycle hook, and capacity moves on the scale of
+    days, not sends. Best-effort per box — one unreachable mailbox keeps its last
+    measurement and must not stop the others being measured.
+    """
+    from openoutreach.emails.models import Mailbox
+    from openoutreach.emails.warmth import mark_measured, measurement_due, refresh_capacity
+
+    if not measurement_due():
+        return
+    for box in Mailbox.objects.all():
+        refresh_capacity(box)
+    mark_measured()
 
 
 def _recover_stale_running_tasks() -> int:
@@ -273,24 +359,73 @@ def opener_allowances(campaigns) -> dict[int, int]:
     return quota.allocate(campaigns, budget, quota.opener_counts(campaigns))
 
 
-def reconcile(session) -> None:
-    """Recover stale RUNNING tasks, then top up the drains for every campaign:
-    one ``find_email`` submit slot (if there's send headroom and allowance), every
-    ready opener within allowance, and every due follow-up. Bound ``collect_email``
-    polls are self-chaining and are not reconciled here. Runs on daemon startup and
-    whenever no task is due.
+def _next_follow_up_slot(campaigns) -> int:
+    """Mint one follow-up slot for the campaign owed the oldest reply. Returns 0 or 1.
 
-    Today's opener budget is split across campaigns *before* the drains run
-    (``core/quota.py``), so ``Campaign.action_fraction`` decides the freemium
-    promo's share instead of the race between pipelines deciding it."""
+    Ordered by oldest due rather than by campaign order so a busy campaign cannot
+    starve a quiet one's replies — with a single slot per pass, whoever iterates
+    first would otherwise win every time.
+    """
+    from openoutreach.crm.models import Deal
+
+    oldest = dict(
+        Deal.objects.filter(
+            campaign__in=campaigns,
+            state=DealState.EMAILED,
+            outcome="",
+            lead__disqualified=False,
+            next_follow_up_at__lte=timezone.now(),
+        )
+        .values_list("campaign_id")
+        .annotate(due=Min("next_follow_up_at"))
+    )
+    for campaign in sorted(
+        (c for c in campaigns if c.pk in oldest), key=lambda c: oldest[c.pk],
+    ):
+        if flush_follow_up_queue(campaign):
+            return 1
+    return 0
+
+
+def _next_opener_slot(session, campaigns, allowances: dict[int, int]) -> int:
+    """Mint one opener slot for the campaign furthest below its share. Returns 0 or 1.
+
+    Falls through to the next-hungriest when the first has nothing ready, so the
+    slot is never wasted on a campaign that cannot use it.
+    """
+    for campaign in quota.by_hunger(campaigns, quota.opener_counts(campaigns)):
+        if flush_email_queue(session, campaign, allowances[campaign.pk]):
+            return 1
+    return 0
+
+
+def reconcile(session) -> None:
+    """Recover stale RUNNING tasks, re-measure warm capacity, then top up the drains:
+    one ``find_email`` submit slot per campaign (if there's send headroom and
+    allowance), **one** due follow-up, and **one** ready opener. Bound
+    ``collect_email`` polls are self-chaining and are not reconciled here. Runs on
+    daemon startup and whenever no task is due.
+
+    The two send drains mint a single paced slot each rather than draining their
+    pools, so the queue is never more than one send interval deep. That is what
+    keeps ``Task.pending()``'s claim priority meaningful: a batch would schedule
+    the whole day up front and anything minted afterwards — a follow-up especially
+    — would sit behind all of it regardless of rank. The follow-up drain runs
+    first for the same reason, so a reply owed to a human takes the earlier slot.
+
+    Today's opener budget is still split across campaigns by ``core/quota.py``
+    (``opener_allowances`` bounds what each may buy and send today);
+    ``quota.by_hunger`` then decides who is owed the *next* slot, so
+    ``Campaign.action_fraction`` holds per-send rather than per-day."""
     _recover_stale_running_tasks()
+    _refresh_capacities()
     campaigns = session.campaigns
 
     allowances = opener_allowances(campaigns)
     for campaign in campaigns:
         flush_find_email_queue(session, campaign, allowances[campaign.pk])
-        flush_email_queue(session, campaign, allowances[campaign.pk])
-        flush_follow_up_queue(session, campaign)
+    _next_follow_up_slot(campaigns)
+    _next_opener_slot(session, campaigns, allowances)
 
     quota.log_shares(campaigns)
     pending_count = Task.objects.pending().count()

@@ -14,19 +14,33 @@ PROMPTS_DIR = Path(__file__).parent / "templates" / "prompts"
 FASTEMBED_CACHE_DIR = ROOT_DIR / ".cache" / "fastembed"
 
 # ----------------------------------------------------------------------
-# Onboarding defaults (shown to user during interactive setup)
+# Warm capacity (emails/warmth.py) — the per-box daily send ceiling, *measured*
+# rather than declared. A fixed number can only ever be wrong in one of two
+# directions: it throttles a box that has been carrying more for months, or it
+# hands a box connected an hour ago the volume of a seasoned one. So the box
+# tells us instead — its own Sent folder is the record of what it has actually
+# sustained, which is the only warmth signal available at cold-outreach volume
+# (Google Postmaster needs ~100+/day to Gmail before it reports anything).
+#
+# Read the trailing window's daily counts, take the 75th percentile of the days
+# it actually sent (mean is dragged down by idle days, max is set by a single
+# anomaly), and allow a step above it. The step is multiplicative because the
+# history is *self-referential*: a box's Sent folder is mostly this daemon's own
+# output, so an additive step makes the measurement a one-way ratchet — throttled
+# to 5/day, a +2 step needs three weeks to climb back, while ×1.5 walks
+# 5→9→15→24→38 in under a week. It only applies when the window is clean; a
+# failed send holds capacity at what was already demonstrated.
+#
+# The floor lets a box with no history start somewhere; the ceiling is the top of
+# the evidenced safe band (sources converge on 30–50/day per warmed Google
+# Workspace box), and it is a rail, not a target — measurement decides where in
+# the band a box sits, but nothing measured can argue it past the band. Scale
+# beyond it by adding mailboxes, never by raising this.
 # ----------------------------------------------------------------------
-# Per-mailbox daily email ceiling, set at email onboarding and stored on each
-# Mailbox. Enforced at send time: the EMAIL
-# handler counts a box's outgoing email ChatMessages today and skips a box at
-# its cap. Pool throughput is an emergent consequence, never an enforced
-# aggregate. 40/day sits at the practical ceiling of the 2026 safe band for a
-# warmed Google Workspace box (sources converge on 30–50/day, ~40 a common
-# inbox-level hard ceiling, ~25 the cautious floor after the late-2025
-# deliverability crackdown) — the cap is deliberately not below what a warmed
-# box can carry, since throughput is the scarce resource. Reputation damage is
-# the asymmetric risk; scale past 40 by adding boxes, never by raising this.
-DEFAULT_EMAIL_DAILY_LIMIT = 40
+WARM_HISTORY_DAYS = 30      # trailing window of Sent history to measure
+WARM_GROWTH_FACTOR = 1.5    # step above demonstrated volume, when the window is clean
+WARM_FLOOR_SENDS = 5        # a box with no history still sends this much
+WARM_CEILING_SENDS = 50     # hard rail: the top of the evidenced safe band
 
 # ----------------------------------------------------------------------
 # Proportional send quota (core/quota.py) — the trailing window the freemium
@@ -39,19 +53,25 @@ DEFAULT_EMAIL_DAILY_LIMIT = 40
 QUOTA_WINDOW_DAYS = 30
 
 # ----------------------------------------------------------------------
-# Active-hours schedule (daemon pauses outside this window)
-# Set to False to run 24/7. Working hours are a single contiguous window;
-# weekends are not special-cased.
+# Send pacing (core/scheduler.py) — the minimum gap between two outbound
+# emails across the whole pool. Receivers rate-limit on *burst*, not on the
+# daily total: Gmail answers an unusual sending rate with a 421 4.7.0 deferral
+# regardless of how far below the daily quota you are. Measured against a real
+# box, an unpaced daemon drains a day's openers back-to-back at its own loop
+# time (~11s apart, 40 messages inside one hour) — a machine signature, and
+# several times the ~20/hour Gmail is observed to tolerate.
 #
-# ACTIVE_TIMEZONE is None by default: the window timezone is resolved at
-# runtime from the operator's onboarding country (SiteConfig.country_code;
-# see OperatorSession.active_timezone). Set it to an IANA name here (or via
-# config) to pin the window explicitly.
+# The floor is the low end of the 3–8 minute band the cold-email field
+# converges on; the jitter spans the rest of it. Jitter is not decoration: a
+# send exactly every 180s is as machine-shaped as no spacing at all.
+#
+# This bounds the *rate*, not the day: 24h at a 3-minute floor still permits far
+# more than any box should send, so the measured warm capacity above remains the
+# only thing bounding daily volume. The two guard different failure modes — this
+# one burst throttling, that one volume-based spam classification.
 # ----------------------------------------------------------------------
-ENABLE_ACTIVE_HOURS = False
-ACTIVE_START_HOUR = 9   # inclusive, local time
-ACTIVE_END_HOUR = 19    # exclusive, local time
-ACTIVE_TIMEZONE = None  # None → resolve from the operator's onboarding country
+MIN_SEND_INTERVAL_SECONDS = 180      # 3 minutes, the hard floor between sends
+SEND_INTERVAL_JITTER_SECONDS = 300   # + U[0, 300) → a 3–8 minute spread
 
 # ----------------------------------------------------------------------
 # collect_email poll backoff — the bound leg that polls an in-flight paid
