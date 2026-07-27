@@ -59,7 +59,7 @@ The submit leg only fires when there's mailbox send-headroom for the result toda
 
 **Where:** `emails/tasks/send.py` → `core/agents/outreach.py`
 
-An ungated FIFO queue (paced only by the per-box daily cap) picks the oldest `READY_TO_EMAIL` deal, has the outreach agent open the conversation (its first-touch branch: a Mom Test question, not a pitch), sends it over SMTP (optionally BCC to the operator's own address, gated by `conf.BCC_OPERATOR_ON_SEND` — off by default), records the outgoing `ChatMessage`, and parks the deal at `EMAILED`. `next_follow_up_at` is seeded from the agent's own `follow_up_hours`.
+An ungated FIFO queue (paced only by the per-box daily cap) picks the oldest `READY_TO_EMAIL` deal, has the outreach agent open the conversation (its first-touch branch: a Mom Test question, not a pitch), sends it over SMTP (BCC to the operator's own address on their own campaigns, never on freemium — `emails.sender.operator_bcc`), records the outgoing `ChatMessage`, and parks the deal at `EMAILED`. `next_follow_up_at` is seeded from the agent's own `follow_up_hours`.
 
 ## 7. Agentic follow-up (EMAILED ⟲ → COMPLETED / FAILED)
 

@@ -74,8 +74,7 @@ def handle_follow_up(task, session, qualifiers):
 def _send_reply(session, deal, decision) -> None:
     """Send a threaded reply, record it as an outgoing ChatMessage, re-arm the clock."""
     from openoutreach.chat.models import ChatMessage
-    from openoutreach.core.conf import BCC_OPERATOR_ON_SEND
-    from openoutreach.emails.sender import send_email
+    from openoutreach.emails.sender import operator_bcc, send_email
 
     subject = _reply_subject(deal.email_subject)
     logger.info("[%s] follow_up reply to %s: %s", deal.campaign, deal.lead.profile_url, decision.message)
@@ -84,7 +83,7 @@ def _send_reply(session, deal, decision) -> None:
         deal.lead.email,
         subject,
         decision.message,
-        bcc=session.django_user.email if BCC_OPERATOR_ON_SEND else None,
+        bcc=operator_bcc(session.django_user, deal.campaign),
         in_reply_to=_latest_external_id(deal),
         references=deal.email_message_id,
     )

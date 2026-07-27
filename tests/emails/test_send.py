@@ -12,7 +12,7 @@ from openoutreach.core.models import Task
 from openoutreach.core.scheduler import flush_email_queue
 from openoutreach.crm.models import DealState
 from openoutreach.emails.models import Mailbox
-from openoutreach.emails.sender import ATTRIBUTION, send_email
+from openoutreach.emails.sender import ATTRIBUTION, operator_bcc, send_email
 from openoutreach.emails.tasks.send import handle_email
 from tests.factories import DealFactory, LeadFactory
 
@@ -169,6 +169,21 @@ class TestSendEmailBcc:
         assert message["Bcc"] is None
 
 
+@pytest.mark.django_db
+class TestOperatorBcc:
+    def test_operator_campaign_bccs_the_operator(self, fake_session):
+        assert operator_bcc(fake_session.django_user, fake_session.campaign) == "testuser@example.com"
+
+    def test_freemium_campaign_never_bccs(self, fake_session):
+        fake_session.campaign.is_freemium = True
+        assert operator_bcc(fake_session.django_user, fake_session.campaign) is None
+
+    def test_blank_operator_email_yields_no_bcc(self, fake_session):
+        """An empty address would set an empty Bcc header, not "no copy"."""
+        fake_session.django_user.email = ""
+        assert operator_bcc(fake_session.django_user, fake_session.campaign) is None
+
+
 class TestSendEmailSignature:
     def _sent_body(self, signature: str | None) -> str:
         box = Mailbox(
@@ -258,10 +273,10 @@ class TestHandleEmail:
         deal = _ready(fake_session.campaign, "lead@corp.com")
         send = self._run(fake_session)
 
-        # BCC_OPERATOR_ON_SEND is off by default → no operator BCC.
+        # The operator's own campaign → they get a BCC of their own outreach.
         send.assert_called_once_with(
             box, "lead@corp.com", "Hi there", "Short opener.",
-            bcc=None,
+            bcc="testuser@example.com",
         )
         deal.refresh_from_db()
         assert deal.state == DealState.EMAILED
@@ -270,13 +285,16 @@ class TestHandleEmail:
         assert deal.email_message_id == "<mid@corp.com>"
         assert deal.email_sent_at is not None
 
-    def test_bccs_operator_when_flag_enabled(self, fake_session):
+    def test_no_bcc_on_a_freemium_campaign(self, fake_session):
+        """Freemium outreach is OpenOutreach's own — the operator gets no copy."""
         _box(daily_limit=10)
         _ready(fake_session.campaign, "lead@corp.com")
-        with patch("openoutreach.core.conf.BCC_OPERATOR_ON_SEND", True):
-            send = self._run(fake_session)
+        fake_session.campaign.is_freemium = True
+        fake_session.campaign.save(update_fields=["is_freemium"])
 
-        assert send.call_args.kwargs["bcc"] == "testuser@example.com"
+        send = self._run(fake_session)
+
+        assert send.call_args.kwargs["bcc"] is None
 
     def test_no_op_when_every_box_is_capped(self, fake_session):
         box = _box(daily_limit=1)

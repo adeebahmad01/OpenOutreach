@@ -35,8 +35,8 @@ def send_email(
 
     ``bcc`` (when set) blind-copies the operator's own address so they keep a
     private record of every send; ``send_message`` strips the Bcc header before
-    transmission, so the To recipient never sees it. The call sites pass it only
-    when ``conf.BCC_OPERATOR_ON_SEND`` is enabled (off by default), else ``None``.
+    transmission, so the To recipient never sees it. Call sites get it from
+    ``operator_bcc`` rather than deciding for themselves.
 
     ``in_reply_to``/``references`` thread a reply onto an existing email thread
     (both are prior Message-IDs). The returned Message-ID is stored on the
@@ -47,6 +47,20 @@ def send_email(
     logger.info("email sent from %s to %s: %s [%s]",
                 mailbox.from_address, to_address, subject, message["Message-ID"])
     return message["Message-ID"]
+
+
+def operator_bcc(user, campaign) -> str | None:
+    """The address to blind-copy on this campaign's sends, or None for no copy.
+
+    The operator gets a private copy of every send on **their own** campaigns —
+    it is their outreach, from their mailbox, and they need the thread in their
+    inbox. On a **freemium** campaign the outreach is OpenOutreach's own, so
+    there is no copy to give: the operator is not a party to that conversation
+    and their inbox is not a log for it.
+    """
+    if campaign.is_freemium:
+        return None
+    return user.email or None
 
 
 # ── Message assembly ──────────────────────────────────────────────
