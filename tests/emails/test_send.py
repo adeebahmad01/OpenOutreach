@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from django.utils import timezone
 
-from openoutreach.core.agents.email_opener import EmailDraft
+from openoutreach.core.agents.outreach import OutreachDecision
 from openoutreach.core.db.deals import get_emailable_deals
 from openoutreach.core.models import Task
 from openoutreach.core.scheduler import flush_email_queue
@@ -242,8 +242,11 @@ class TestHandleEmail:
         with patch(
             "openoutreach.core.db.summaries.materialize_profile_summary_if_missing",
         ), patch(
-            "openoutreach.core.agents.email_opener.compose_opener_email",
-            return_value=EmailDraft(subject="Hi there", body="Short opener.", follow_up_hours=48),
+            "openoutreach.core.agents.outreach.run_outreach_agent",
+            return_value=OutreachDecision(
+                action="send_message", subject="Hi there",
+                message="Short opener.", follow_up_hours=48,
+            ),
         ), patch(
             "openoutreach.emails.sender.send_email", return_value="<mid@corp.com>",
         ) as send:

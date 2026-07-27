@@ -1,10 +1,10 @@
 # openoutreach/core/agents/prompt.py
-"""Shared prompt generator for the outreach agents.
+"""Jinja plumbing + the shared context for the outreach prompt.
 
-Both entrypoints — the LinkedIn follow-up agent and the email opener — render
-from one Jinja base (``_outreach_base.j2``: identity, product docs, lead summary,
-Mom Test strategy, shared rules) and fill only their channel-specific blocks. The
-base context here is the shared half; each entrypoint adds its own extras.
+One template renders both the cold open and every in-thread reply
+(``outreach_agent.j2``); ``base_context`` is the half of its variables that
+doesn't depend on where in the thread we are. ``core.agents.outreach`` adds the
+conversation half.
 """
 from __future__ import annotations
 

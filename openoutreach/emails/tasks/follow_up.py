@@ -1,12 +1,10 @@
 # openoutreach/emails/tasks/follow_up.py
 """EMAIL follow-up task — the agentic loop for one due EMAILED deal.
 
-Ports the LinkedIn follow-up handler onto email: pick the oldest EMAILED deal
-whose countdown (``next_follow_up_at``) is due and whose box has headroom, let the
-same follow-up agent read the thread (replies via IMAP) and decide, then execute
-the decision — a threaded SMTP reply, a completion, or a re-armed wait. Reading
-happens at the countdown, exactly as ``sync_conversation`` ran at each LinkedIn
-follow-up slot.
+Pick the oldest EMAILED deal whose countdown (``next_follow_up_at``) is due and
+whose box has headroom, let the outreach agent read the thread (replies via IMAP)
+and decide, then execute the decision — a threaded SMTP reply, a completion, or a
+re-armed wait. Same agent that wrote the opener; it just sees a thread now.
 """
 from __future__ import annotations
 
@@ -48,7 +46,7 @@ def _next_follow_up_deal(campaign):
 
 
 def handle_follow_up(task, session, qualifiers):
-    from openoutreach.core.agents.follow_up import run_follow_up_agent
+    from openoutreach.core.agents.outreach import run_outreach_agent
 
     campaign = session.campaign
 
@@ -60,7 +58,7 @@ def handle_follow_up(task, session, qualifiers):
     public_id = deal.lead.profile_url
     logger.info("[%s] %s %s", campaign, colored("▶ follow_up", "green", attrs=["bold"]), public_id)
 
-    decision = run_follow_up_agent(session, deal)
+    decision = run_outreach_agent(session, deal)
 
     if decision.action == "send_message":
         _send_reply(session, deal, decision)

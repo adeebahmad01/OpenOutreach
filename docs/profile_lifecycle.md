@@ -57,17 +57,17 @@ The submit leg only fires when there's mailbox send-headroom for the result toda
 
 ## 6. Opener (READY_TO_EMAIL → EMAILED)
 
-**Where:** `emails/tasks/send.py` → `core/agents/email_opener.py`
+**Where:** `emails/tasks/send.py` → `core/agents/outreach.py`
 
-An ungated FIFO queue (paced only by the per-box daily cap) picks the oldest `READY_TO_EMAIL` deal, composes a personalized opener, sends it over SMTP (optionally BCC to the operator's own address, gated by `conf.BCC_OPERATOR_ON_SEND` — off by default), records the outgoing `ChatMessage`, and parks the deal at `EMAILED`. `next_follow_up_at` is seeded from the opener agent's own `follow_up_hours`.
+An ungated FIFO queue (paced only by the per-box daily cap) picks the oldest `READY_TO_EMAIL` deal, has the outreach agent open the conversation (its first-touch branch: a Mom Test question, not a pitch), sends it over SMTP (optionally BCC to the operator's own address, gated by `conf.BCC_OPERATOR_ON_SEND` — off by default), records the outgoing `ChatMessage`, and parks the deal at `EMAILED`. `next_follow_up_at` is seeded from the agent's own `follow_up_hours`.
 
 ## 7. Agentic follow-up (EMAILED ⟲ → COMPLETED / FAILED)
 
-**Where:** `emails/tasks/follow_up.py` → `core/agents/follow_up.py`
+**Where:** `emails/tasks/follow_up.py` → `core/agents/outreach.py` (same agent as the opener, now seeing a thread)
 
-**Full documentation:** [`docs/follow_up_agent.md`](follow_up_agent.md)
+**Full documentation:** [`docs/outreach_agent.md`](outreach_agent.md)
 
-A self-rescheduling loop: each due invocation reads IMAP replies (`emails/inbox.py`), folds them into the conversation summary, and asks the LLM for a structured `FollowUpDecision`:
+A self-rescheduling loop: each due invocation reads IMAP replies (`emails/inbox.py`), folds them into the conversation summary, and asks the LLM for a structured `OutreachDecision`:
 
 | Action | Effect |
 |--------|--------|
