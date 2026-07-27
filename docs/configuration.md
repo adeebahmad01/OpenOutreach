@@ -58,7 +58,7 @@ Not user-configurable per campaign; edit the source to change.
 | Key | Value | Description |
 |:----|:------|:------------|
 | `ENABLE_ACTIVE_HOURS` | `True` | `False` → run 24/7. |
-| `ACTIVE_START_HOUR` / `ACTIVE_END_HOUR` | `9` / `19` | Single contiguous active-hours window (no weekend handling). |
+| `ACTIVE_START_HOUR` / `ACTIVE_END_HOUR` | `9` / `19` | Single contiguous active-hours window (the *worker loop's* hours — no weekend handling here; follow-up **due dates** are weekend-free on their own, see below). |
 | `ACTIVE_TIMEZONE` | `None` | `None` → resolved at runtime from the operator's country; set an IANA name to pin it. |
 | `COLLECT_BACKOFF_BASE_S` / `COLLECT_BACKOFF_MAX_S` / `COLLECT_DEADLINE_S` | `5` / `60` / `600` | The `collect_email` poll doubles its delay each still-running attempt (capped at MAX), giving up past DEADLINE. |
 | `DEFAULT_EMAIL_DAILY_LIMIT` | `40` | Per-mailbox warm-safe send ceiling stored on each `Mailbox`. |
@@ -69,5 +69,15 @@ Not user-configurable per campaign; edit the source to change.
 | `CAMPAIGN_CONFIG.break_min/max_seconds` | `600` / `1200` | Break length (10–20 min) after each burst. |
 
 There is **no spend cap and no Poisson pacing** — paid `find_email` spend is gated by mailbox send-headroom, so a lookup only fires when its result could be sent today.
+
+## Working-day pacing
+
+Follow-up gaps are **business time**, with no configuration knob: the agent's `follow_up_hours` is
+advanced through `core/business_time.add_business_hours`, which does not count weekend hours, so 24h
+chosen on a Friday afternoon comes due Monday afternoon and `next_follow_up_at` never lands on a
+Saturday or Sunday. The agent is likewise told the thread's age in **working** days
+(`business_days_between`). Public holidays are not modelled. This is independent of the active-hours
+window above: business time decides *when a follow-up is due*, active hours decide *when the worker
+is awake*.
 
 See [Templating](./templating.md) for follow-up messaging configuration.

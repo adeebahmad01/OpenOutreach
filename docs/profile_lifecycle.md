@@ -59,7 +59,7 @@ The submit leg only fires when there's mailbox send-headroom for the result toda
 
 **Where:** `emails/tasks/send.py` → `core/agents/outreach.py`
 
-An ungated FIFO queue (paced only by the per-box daily cap) picks the oldest `READY_TO_EMAIL` deal, has the outreach agent open the conversation (its first-touch branch: a Mom Test question, not a pitch), sends it over SMTP (BCC to the operator's own address on their own campaigns, never on freemium — `emails.sender.operator_bcc`), records the outgoing `ChatMessage`, and parks the deal at `EMAILED`. `next_follow_up_at` is seeded from the agent's own `follow_up_hours`.
+An ungated FIFO queue (paced only by the per-box daily cap) picks the oldest `READY_TO_EMAIL` deal, has the outreach agent open the conversation (its first-touch branch: a Mom Test question, not a pitch), sends it over SMTP (BCC to the operator's own address on their own campaigns, never on freemium — `emails.sender.operator_bcc`), records the outgoing `ChatMessage`, and parks the deal at `EMAILED`. `next_follow_up_at` is seeded from the agent's own `follow_up_hours`, in business hours.
 
 ## 7. Agentic follow-up (EMAILED ⟲ → COMPLETED / FAILED)
 
@@ -75,7 +75,7 @@ A self-rescheduling loop: each due invocation reads IMAP replies (`emails/inbox.
 | `wait` | Push `next_follow_up_at` out, no send |
 | `mark_completed` | Close the Deal with the agent's `Outcome` |
 
-The LLM owns pacing via its own `follow_up_hours`. Paced by the per-box daily cap.
+The LLM owns pacing via its own `follow_up_hours`, counted in **business** hours (`core/business_time`) — weekends don't count down and nothing comes due on a Sat/Sun. Paced by the per-box daily cap.
 
 ## 8. Terminal states
 

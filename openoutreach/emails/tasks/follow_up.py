@@ -5,6 +5,9 @@ Pick the oldest EMAILED deal whose countdown (``next_follow_up_at``) is due and
 whose box has headroom, let the outreach agent read the thread (replies via IMAP)
 and decide, then execute the decision — a threaded SMTP reply, a completion, or a
 re-armed wait. Same agent that wrote the opener; it just sees a thread now.
+
+The countdown it re-arms is in *business* hours (``core.business_time``), so a
+gap chosen on a Friday afternoon lands on the following working day, not a weekend.
 """
 from __future__ import annotations
 
@@ -13,6 +16,7 @@ import logging
 from django.utils import timezone
 from termcolor import colored
 
+from openoutreach.core.business_time import add_business_hours
 from openoutreach.crm.models import DealState
 
 logger = logging.getLogger(__name__)
@@ -96,7 +100,7 @@ def _send_reply(session, deal, decision) -> None:
         owner=session.django_user,
         creation_date=now,
     )
-    deal.next_follow_up_at = now + _hours(decision.follow_up_hours)
+    deal.next_follow_up_at = add_business_hours(now, decision.follow_up_hours)
     deal.save(update_fields=["next_follow_up_at"])
 
 
@@ -111,7 +115,7 @@ def _complete(session, deal, decision) -> None:
 
 def _rearm(deal, decision) -> None:
     """No send — just push the countdown out by the agent's chosen interval."""
-    deal.next_follow_up_at = timezone.now() + _hours(decision.follow_up_hours)
+    deal.next_follow_up_at = add_business_hours(timezone.now(), decision.follow_up_hours)
     deal.save(update_fields=["next_follow_up_at"])
 
 
@@ -139,9 +143,3 @@ def _latest_external_id(deal) -> str:
         .first()
     )
     return latest or deal.email_message_id
-
-
-def _hours(follow_up_hours: float):
-    from datetime import timedelta
-
-    return timedelta(hours=follow_up_hours)

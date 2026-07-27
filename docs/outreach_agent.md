@@ -29,7 +29,7 @@ handle_email()                            handle_follow_up()
 | `wait` | Push `next_follow_up_at` out, no send. |
 | `mark_completed` | Close the Deal `COMPLETED` with the agent's `Outcome`. |
 
-A first touch is constrained to `send_message` **with** a `subject` (`_validate_opener`) — there is nothing to wait for or complete before the thread exists. The LLM owns pacing end-to-end via `follow_up_hours` (there is no hardcoded default). Sends are bounded by the per-mailbox daily cap.
+A first touch is constrained to `send_message` **with** a `subject` (`_validate_opener`) — there is nothing to wait for or complete before the thread exists. The LLM owns pacing end-to-end via `follow_up_hours` (there is no hardcoded default). Those are **business** hours: `core/business_time.add_business_hours` stamps the countdown so weekend hours don't tick and no follow-up comes due on a Saturday or Sunday, and the prompt is told the thread's age in **working** days (`business_days_between`) rather than calendar days. Sends are bounded by the per-mailbox daily cap.
 
 ## Summaries
 

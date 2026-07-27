@@ -285,6 +285,21 @@ class TestHandleEmail:
         assert deal.email_message_id == "<mid@corp.com>"
         assert deal.email_sent_at is not None
 
+    def test_follow_up_countdown_skips_the_weekend(self, fake_session):
+        """A Friday opener with a 48h gap comes due Tuesday, not Sunday."""
+        from datetime import datetime, timezone as dt_timezone
+
+        _box(daily_limit=10)
+        deal = _ready(fake_session.campaign, "lead@corp.com")
+        friday = datetime(2026, 3, 20, 14, 0, tzinfo=dt_timezone.utc)
+
+        with patch("openoutreach.emails.tasks.send.timezone.now", return_value=friday):
+            self._run(fake_session)
+
+        deal.refresh_from_db()
+        assert deal.next_follow_up_at == datetime(2026, 3, 24, 14, 0, tzinfo=dt_timezone.utc)
+        assert deal.next_follow_up_at.weekday() < 5
+
     def test_no_bcc_on_a_freemium_campaign(self, fake_session):
         """Freemium outreach is OpenOutreach's own — the operator gets no copy."""
         _box(daily_limit=10)

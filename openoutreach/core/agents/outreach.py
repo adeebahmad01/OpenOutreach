@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field, model_validator
 from pydantic_ai import Agent
 
 from openoutreach.core.agents.prompt import _format_facts, base_context, render
+from openoutreach.core.business_time import business_days_between
 from openoutreach.core.llm import get_llm_model, run_agent_sync
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,10 @@ class OutreachDecision(BaseModel):
         description="Why the conversation ended. Required when action='mark_completed'.",
     )
     follow_up_hours: float = Field(
-        description="Hours until the next follow-up. Always required — you decide the pace.",
+        description=(
+            "Working hours until the next follow-up — weekends do not count, so 24 means "
+            "the next working day. Always required — you decide the pace."
+        ),
     )
 
     @model_validator(mode="after")
@@ -128,7 +132,7 @@ def _render_system_prompt(session, deal, recent_messages: list, is_first_touch: 
         "chat_summary": _format_facts(deal.chat_summary),
         "recent_messages": _format_recent_messages(recent_messages, now),
         "today": now.strftime("%Y-%m-%d"),
-        "days_since_last_outgoing": _days_since_last_outgoing(recent_messages, now),
+        "business_days_since_last_outgoing": _business_days_since_last_outgoing(recent_messages, now),
         "unanswered_outgoing": _count_unanswered_outgoing(recent_messages),
     }
     return render(
@@ -176,12 +180,16 @@ def _humanize_age(when: datetime, now: datetime) -> str:
     return f"{delta.days}d ago"
 
 
-def _days_since_last_outgoing(messages: list, now: datetime) -> int | None:
-    """Whole days since the most recent outgoing message, or None if there are none."""
+def _business_days_since_last_outgoing(messages: list, now: datetime) -> int | None:
+    """Whole working days since the most recent outgoing message, or None if there are none.
+
+    Weekends don't count — a Friday send read on Monday is one working day old,
+    which is the gap the agent should pace against.
+    """
     timestamps = [m.creation_date for m in messages if m.is_outgoing and m.creation_date]
     if not timestamps:
         return None
-    return max((now - max(timestamps)).days, 0)
+    return business_days_between(max(timestamps), now)
 
 
 def _count_unanswered_outgoing(messages: list) -> int:

@@ -14,12 +14,12 @@ Each concern lives where it's cohesive; this module is just the orchestration:
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
 
 from django.utils import timezone
 from termcolor import colored
 
 from openoutreach.chat.models import ChatMessage
+from openoutreach.core.business_time import add_business_hours
 from openoutreach.crm.models import DealState
 
 logger = logging.getLogger(__name__)
@@ -61,8 +61,9 @@ def _record_sent_email(session, deal, mailbox, opener, message_id) -> None:
     write commits both: the email can never be sent without leaving READY_TO_EMAIL
     (no double-send window), and EMAILED is never set without its audit fields.
     ``next_follow_up_at`` is seeded from the agent's own ``follow_up_hours`` — it
-    owns the first gap just as it owns every later one — so the loop reads replies
-    + acts when that countdown fires. The opener is also written as the thread's
+    owns the first gap just as it owns every later one — counted in business hours
+    so the countdown never expires on a weekend, so the loop reads replies + acts
+    when that countdown fires. The opener is also written as the thread's
     first outgoing ChatMessage — the next turn reads it, and the per-box cap counts
     it (``email_message_id`` is the thread root the reply-reader matches on, and
     the flag that tells the agent this is no longer a first touch).
@@ -72,7 +73,7 @@ def _record_sent_email(session, deal, mailbox, opener, message_id) -> None:
     deal.email_subject = opener.subject
     deal.email_message_id = message_id
     deal.email_sent_at = now
-    deal.next_follow_up_at = now + timedelta(hours=opener.follow_up_hours)
+    deal.next_follow_up_at = add_business_hours(now, opener.follow_up_hours)
     deal.state = DealState.EMAILED
     deal.save(update_fields=[
         "mailbox", "email_subject", "email_message_id", "email_sent_at",
