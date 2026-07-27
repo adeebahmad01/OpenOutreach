@@ -174,7 +174,11 @@ def _submit_lookup(session, campaign, deal, public_id) -> None:
 
 def _mint_email_slot(session, campaign) -> None:
     """Queue an opener for a freshly-ready deal so the send preempts the next
-    find_email on the very next claim (email outranks find_email in the queue)."""
-    from openoutreach.core.scheduler import flush_email_queue
+    find_email on the very next claim (email outranks find_email in the queue).
 
-    flush_email_queue(session, campaign)
+    Still bounded by the campaign's opener allowance: reaching READY_TO_EMAIL off
+    the free hub cache is a shortcut past the paid leg, not past the quota."""
+    from openoutreach.core.scheduler import flush_email_queue, opener_allowances
+
+    allowance = opener_allowances(session.campaigns)[campaign.pk]
+    flush_email_queue(session, campaign, allowance)

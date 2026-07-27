@@ -29,6 +29,16 @@ FASTEMBED_CACHE_DIR = ROOT_DIR / ".cache" / "fastembed"
 DEFAULT_EMAIL_DAILY_LIMIT = 40
 
 # ----------------------------------------------------------------------
+# Proportional send quota (core/quota.py) — the trailing window the freemium
+# ``action_fraction`` is measured over. The ledger is derived from
+# ``Deal.email_sent_at``, so this is the only knob: all-time counting would make
+# the ledger unbounded debt (one overshoot silences a campaign forever), while a
+# window lets the ratio self-heal as history rolls off. 30 days is long enough to
+# smooth a stalled week and short enough that a correction lands this month.
+# ----------------------------------------------------------------------
+QUOTA_WINDOW_DAYS = 30
+
+# ----------------------------------------------------------------------
 # Active-hours schedule (daemon pauses outside this window)
 # Set to False to run 24/7. Working hours are a single contiguous window;
 # weekends are not special-cased.

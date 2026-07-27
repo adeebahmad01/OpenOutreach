@@ -1,9 +1,11 @@
 # openoutreach/core/admin.py
 from django.contrib import admin
 
+from openoutreach.core.conf import QUOTA_WINDOW_DAYS
 from openoutreach.core.models import (
     Campaign, Clause, DiscoveryQuery, EmptyClauseSet, SiteConfig, Task,
 )
+from openoutreach.core.quota import realized_share
 from openoutreach.discovery import describe_filters
 
 
@@ -20,8 +22,19 @@ class SiteConfigAdmin(admin.ModelAdmin):
 
 @admin.register(Campaign)
 class CampaignAdmin(admin.ModelAdmin):
-    list_display = ("name", "booking_link", "is_freemium", "action_fraction")
+    list_display = (
+        "name", "booking_link", "is_freemium", "action_fraction", "opener_share",
+    )
     filter_horizontal = ("users",)
+
+    @admin.display(description=f"openers ({QUOTA_WINDOW_DAYS}d)")
+    def opener_share(self, obj):
+        """Realized share of recent openers, next to the target it's held to.
+
+        The declared ``action_fraction`` and the actual split had no reason to
+        agree until the quota landed, and nothing displayed the gap.
+        """
+        return f"{100 * realized_share(obj):.0f}%"
 
 
 @admin.register(DiscoveryQuery)

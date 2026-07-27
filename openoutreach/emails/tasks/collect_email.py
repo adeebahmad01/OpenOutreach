@@ -86,14 +86,15 @@ def _on_hit(session, campaign, deal, public_id, email) -> None:
     """Persist the address, give it back to the hub (paid hit), route to send."""
     from openoutreach.contacts import service as contacts
     from openoutreach.core.db.deals import set_profile_state
-    from openoutreach.core.scheduler import flush_email_queue
+    from openoutreach.core.scheduler import flush_email_queue, opener_allowances
 
     deal.lead.email = email
     deal.lead.save(update_fields=["email"])
     contacts.contribute(session, deal.lead, [email], contacts.ORIGIN_BETTERCONTACT)
     set_profile_state(session, public_id, DealState.READY_TO_EMAIL.value, log=False)
-    # Queue the opener now so the send preempts the next find_email on claim.
-    flush_email_queue(session, campaign)
+    # Queue the opener now so the send preempts the next find_email on claim —
+    # within this campaign's opener allowance (core/quota.py).
+    flush_email_queue(session, campaign, opener_allowances(session.campaigns)[campaign.pk])
     logger.info("%s", step_line("hit", f"{email} → {DealState.READY_TO_EMAIL.name}", glyph="✓", color="green"))
 
 

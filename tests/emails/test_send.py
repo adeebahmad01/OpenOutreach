@@ -17,6 +17,11 @@ from openoutreach.emails.tasks.send import handle_email
 from tests.factories import DealFactory, LeadFactory
 
 
+# Allowance high enough never to bind — these cases exercise the *other*
+# bounds (pool headroom, pending guard). The quota split has its own tests.
+_UNCAPPED = 10_000
+
+
 def _box(email="a@b.com", daily_limit=10):
     return Mailbox.objects.create(
         username=email, password="pw", from_address=email, daily_limit=daily_limit,
@@ -118,25 +123,25 @@ class TestFlushEmailQueue:
 
     def test_no_op_without_a_mailbox(self, fake_session):
         _ready(fake_session.campaign)
-        assert flush_email_queue(fake_session, fake_session.campaign) == 0
+        assert flush_email_queue(fake_session, fake_session.campaign, allowance=_UNCAPPED) == 0
         assert self._pending_emails(fake_session.campaign) == 0
 
     def test_no_op_on_empty_pool(self, fake_session):
         _box()
-        assert flush_email_queue(fake_session, fake_session.campaign) == 0
+        assert flush_email_queue(fake_session, fake_session.campaign, allowance=_UNCAPPED) == 0
 
     def test_creates_one_slot_per_queued_deal(self, fake_session):
         _box(daily_limit=10)
         _ready(fake_session.campaign, "x@c.com")
         _ready(fake_session.campaign, "y@c.com")
-        assert flush_email_queue(fake_session, fake_session.campaign) == 2
+        assert flush_email_queue(fake_session, fake_session.campaign, allowance=_UNCAPPED) == 2
         assert self._pending_emails(fake_session.campaign) == 2
 
     def test_capped_by_pool_headroom(self, fake_session):
         _box(daily_limit=1)
         _ready(fake_session.campaign, "x@c.com")
         _ready(fake_session.campaign, "y@c.com")
-        assert flush_email_queue(fake_session, fake_session.campaign) == 1
+        assert flush_email_queue(fake_session, fake_session.campaign, allowance=_UNCAPPED) == 1
 
     def test_no_op_when_email_task_already_pending(self, fake_session):
         _box(daily_limit=10)
@@ -146,7 +151,7 @@ class TestFlushEmailQueue:
             scheduled_at=timezone.now(),
             payload={"campaign_id": fake_session.campaign.pk},
         )
-        assert flush_email_queue(fake_session, fake_session.campaign) == 0
+        assert flush_email_queue(fake_session, fake_session.campaign, allowance=_UNCAPPED) == 0
         assert self._pending_emails(fake_session.campaign) == 1
 
 

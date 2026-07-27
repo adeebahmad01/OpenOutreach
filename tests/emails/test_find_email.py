@@ -22,6 +22,11 @@ from openoutreach.emails.tasks.collect_email import handle_collect_email
 from openoutreach.emails.tasks.find_email import handle_find_email
 from tests.factories import DealFactory, LeadFactory
 
+
+# Allowance high enough never to bind — these cases exercise the *other*
+# bounds (pool headroom, pending guard). The quota split has its own tests.
+_UNCAPPED = 10_000
+
 pytestmark = pytest.mark.django_db
 
 
@@ -220,7 +225,7 @@ class TestFindEmailDrain:
 
     def _flush(self, session, configured=True):
         with patch("openoutreach.emails.bettercontact.is_configured", return_value=configured):
-            return flush_find_email_queue(session, session.campaign)
+            return flush_find_email_queue(session, session.campaign, allowance=_UNCAPPED)
 
     def test_no_op_without_mailbox(self, fake_session):
         assert self._flush(fake_session) == 0
