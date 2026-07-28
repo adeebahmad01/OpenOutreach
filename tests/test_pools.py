@@ -1,6 +1,6 @@
 # tests/test_pools.py
 """The qualify/discover engine: ``_advance`` (one unit of work — explore, exploit, or
-the cold-start pass that does both) and ``find_candidate`` (the loop that surfaces a
+the cold-phase pass that does both) and ``find_candidate`` (the loop that surfaces a
 ready lead). Mock
 fetch_qualification_candidates, run_qualification, discover, find_ready_candidate,
 and promote_to_ready at the pools import site.
@@ -23,10 +23,15 @@ PROFILE_URL = "https://www.linkedin.com/in/alice/"
 CANDIDATE = {"lead_id": 1, "profile_url": PROFILE_URL, "meta": {}}
 
 
-def _qualifier(mode, probs=None):
+def _qualifier(mode, probs=None, has_real_positive=True):
     """A qualifier in ``mode`` ("exploit (p)" / "explore (BALD)" / None) scoring the
-    pool at ``probs`` (None is an unfitted GP)."""
+    pool at ``probs`` (None is an unfitted GP).
+
+    ``has_real_positive`` is the engine's phase test and is independent of ``mode``: an
+    anchored cold campaign is fitted and ranks fine, it just has no observed positive
+    yet. Defaults True so the explore/exploit cases skip the cold branch."""
     qualifier = Mock()
+    qualifier.has_real_positive = has_real_positive
     qualifier.acquisition_mode.return_value = mode
     qualifier.predict_probs.return_value = (
         None if probs is None else np.asarray(probs, dtype=float)
@@ -111,14 +116,16 @@ class TestAdvanceExplore:
         mock_discover.assert_called_once()
 
 
-class TestAdvanceColdStart:
-    """An unfitted GP (``acquisition_mode`` None) does both moves every pass — one query
-    in, one label out. Nothing is ranked in this state, so neither move dominates."""
+class TestAdvanceColdPhase:
+    """No lead has ever qualified, so every ranking rests on the anchors' guess — do
+    both moves every pass, one query in and one label out. Keyed on
+    ``has_real_positive``, not on fittedness: an anchored campaign ranks fine and still
+    belongs here."""
 
     def test_discovers_and_labels_in_the_same_pass(self):
         pool = [Mock(embedding_array=np.zeros(384))]
         with _engine(pool, discovered=100) as (mock_qualify, mock_discover):
-            assert _advance("session", _qualifier(None)) is True
+            assert _advance("session", _qualifier("explore (BALD)", has_real_positive=False)) is True
 
         mock_discover.assert_called_once()
         assert mock_qualify.call_args.kwargs["candidates"] == pool
@@ -133,7 +140,7 @@ class TestAdvanceColdStart:
                   return_value=PROFILE_URL) as mock_qualify,
             patch("openoutreach.core.pipeline.pools.discover", return_value=100),
         ):
-            assert _advance("session", _qualifier(None)) is True
+            assert _advance("session", _qualifier("explore (BALD)", has_real_positive=False)) is True
 
         mock_fetch.assert_called_once()  # not fetched before the discover
         assert mock_qualify.call_args.kwargs["candidates"] == grown
@@ -143,14 +150,14 @@ class TestAdvanceColdStart:
         return is ignored, so only an empty pool stalls."""
         pool = [Mock(embedding_array=np.zeros(384))]
         with _engine(pool, discovered=0) as (mock_qualify, mock_discover):
-            assert _advance("session", _qualifier(None)) is True
+            assert _advance("session", _qualifier("explore (BALD)", has_real_positive=False)) is True
 
         mock_discover.assert_called_once()
         assert mock_qualify.call_args.kwargs["candidates"] == pool
 
     def test_stalls_only_when_nothing_is_left_to_label(self):
         with _engine([], discovered=0) as (mock_qualify, mock_discover):
-            assert _advance("session", _qualifier(None)) is False
+            assert _advance("session", _qualifier("explore (BALD)", has_real_positive=False)) is False
 
         mock_discover.assert_called_once()
         mock_qualify.assert_not_called()

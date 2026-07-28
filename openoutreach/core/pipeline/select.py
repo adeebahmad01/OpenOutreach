@@ -305,6 +305,16 @@ def next_query(campaign, qualifier) -> NextQuery | None:
         return None
 
     candidates = _candidates(campaign, pool)
+
+    # Cold phase — no lead has qualified yet, so no vein has been shown to hold
+    # anything. Deepening one would be paging further into a region on the strength of
+    # a guess; the campaign's open question is *which region*, and only a fresh query
+    # answers it. Offset 0 only, and if nothing fresh remains the walk reports
+    # saturation so ``discover`` mints new clause values — widening the pool rather
+    # than drilling the part of it we already hold.
+    if not qualifier.has_real_positive:
+        candidates = [q for q in candidates if q.offset == 0]
+
     if not candidates:
         return None
 

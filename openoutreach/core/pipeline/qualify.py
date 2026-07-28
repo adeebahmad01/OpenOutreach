@@ -27,40 +27,6 @@ def fetch_qualification_candidates(session):
     )
 
 
-# ── cold-start selection ─────────────────────────────────────────────
-
-
-def farthest_from_labelled(labelled: np.ndarray, embeddings: np.ndarray) -> tuple[int, float]:
-    """Index of the candidate farthest from every labelled lead, and that distance.
-
-    Greedy k-center: score each candidate by the distance to its *nearest* labelled
-    embedding, take the argmax. One label per call makes the whole cold-start run a
-    farthest-point traversal of the pool.
-
-    This is the selector while the GP cannot fit — a run whose labels are all one class
-    (every first run, where the LLM rejects everything until the ICP is right) never
-    produces a posterior, so neither BALD nor P(f>0.5) is available. The fallback it
-    replaces was ``candidates[0]``, i.e. ``creation_date`` order, which spends the whole
-    LLM budget walking one query's page of near-identical leads before it ever reaches
-    another region. Distance needs no model, so coverage still improves every call: we
-    either find the first positive or convict the seed ICP in tens of labels, not
-    hundreds.
-    """
-    cand = np.asarray(embeddings, dtype=np.float64)
-    lab = np.asarray(labelled, dtype=np.float64)
-
-    # ‖a-b‖² = ‖a‖² + ‖b‖² - 2a·b — the matmul form, so the (N, M) distance matrix is
-    # built without materializing an (N, M, dim) difference tensor.
-    d2 = (
-        (cand ** 2).sum(axis=1)[:, None]
-        + (lab ** 2).sum(axis=1)[None, :]
-        - 2.0 * cand @ lab.T
-    )
-    nearest = np.maximum(d2.min(axis=1), 0.0)  # clamp float error below zero
-    best = int(np.argmax(nearest))
-    return best, float(np.sqrt(nearest[best]))
-
-
 def run_qualification(session, qualifier: BayesianQualifier, candidates=None) -> str | None:
     """Qualify one unlabelled profile via the LLM. Returns profile_url or None.
 
@@ -69,9 +35,10 @@ def run_qualification(session, qualifier: BayesianQualifier, candidates=None) ->
     never spent on a lead that would park at QUALIFIED. Defaults to the whole
     unlabelled pool, which is what the explore state wants.
 
-    Which candidate gets the call is the qualifier's balance-driven strategy — or, before
-    the GP can fit, the farthest-from-labelled pick (``farthest_from_labelled``). The
-    verdict itself is always the LLM's.
+    Which candidate gets the call is the qualifier's balance-driven strategy; the
+    verdict itself is always the LLM's. On a cold campaign that strategy runs against a
+    GP anchored on synthetic ideal profiles (``icp.generate_anchors``) rather than
+    against no model at all.
     """
     from openoutreach.core.ml.qualifier import qualify_with_llm, format_prediction
 
@@ -82,7 +49,7 @@ def run_qualification(session, qualifier: BayesianQualifier, candidates=None) ->
 
     logger.info(colored("▶ qualify", "blue", attrs=["bold"]))
 
-    # Candidate selection: balance-driven acquisition once the GP fits, coverage before it
+    # Balance-driven candidate selection
     selection_score = None
     if len(candidates) == 1:
         candidate = candidates[0]
@@ -91,20 +58,10 @@ def run_qualification(session, qualifier: BayesianQualifier, candidates=None) ->
         result = qualifier.acquisition_scores(embeddings)
 
         if result is None:
-            # Cold start — no posterior yet. Cover the pool instead of walking it in
-            # discovery order (``farthest_from_labelled``); with nothing labelled at
-            # all there is no reference point, so take the oldest lead as the seed.
-            labelled = qualifier.labelled_embeddings
-            if len(labelled) == 0:
-                candidate = candidates[0]
-            else:
-                best_idx, distance = farthest_from_labelled(labelled, embeddings)
-                candidate = candidates[best_idx]
-                selection_score = ("diversity", distance)
-                n_neg, n_pos = qualifier.class_counts
-                logger.info("Strategy: %s (neg=%d, pos=%d)",
-                            colored("diversity (cold start)", "cyan", attrs=["bold"]),
-                            n_neg, n_pos)
+            # No posterior at all. An anchored campaign always has one, so this is the
+            # degraded path: anchoring failed (LLM outage, no ICP text) and the label
+            # set is still single-class. Oldest first — nothing here can rank.
+            candidate = candidates[0]
         else:
             strategy, scores = result
             best_idx = int(np.argmax(scores))

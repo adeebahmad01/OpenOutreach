@@ -36,9 +36,10 @@ class _GP:
     candidate ``i``.
     """
 
-    def __init__(self, scores, mode="exploit (p)"):
+    def __init__(self, scores, mode="exploit (p)", has_real_positive=True):
         self._scores = scores
         self._mode = mode
+        self.has_real_positive = has_real_positive
 
     def _slice(self, embeddings):
         return np.array(self._scores[: len(embeddings)], dtype=np.float64)
@@ -56,8 +57,16 @@ class _GP:
         return self._mode, self._slice(embeddings)
 
 
-class _ColdGP:
-    """An unfitted GP — no signal, so selection uses the deterministic fallback."""
+class _UnfittedGP:
+    """A GP with no posterior — selection falls back to the deterministic order.
+
+    ``has_real_positive`` is a *separate* axis from fittedness now that anchors let a
+    cold campaign fit: it defaults True here so these cases exercise the fallback
+    ordering alone, and the cold-phase rule (offset 0 only) is tested explicitly.
+    """
+
+    def __init__(self, has_real_positive=True):
+        self.has_real_positive = has_real_positive
 
     def acquisition_mode(self):
         return None
@@ -88,7 +97,7 @@ class TestMaximals:
         ]
 
     def test_empty_pool_selects_nothing(self, db):
-        assert next_query(_campaign(), _ColdGP()) is None
+        assert next_query(_campaign(), _UnfittedGP()) is None
 
 
 # ── selection ────────────────────────────────────────────────────────
@@ -102,7 +111,7 @@ class TestNextQuery:
             ("lead_location", "Japan"),
         ]))
         with _stub_embed():
-            q = next_query(campaign, _ColdGP())
+            q = next_query(campaign, _UnfittedGP())
         # CMO was added first → lowest pool rank → the seed-closest maximal, offset 0
         assert q == NextQuery([("lead_job_title", "CMO"), ("lead_location", "Japan")], 0)
 
@@ -134,8 +143,37 @@ class TestNextQuery:
         campaign.clauses.set(Clause.rows_for(seed))
         persist_fetched(campaign, seed, offset=0)  # already fetched, not exhausted
         with _stub_embed():
-            q = next_query(campaign, _ColdGP())
+            q = next_query(campaign, _UnfittedGP())
         assert q == NextQuery(seed, 100)  # its next page
+
+    def test_cold_phase_never_deepens(self, db):
+        """Nothing has qualified, so no vein is known to hold anything — the fetched
+        line's next page is withheld and a fresh maximal is taken instead."""
+        campaign = _campaign()
+        campaign.clauses.set(Clause.rows_for([
+            ("lead_job_title", "CMO"), ("lead_job_title", "CTO"),
+            ("lead_location", "Japan"),
+        ]))
+        persist_fetched(campaign, [("lead_job_title", "CMO"), ("lead_location", "Japan")], 0)
+        with _stub_embed():
+            q = next_query(campaign, _UnfittedGP(has_real_positive=False))
+
+        assert q.offset == 0
+        assert q.clauses == [("lead_job_title", "CTO"), ("lead_location", "Japan")]
+
+    def test_cold_phase_saturates_rather_than_deepening(self, db):
+        """With every maximal fetched once, the only candidates left are deepens. The
+        walk reports saturation so ``discover`` mints new clause values — widening the
+        pool instead of drilling the part of it we already hold."""
+        campaign = _campaign()
+        seed = [("lead_location", "Japan")]
+        campaign.clauses.set(Clause.rows_for(seed))
+        persist_fetched(campaign, seed, offset=0)
+        with _stub_embed():
+            assert next_query(campaign, _UnfittedGP(has_real_positive=False)) is None
+        # ...and the same pool still deepens once something has qualified.
+        with _stub_embed():
+            assert next_query(campaign, _UnfittedGP()) == NextQuery(seed, 100)
 
     def test_exhausted_line_is_not_a_candidate(self, db):
         campaign = _campaign()
@@ -144,7 +182,7 @@ class TestNextQuery:
         persist_fetched(campaign, seed, offset=0)
         mark_exhausted(campaign, seed)
         with _stub_embed():
-            assert next_query(campaign, _ColdGP()) is None  # nothing left → saturated
+            assert next_query(campaign, _UnfittedGP()) is None  # nothing left → saturated
 
     def test_a_recorded_empty_subset_prunes_the_maximal(self, db):
         # Anti-monotone: a maximal whose subset is recorded empty is dead without a
@@ -155,7 +193,7 @@ class TestNextQuery:
         ]))
         record_empty([("lead_job_title", "CMO")])
         with _stub_embed():
-            assert next_query(campaign, _ColdGP()) is None
+            assert next_query(campaign, _UnfittedGP()) is None
 
 
 # ── backoff ──────────────────────────────────────────────────────────
@@ -236,7 +274,7 @@ class TestBackoff:
             ("lead_department", "Technology"),  # family absent from the pool
         ])
         with _stub_embed():
-            q = next_query(campaign, _ColdGP())  # must not raise KeyError
+            q = next_query(campaign, _UnfittedGP())  # must not raise KeyError
         assert q is not None
         assert all(family != "lead_department" for family, _ in q.clauses)
 

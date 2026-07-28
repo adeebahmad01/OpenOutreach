@@ -23,9 +23,19 @@ class SiteConfigAdmin(admin.ModelAdmin):
 @admin.register(Campaign)
 class CampaignAdmin(admin.ModelAdmin):
     list_display = (
-        "name", "booking_link", "is_freemium", "action_fraction", "opener_share",
+        "name", "booking_link", "is_freemium", "action_fraction", "opener_share", "phase",
     )
     filter_horizontal = ("users",)
+
+    @admin.display(description="phase")
+    def phase(self, obj):
+        """Cold (still steering on invented profiles) vs learning (a lead qualified).
+
+        The anchors change what the engine does — the GP fits on them, discovery stays
+        shallow — so which phase a campaign is in should not need a log dig to answer.
+        """
+        n = len(obj.anchor_profiles or [])
+        return f"cold ({n} anchor{'' if n == 1 else 's'})" if n else "learning"
 
     @admin.display(description=f"openers ({QUOTA_WINDOW_DAYS}d)")
     def opener_share(self, obj):

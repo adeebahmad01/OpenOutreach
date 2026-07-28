@@ -185,31 +185,38 @@ class BayesianQualifier:
         self._campaign = campaign
         self._X: list[np.ndarray] = []
         self._y: list[int] = []
+        # Synthetic ideal-lead embeddings, all label 1 — kept apart from the real
+        # observations so retiring them is a single assignment and can never drop a
+        # real label with them. See ``set_anchors``.
+        self._anchor_X: list[np.ndarray] = []
         self._fitted = False
         self._rng = np.random.RandomState(seed)
 
     @property
     def n_obs(self) -> int:
-        return len(self._y)
+        return len(self._y) + len(self._anchor_X)
 
     @property
     def class_counts(self) -> tuple[int, int]:
-        """Return (n_negatives, n_positives)."""
-        n_pos = sum(self._y)
-        return len(self._y) - n_pos, n_pos
+        """Return (n_negatives, n_positives) — anchors counted as positives.
+
+        Counting them is what keeps the acquisition axis honest during the cold phase:
+        the anchors *are* the model's positive class there, so hiding them would report
+        ``pos=0`` against a growing pile of rejections and pin the qualifier to exploit
+        on a posterior that only exists because of them.
+        """
+        n_pos = sum(self._y) + len(self._anchor_X)
+        return len(self._y) - sum(self._y), n_pos
 
     @property
-    def labelled_embeddings(self) -> np.ndarray:
-        """Labelled observations as an ``(n_obs, embedding_dim)`` array.
+    def has_real_positive(self) -> bool:
+        """Whether a real lead has ever qualified — the end of the cold phase.
 
-        Exposed for cold-start candidate selection: before both classes exist the GP
-        cannot fit, so there is no posterior to score with — but the labelled points
-        themselves still say which regions of the embedding space are already covered.
-        Empty ``(0, dim)`` when nothing is labelled yet.
+        The engine's phase test, not a model-fitting one: with anchors the GP fits from
+        the first pass, so "is it fitted?" no longer distinguishes a campaign that knows
+        something from one that has only ever been told what to hope for.
         """
-        if not self._X:
-            return np.empty((0, self.embedding_dim), dtype=np.float64)
-        return np.array(self._X, dtype=np.float64)
+        return any(self._y)
 
     @property
     def pipeline(self):
@@ -222,10 +229,58 @@ class BayesianQualifier:
     # ------------------------------------------------------------------
 
     def update(self, embedding: np.ndarray, label: int):
-        """Record a new labelled observation.  Model is lazily re-fitted."""
+        """Record a new labelled observation.  Model is lazily re-fitted.
+
+        A positive label ends the cold phase, so it retires the anchors first: the
+        guess has been superseded by a lead a human-facing LLM actually accepted, and
+        keeping both would let an invented profile keep pulling on a model that now has
+        ground truth.
+        """
+        if label == 1:
+            self._drop_anchors()
         self._X.append(embedding.astype(np.float64).ravel())
         self._y.append(int(label))
         self._fitted = False
+
+    # ------------------------------------------------------------------
+    # Anchors  (synthetic positives for the cold phase)
+    # ------------------------------------------------------------------
+
+    def set_anchors(self, embeddings: np.ndarray):
+        """Seed synthetic positives so the GP can fit before any real lead qualifies.
+
+        Without them a first run is unfittable, not merely uninformed: every verdict is
+        a rejection until the ICP is right, one class yields no posterior, and BALD,
+        P(f>0.5), the promote gate and the query selector all go dark together for the
+        whole cold phase. One imagined positive region restores every one of them.
+
+        Ignored once a real positive exists (the cold phase is over) or when anchors are
+        already set, so this is safe to call on every daemon boot.
+        """
+        if self.has_real_positive or self._anchor_X:
+            return
+        self._anchor_X = [np.asarray(e, dtype=np.float64).ravel() for e in embeddings]
+        self._fitted = False
+
+    def _drop_anchors(self):
+        """Retire the anchors, in memory and on the campaign. Idempotent."""
+        if not self._anchor_X:
+            return
+        n = len(self._anchor_X)
+        self._anchor_X = []
+        self._fitted = False
+        if self._campaign is not None:
+            self._campaign.anchor_profiles = []
+            self._campaign.anchor_embeddings = None
+            self._campaign.save(update_fields=["anchor_profiles", "anchor_embeddings"])
+        logger.info("Cold phase over for campaign %s — dropped %d anchor(s), a real lead "
+                    "qualified", self._campaign, n)
+
+    def _training_arrays(self) -> tuple[np.ndarray, np.ndarray]:
+        """Real observations plus any anchors, as ``(X, y)`` — what the GP fits on."""
+        X = self._X + self._anchor_X
+        y = self._y + [1] * len(self._anchor_X)
+        return np.array(X, dtype=np.float64), np.array(y, dtype=np.float64)
 
     # ------------------------------------------------------------------
     # Lazy refit
@@ -240,9 +295,9 @@ class BayesianQualifier:
         """Fit StandardScaler + GPR pipeline if dirty and feasible.  Returns True when model is usable."""
         if self._fitted:
             return True
-        if len(self._y) < 2:
+        X_arr, y_arr = self._training_arrays()
+        if len(y_arr) < 2:
             return False
-        y_arr = np.array(self._y, dtype=np.float64)
         if len(np.unique(y_arr)) < 2:
             return False  # need both classes
 
@@ -251,8 +306,15 @@ class BayesianQualifier:
         from sklearn.pipeline import Pipeline
         from sklearn.preprocessing import StandardScaler
 
-        X_arr = np.array(self._X, dtype=np.float64)
-        X_fit, y_fit = self._balance(X_arr, y_arr)
+        # Balancing guards against one *observed* class swamping the other. While the
+        # positives are anchors it would do the opposite of its job: the minority is a
+        # handful of invented points, so the cap would subsample hundreds of real
+        # rejections down to a few and discard nearly everything the campaign has
+        # actually learned. The anchors' pull is local to their own neighbourhood
+        # anyway (RBF kernel), which is exactly the shape wanted here.
+        X_fit, y_fit = (
+            self._balance(X_arr, y_arr) if self.has_real_positive else (X_arr, y_arr)
+        )
         n = X_fit.shape[0]
 
         self._pipeline = Pipeline([
@@ -268,8 +330,8 @@ class BayesianQualifier:
         lml = self._pipeline.named_steps['gpr'].log_marginal_likelihood_value_
 
         self._fitted = True
-        logger.debug("GPR fitted on %d observations (%d after balancing, LML=%.2f)",
-                      len(self._y), n, lml)
+        logger.debug("GPR fitted on %d observations (%d anchors, %d after balancing, "
+                      "LML=%.2f)", self.n_obs, len(self._anchor_X), n, lml)
         self._persist_pipeline()
         return True
 
@@ -455,11 +517,16 @@ class BayesianQualifier:
     # ------------------------------------------------------------------
 
     def warm_start(self, X: np.ndarray, y: np.ndarray):
-        """Bulk-load historical labels and fit once."""
+        """Bulk-load historical labels and fit once.
+
+        Replaces the *real* observations only — anchors are set separately and after,
+        so the daemon's boot order (warm_start, then anchor an all-negative campaign)
+        holds regardless of which runs first.
+        """
         self._X = [X[i].astype(np.float64).ravel() for i in range(len(X))]
         self._y = [int(y[i]) for i in range(len(y))]
         self._fitted = False
-        if len(self._X) >= 2:
+        if self.n_obs >= 2:
             self._fit_if_needed()
 
 

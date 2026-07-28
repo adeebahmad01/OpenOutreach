@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from openoutreach.core.ml.qualifier import BayesianQualifier
-from openoutreach.core.pipeline.qualify import farthest_from_labelled, run_qualification
+from openoutreach.core.pipeline.qualify import run_qualification
 
 
 def _make_lead(profile_url="https://www.linkedin.com/in/alice/", profile_text="engineer at acme",
@@ -119,45 +119,11 @@ class TestRunQualification:
 
 
 @pytest.mark.django_db
-class TestColdStartSelection:
-    """Selection while the GP cannot fit — every label one class, so no posterior.
+class TestUnanchoredSelection:
+    """The degraded path: anchoring failed, so the label set is still single-class and
+    no posterior exists to rank with. Oldest first — nothing here can rank."""
 
-    This is the first-run state: the LLM rejects everything until the seed ICP is
-    right, so ``acquisition_scores`` stays None and the pick has to come from the
-    labelled points alone.
-    """
-
-    def test_picks_farthest_from_labelled_lead(self, fake_session):
-        from datetime import timedelta
-
-        from django.utils import timezone
-
-        now = timezone.now()
-        # Oldest first (the order the pre-diversity fallback would have taken), and
-        # deliberately the lead nearest the labelled point.
-        _make_lead("https://www.linkedin.com/in/near/", "near", _axis(0),
-                   creation_date=now - timedelta(hours=2))
-        _make_lead("https://www.linkedin.com/in/mid/", "mid", _axis(1),
-                   creation_date=now - timedelta(hours=1))
-        _make_lead("https://www.linkedin.com/in/far/", "far", _axis(2, scale=5.0),
-                   creation_date=now)
-
-        qualifier = BayesianQualifier(seed=42)
-        # Two rejections, one class — the GP stays unfitted, exactly the cold state.
-        qualifier.update(_axis(0), 0)
-        qualifier.update(_axis(0), 0)
-        assert qualifier.acquisition_mode() is None
-
-        with (
-            patch("openoutreach.core.ml.qualifier.qualify_with_llm",
-                  return_value=(0, "Bad fit")),
-            patch("openoutreach.core.db.deals.create_disqualified_deal"),
-        ):
-            result = run_qualification(fake_session, qualifier)
-
-        assert result == "https://www.linkedin.com/in/far/"
-
-    def test_falls_back_to_oldest_when_nothing_labelled_yet(self, fake_session):
+    def test_falls_back_to_oldest(self, fake_session):
         from datetime import timedelta
 
         from django.utils import timezone
@@ -178,26 +144,3 @@ class TestColdStartSelection:
             result = run_qualification(fake_session, qualifier)
 
         assert result == "https://www.linkedin.com/in/first/"
-
-
-class TestFarthestFromLabelled:
-    def test_scores_by_nearest_labelled_point(self):
-        labelled = np.array([_axis(0), _axis(2, scale=5.0)], dtype=np.float64)
-        candidates = np.array([_axis(0), _axis(1), _axis(2, scale=4.0)], dtype=np.float64)
-
-        index, distance = farthest_from_labelled(labelled, candidates)
-
-        # axis-1 is sqrt(2) from axis-0; axis-2@4.0 is only 1.0 from axis-2@5.0, so
-        # the nearest-labelled score — not the farthest-labelled one — decides.
-        assert index == 1
-        assert distance == pytest.approx(np.sqrt(2.0))
-
-    def test_handles_a_candidate_identical_to_a_labelled_point(self):
-        """Coincident points give distance 0 — the subtraction must not go negative."""
-        labelled = np.array([_axis(0)], dtype=np.float64)
-        candidates = np.array([_axis(0)], dtype=np.float64)
-
-        index, distance = farthest_from_labelled(labelled, candidates)
-
-        assert index == 0
-        assert distance == pytest.approx(0.0)

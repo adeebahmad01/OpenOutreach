@@ -12,21 +12,23 @@ one. It loops over three moves, cheapest first:
 ``_advance`` is the whole steering, and it is just the qualifier's own explore/exploit
 split (``acquisition_mode``, driven by class balance):
 
-- **cold start** (``acquisition_mode`` is None — the GP cannot fit) — do **both** moves
-  every pass: one query in, one label out. Nothing is ranked in this state, neither the
-  leads nor the queries, so there is no signal saying a label is worth more than a page
-  or the reverse; a rule that picks one would be a preference dressed as a policy.
-  Interleaving needs no threshold to tune and no scale to calibrate, and it is what the
-  cold state wants anyway — discovery is free, and every page opens a region the
-  coverage walk (``qualify.farthest_from_labelled``) can then pick across, so breadth
-  arrives while selection is still a walk rather than a ranking. It also cannot stall:
-  discovery's return is ignored, so a saturated pool or a provider outage still leaves
-  a lead to label.
-- **explore** (``neg ≤ pos``, GP fitted) — label the most *informative* lead in the pool
-  (max BALD). No gate: a low-confidence lead is exactly the label that teaches the GP
-  the most, so filtering by confidence here would throw away the point of exploring.
-  The GP ranks the pool now, so labelling *is* the better move and discovery waits for
-  the pool to run dry (there's always a max-BALD lead unless there are no leads at all).
+- **cold phase** (``has_real_positive`` is False — nothing has ever qualified) — do
+  **both** moves every pass: one query in, one label out. Every ranking in play here
+  rests on the anchors' *guess* at the ICP (``icp.generate_anchors``), so there is no
+  observed signal saying a label is worth more than a page or the reverse, and a rule
+  that picked one would be a preference dressed as a policy. Interleaving needs no
+  threshold to tune, and it is what the phase wants anyway — discovery is free, so every
+  page opens a region the label can then be picked across. It cannot stall: discovery's
+  return is ignored, so a saturated pool or a provider outage still leaves a lead to
+  label. Discovery stays **shallow** throughout (``select.next_query`` offers offset 0
+  only until something qualifies): no vein has been shown to hold anything, so paging
+  deeper into one would drill on the strength of the same guess.
+- **explore** (``neg ≤ pos``, past the cold phase) — label the most *informative* lead in
+  the pool (max BALD). No gate: a low-confidence lead is exactly the label that teaches
+  the GP the most, so filtering by confidence here would throw away the point of
+  exploring. The GP now ranks the pool on real positives, so labelling *is* the better
+  move and discovery waits for the pool to run dry (there's always a max-BALD lead
+  unless there are no leads at all).
 - **exploit** (``neg > pos``) — prefer the strongest lead clearing ``min_gp_confidence``
   (``consumable_candidates``), the one whose qualification will buy an email rather than
   park at QUALIFIED. When none clears the gate, fall back to labelling the best lead
@@ -88,22 +90,22 @@ def _advance(session, qualifier: BayesianQualifier) -> bool:
     docstring. Returns False only when the engine has nothing left to do: nothing worth
     labelling and nothing left to discover.
     """
-    mode = qualifier.acquisition_mode()
-
-    # Cold start — the GP cannot fit, so nothing is ranked: not which lead is worth a
-    # label, not which query is worth a fetch. With no signal saying one move beats the
-    # other, do both every pass — one query in, one label out. Discovery is free and
-    # each page opens a region the label can then be picked across, so the pool grows
-    # broad exactly while selection is a coverage walk (``farthest_from_labelled``)
-    # rather than a ranking. Discovery's return is deliberately ignored: a saturated or
-    # unavailable provider still leaves a pool to label, and only an empty pool stalls.
-    if mode is None:
+    # Cold phase — no lead has ever qualified, so every ranking in play rests on the
+    # anchors' guess at the ICP rather than on anything observed. Do both moves every
+    # pass: one query in, one label out. Nothing here says a label is worth more than a
+    # page or the reverse, and a rule that picked one would be a preference dressed as a
+    # policy. Discovery is free, and each page opens a region the label can then be
+    # picked across, so breadth accumulates for exactly as long as the campaign is
+    # guessing. Discovery's return is deliberately ignored: a saturated pool or a
+    # provider outage still leaves leads to label, and only an empty pool stalls.
+    if not qualifier.has_real_positive:
         discover(session, qualifier)
         candidates = fetch_qualification_candidates(session)
         if not candidates:
             return False
         return run_qualification(session, qualifier, candidates=candidates) is not None
 
+    mode = qualifier.acquisition_mode()
     candidates = fetch_qualification_candidates(session)
 
     # Exploit — convert the strongest lead clearing the paid-spend gate. If none

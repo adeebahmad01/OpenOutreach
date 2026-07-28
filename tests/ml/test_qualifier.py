@@ -206,3 +206,99 @@ class TestExplainProfile:
         profile = {"lead_id": 1, "profile_url": "https://linkedin.com/in/alice/"}
         explanation = qualifier.explain(profile)
         assert "not fitted" in explanation.lower()
+
+
+class TestAnchors:
+    """Synthetic positives that let a GP fit before any real lead has qualified.
+
+    The cold phase is the state this exists for: every LLM verdict is a rejection until
+    the ICP is right, and a single-class label set produces no posterior at all.
+    """
+
+    @staticmethod
+    def _anchors(seed=0):
+        rng = np.random.RandomState(seed)
+        return rng.randn(3, 384).astype(np.float32) + 1.0
+
+    def test_anchors_make_an_all_negative_qualifier_fit(self):
+        qualifier = BayesianQualifier(seed=42)
+        rng = np.random.RandomState(1)
+        for _ in range(5):
+            qualifier.update(rng.randn(384).astype(np.float32) - 1.0, 0)
+        assert qualifier.acquisition_mode() is None  # single class — nothing to fit
+
+        qualifier.set_anchors(self._anchors())
+
+        assert qualifier.acquisition_mode() is not None
+        assert qualifier.predict_probs(self._anchors()) is not None
+
+    def test_anchors_count_as_positives_but_not_as_real_ones(self):
+        qualifier = BayesianQualifier(seed=42)
+        qualifier.update(np.zeros(384, dtype=np.float32), 0)
+        qualifier.set_anchors(self._anchors())
+
+        assert qualifier.class_counts == (1, 3)
+        assert qualifier.n_obs == 4
+        assert qualifier.has_real_positive is False
+
+    def test_a_real_positive_drops_the_anchors(self):
+        qualifier = BayesianQualifier(seed=42)
+        qualifier.update(np.zeros(384, dtype=np.float32), 0)
+        qualifier.set_anchors(self._anchors())
+
+        qualifier.update(np.ones(384, dtype=np.float32), 1)
+
+        assert qualifier.has_real_positive is True
+        assert qualifier.class_counts == (1, 1)  # the anchors are gone, not counted
+        assert qualifier.n_obs == 2
+
+    def test_a_rejection_keeps_the_anchors(self):
+        """Only a positive ends the cold phase — rejections are what it is made of."""
+        qualifier = BayesianQualifier(seed=42)
+        qualifier.set_anchors(self._anchors())
+
+        qualifier.update(np.zeros(384, dtype=np.float32), 0)
+
+        assert qualifier.class_counts == (1, 3)
+        assert qualifier.has_real_positive is False
+
+    def test_anchoring_is_ignored_once_a_real_positive_exists(self):
+        """Safe to call on every daemon boot — a warm campaign must not be re-anchored."""
+        qualifier = BayesianQualifier(seed=42)
+        qualifier.update(np.ones(384, dtype=np.float32), 1)
+        qualifier.update(np.zeros(384, dtype=np.float32), 0)
+
+        qualifier.set_anchors(self._anchors())
+
+        assert qualifier.class_counts == (1, 1)
+
+    def test_anchoring_twice_does_not_stack(self):
+        qualifier = BayesianQualifier(seed=42)
+        qualifier.set_anchors(self._anchors())
+        qualifier.set_anchors(self._anchors(seed=7))
+
+        assert qualifier.class_counts == (0, 3)
+
+    def test_real_negatives_are_not_subsampled_away_by_the_anchors(self):
+        """``_balance`` caps the majority at 2x the minority. With 3 synthetic positives
+        that would throw away all but 6 of the real rejections — the opposite of its job,
+        so balancing is skipped until a real positive exists."""
+        qualifier = BayesianQualifier(seed=42)
+        rng = np.random.RandomState(2)
+        for _ in range(50):
+            qualifier.update(rng.randn(384).astype(np.float32) - 1.0, 0)
+        qualifier.set_anchors(self._anchors())
+
+        with patch.object(BayesianQualifier, "_balance",
+                          side_effect=AssertionError("must not balance while anchored")):
+            assert qualifier.acquisition_mode() is not None
+
+    def test_warm_start_leaves_anchors_intact(self):
+        """Boot order is warm_start then anchor, but neither may clobber the other."""
+        qualifier = BayesianQualifier(seed=42)
+        qualifier.set_anchors(self._anchors())
+
+        qualifier.warm_start(np.zeros((2, 384), dtype=np.float32), np.array([0, 0]))
+
+        assert qualifier.class_counts == (2, 3)
+        assert qualifier.has_real_positive is False

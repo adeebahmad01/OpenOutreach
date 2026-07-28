@@ -91,8 +91,10 @@ def _build_qualifiers(campaigns, cfg, kit_model=None):
     """Create a qualifier for every campaign, keyed by campaign PK.
 
     Freemium campaigns use the pre-trained kit model (``KitQualifier``) when one
-    is available; every other campaign gets a warm-started GP qualifier.
+    is available; every other campaign gets a warm-started GP qualifier, anchored on
+    synthetic ideal profiles while it is still waiting for its first real positive.
     """
+    from openoutreach.core.pipeline.icp import ensure_anchors
     from openoutreach.crm.models import Lead
 
     qualifiers: dict[int, BayesianQualifier | KitQualifier] = {}
@@ -117,6 +119,22 @@ def _build_qualifiers(campaigns, cfg, kit_model=None):
                 + " for campaign %s",
                 len(y), int((y == 1).sum()), int((y == 0).sum()), campaign,
             )
+
+        # Cold phase — no lead has ever qualified, so every label is one class and the
+        # GP cannot fit at all. Anchor it on invented ideal profiles so acquisition,
+        # the promote gate and the query selector work from the first pass; they are
+        # dropped the moment a real lead qualifies.
+        if not q.has_real_positive:
+            anchors = ensure_anchors(campaign)
+            if anchors is not None:
+                q.set_anchors(anchors)
+                logger.info(
+                    colored("GP anchored", "cyan")
+                    + " on %d synthetic ideal profile(s) for campaign %s"
+                    + " — no lead has qualified yet",
+                    len(anchors), campaign,
+                )
+
         qualifiers[campaign.pk] = q
 
     return qualifiers

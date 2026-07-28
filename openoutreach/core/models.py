@@ -96,6 +96,21 @@ class Campaign(models.Model):
     # ``core/pipeline/mint.py``.
     discovery_minted_at_qualified = models.IntegerField(default=0)
 
+    # The cold-phase priors: synthetic ideal-lead profiles the LLM invented from
+    # product_docs + campaign_target (``pipeline/icp.generate_anchors``), and their
+    # embeddings as one (N, dim) float32 blob. They are handed to the GP as positives so
+    # it can fit before any real lead has qualified — a label set that is all rejections
+    # has one class and yields no posterior at all.
+    #
+    # **These are never leads.** They exist only as GP observations and as the operator's
+    # window (in Admin) onto what the model currently believes a good lead looks like; no
+    # Lead or Deal row is ever created from them and nobody is ever emailed. Both fields
+    # are cleared the moment a real lead qualifies — the cold phase is over, real ground
+    # truth supersedes the guess, and a campaign carrying anchors is exactly a campaign
+    # still waiting for its first positive.
+    anchor_profiles = models.JSONField(default=list, blank=True)
+    anchor_embeddings = models.BinaryField(null=True, blank=True)
+
     def __str__(self):
         return self.name
 
