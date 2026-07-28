@@ -199,6 +199,19 @@ class BayesianQualifier:
         return len(self._y) - n_pos, n_pos
 
     @property
+    def labelled_embeddings(self) -> np.ndarray:
+        """Labelled observations as an ``(n_obs, embedding_dim)`` array.
+
+        Exposed for cold-start candidate selection: before both classes exist the GP
+        cannot fit, so there is no posterior to score with — but the labelled points
+        themselves still say which regions of the embedding space are already covered.
+        Empty ``(0, dim)`` when nothing is labelled yet.
+        """
+        if not self._X:
+            return np.empty((0, self.embedding_dim), dtype=np.float64)
+        return np.array(self._X, dtype=np.float64)
+
+    @property
     def pipeline(self):
         """The fitted sklearn Pipeline — serializable via joblib."""
         self._fit_if_needed()
