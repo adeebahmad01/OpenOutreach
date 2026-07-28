@@ -12,19 +12,21 @@ one. It loops over three moves, cheapest first:
 ``_advance`` is the whole steering, and it is just the qualifier's own explore/exploit
 split (``acquisition_mode``, driven by class balance):
 
-- **explore** (``neg ≤ pos``, or cold start) — label the most *informative* lead in the
-  pool (max BALD). No gate: a low-confidence lead is exactly the label that teaches the
-  GP the most, so filtering by confidence here would throw away the point of exploring.
-  If the pool is empty, discover a page first (there's always a max-BALD lead unless
-  there are no leads at all). A pool can also be deep but *stale* — every lead in it a
-  near-duplicate of one already labelled — and then a label is nearly worthless while a
-  fetch is free, so ``qualify.pool_is_covered`` widens first: it fires when even the
-  most novel candidate sits closer to the labelled set than the labelled leads sit to
-  each other. That is a distance against a distance in one fixed embedding space with
-  no model fitted — read the ``pool_is_covered`` docstring for why it is not a third of
-  the bars below. And it only reorders the two moves: when discovery can't widen
-  (saturated, provider down) the label still happens, so unlike a gate on labelling it
-  has no stall state.
+- **cold start** (``acquisition_mode`` is None — the GP cannot fit) — do **both** moves
+  every pass: one query in, one label out. Nothing is ranked in this state, neither the
+  leads nor the queries, so there is no signal saying a label is worth more than a page
+  or the reverse; a rule that picks one would be a preference dressed as a policy.
+  Interleaving needs no threshold to tune and no scale to calibrate, and it is what the
+  cold state wants anyway — discovery is free, and every page opens a region the
+  coverage walk (``qualify.farthest_from_labelled``) can then pick across, so breadth
+  arrives while selection is still a walk rather than a ranking. It also cannot stall:
+  discovery's return is ignored, so a saturated pool or a provider outage still leaves
+  a lead to label.
+- **explore** (``neg ≤ pos``, GP fitted) — label the most *informative* lead in the pool
+  (max BALD). No gate: a low-confidence lead is exactly the label that teaches the GP
+  the most, so filtering by confidence here would throw away the point of exploring.
+  The GP ranks the pool now, so labelling *is* the better move and discovery waits for
+  the pool to run dry (there's always a max-BALD lead unless there are no leads at all).
 - **exploit** (``neg > pos``) — prefer the strongest lead clearing ``min_gp_confidence``
   (``consumable_candidates``), the one whose qualification will buy an email rather than
   park at QUALIFIED. When none clears the gate, fall back to labelling the best lead
@@ -54,11 +56,7 @@ import numpy as np
 from openoutreach.core.conf import CAMPAIGN_CONFIG
 from openoutreach.core.ml.qualifier import BayesianQualifier
 from openoutreach.core.pipeline.discover import discover
-from openoutreach.core.pipeline.qualify import (
-    fetch_qualification_candidates,
-    pool_is_covered,
-    run_qualification,
-)
+from openoutreach.core.pipeline.qualify import fetch_qualification_candidates, run_qualification
 from openoutreach.core.pipeline.ready_pool import find_ready_candidate, promote_to_ready
 
 logger = logging.getLogger(__name__)
@@ -83,12 +81,29 @@ def consumable_candidates(qualifier: BayesianQualifier, candidates: list) -> lis
 
 
 def _advance(session, qualifier: BayesianQualifier) -> bool:
-    """Spend one unit of work — label a lead or discover leads. Returns whether it did.
+    """Spend one unit of work — label a lead, discover leads, or (cold) both. Returns
+    whether it did.
 
-    Explore vs exploit is the qualifier's balance-driven acquisition mode; see the
-    module docstring. Returns False only when the engine has nothing left to do:
-    nothing worth labelling and nothing left to discover.
+    Which move is the qualifier's balance-driven acquisition mode; see the module
+    docstring. Returns False only when the engine has nothing left to do: nothing worth
+    labelling and nothing left to discover.
     """
+    mode = qualifier.acquisition_mode()
+
+    # Cold start — the GP cannot fit, so nothing is ranked: not which lead is worth a
+    # label, not which query is worth a fetch. With no signal saying one move beats the
+    # other, do both every pass — one query in, one label out. Discovery is free and
+    # each page opens a region the label can then be picked across, so the pool grows
+    # broad exactly while selection is a coverage walk (``farthest_from_labelled``)
+    # rather than a ranking. Discovery's return is deliberately ignored: a saturated or
+    # unavailable provider still leaves a pool to label, and only an empty pool stalls.
+    if mode is None:
+        discover(session, qualifier)
+        candidates = fetch_qualification_candidates(session)
+        if not candidates:
+            return False
+        return run_qualification(session, qualifier, candidates=candidates) is not None
+
     candidates = fetch_qualification_candidates(session)
 
     # Exploit — convert the strongest lead clearing the paid-spend gate. If none
@@ -96,7 +111,7 @@ def _advance(session, qualifier: BayesianQualifier) -> bool:
     # paid BetterContact credit, not the free LLM call, and labelling is what lifts the
     # GP's confidence so a lead *can* clear it. Discovering instead would freeze the
     # class balance and burn Lead Finder calls on an already-deep idle pool forever.
-    if qualifier.acquisition_mode() == "exploit (p)":
+    if mode == "exploit (p)":
         consumable = consumable_candidates(qualifier, candidates)
         if consumable:
             return run_qualification(session, qualifier, candidates=consumable) is not None
@@ -104,21 +119,13 @@ def _advance(session, qualifier: BayesianQualifier) -> bool:
             return run_qualification(session, qualifier, candidates=candidates) is not None
         return discover(session, qualifier) > 0
 
-    # Explore / cold start — label the most informative lead we have (max BALD, no
-    # gate). An empty pool is the one case with no lead to label: page one in first.
+    # Explore — label the most informative lead we have (max BALD, no gate). The GP is
+    # fitted here, so it ranks the pool and there is a best lead to pick; an empty pool
+    # is the one case with no lead to label, so page one in first.
     if not candidates:
         if discover(session, qualifier) <= 0:
             return False
         candidates = fetch_qualification_candidates(session)
-    elif pool_is_covered(qualifier, candidates):
-        # The pool is deep but not *new* — even its most novel lead re-samples ground
-        # the labelled set already covers, so a label here buys almost nothing. Widen
-        # first, then label from the enlarged pool. Failing to widen (saturated pool,
-        # provider down) falls through to labelling anyway: this decides *what to do
-        # first*, never whether to label at all, so it cannot stall the way a gate on
-        # labelling would.
-        if discover(session, qualifier) > 0:
-            candidates = fetch_qualification_candidates(session)
     return run_qualification(session, qualifier, candidates=candidates) is not None
 
 

@@ -7,7 +7,6 @@ import logging
 import numpy as np
 from termcolor import colored
 
-from openoutreach.core.conf import CAMPAIGN_CONFIG
 from openoutreach.core.ml.qualifier import BayesianQualifier
 
 logger = logging.getLogger(__name__)
@@ -62,67 +61,6 @@ def farthest_from_labelled(labelled: np.ndarray, embeddings: np.ndarray) -> tupl
     return best, float(np.sqrt(nearest[best]))
 
 
-def labelled_resolution(labelled: np.ndarray) -> float | None:
-    """Mean nearest-neighbour distance *within* the labelled set — the resolution at
-    which the space has been sampled so far. ``None`` under two labels.
-
-    This is the reference scale for ``pool_is_covered``: it says how finely we have
-    already sampled, in the same units as a candidate's distance to the labelled set,
-    read from the data rather than picked by hand.
-    """
-    lab = np.asarray(labelled, dtype=np.float64)
-    if len(lab) < 2:
-        return None
-
-    sq_norms = (lab ** 2).sum(axis=1)
-    d2 = sq_norms[:, None] + sq_norms[None, :] - 2.0 * lab @ lab.T
-    np.fill_diagonal(d2, np.inf)  # a point's nearest neighbour is not itself
-    return float(np.sqrt(np.maximum(d2.min(axis=1), 0.0)).mean())
-
-
-def pool_is_covered(qualifier: BayesianQualifier, candidates) -> bool:
-    """Whether the pool holds nothing meaningfully new against what's already labelled.
-
-    True when even the *most novel* candidate — the one ``farthest_from_labelled``
-    would pick — sits closer to the labelled set than the labelled leads typically sit
-    to each other (``labelled_resolution``, scaled by ``novelty_ratio``). That is the
-    honest statement of "we already have a lead this close": another label here re-samples
-    a region we have covered, so the explore branch should widen the funnel instead.
-
-    **Why this is not a third "is this pool promising?" bar.** The two that failed (see
-    ``pools.py``) compared an out-of-sample GP score against a bar calibrated on
-    in-sample ones — two populations a fitted model never puts on one scale. This
-    compares a distance to a distance, in one fixed embedding space, with no model
-    fitted at all; ``novelty_ratio`` multiplies a scale measured from the labelled set
-    each time it is asked, so there is no number in embedding units to drift. It also
-    self-limits: firing it fetches a page, the fresh leads push the max-min distance
-    back up, and it stays shut for many labels afterwards.
-
-    False whenever the comparison can't be made (no candidates, under two labels) — the
-    caller must keep labelling, never stall.
-    """
-    if not candidates:
-        return False
-
-    labelled = qualifier.labelled_embeddings
-    resolution = labelled_resolution(labelled)
-    if resolution is None:
-        return False
-
-    embeddings = np.array([c.embedding_array for c in candidates], dtype=np.float32)
-    _, novelty = farthest_from_labelled(labelled, embeddings)
-
-    covered = novelty < CAMPAIGN_CONFIG["novelty_ratio"] * resolution
-    if covered:
-        logger.info(
-            colored("pool covered", "cyan")
-            + " — best candidate is %.4f from the labelled set, which samples the space"
-              " at %.4f; widening instead of labelling",
-            novelty, resolution,
-        )
-    return covered
-
-
 def run_qualification(session, qualifier: BayesianQualifier, candidates=None) -> str | None:
     """Qualify one unlabelled profile via the LLM. Returns profile_url or None.
 
@@ -144,7 +82,7 @@ def run_qualification(session, qualifier: BayesianQualifier, candidates=None) ->
 
     logger.info(colored("▶ qualify", "blue", attrs=["bold"]))
 
-    # Candidate selection: balance-driven acquisition once the GP fits, coverage before
+    # Candidate selection: balance-driven acquisition once the GP fits, coverage before it
     selection_score = None
     if len(candidates) == 1:
         candidate = candidates[0]

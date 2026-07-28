@@ -100,15 +100,6 @@ CAMPAIGN_CONFIG = {
     # two were tried and both were constants in disguise (see pools.py). Discovery
     # steering lives on the GP that also ranks leads (select.py), not on a threshold.
     "mint_every_n_qualified": 5,
-    # Coverage ratio for the explore branch's widen-vs-label choice (pipeline/qualify.py
-    # ``pool_is_covered``). The pool is "covered" when its most novel candidate sits
-    # closer to the labelled set than the labelled leads typically sit to each other —
-    # i.e. this multiplies a scale read from the data, it is not a bar in embedding
-    # units. 1.0 states the comparison with no fudge factor; below 1 widens later, above
-    # 1 widens sooner. Unlike the two retired "is this pool promising?" bars, both sides
-    # are distances in one fixed metric space with no model fitted, so there is no
-    # in-sample/out-of-sample scale to mismatch.
-    "novelty_ratio": 1.0,
     "embedding_model": "BAAI/bge-small-en-v1.5",
 }
 
