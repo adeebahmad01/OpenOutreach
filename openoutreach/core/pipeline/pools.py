@@ -16,7 +16,15 @@ split (``acquisition_mode``, driven by class balance):
   pool (max BALD). No gate: a low-confidence lead is exactly the label that teaches the
   GP the most, so filtering by confidence here would throw away the point of exploring.
   If the pool is empty, discover a page first (there's always a max-BALD lead unless
-  there are no leads at all).
+  there are no leads at all). A pool can also be deep but *stale* — every lead in it a
+  near-duplicate of one already labelled — and then a label is nearly worthless while a
+  fetch is free, so ``qualify.pool_is_covered`` widens first: it fires when even the
+  most novel candidate sits closer to the labelled set than the labelled leads sit to
+  each other. That is a distance against a distance in one fixed embedding space with
+  no model fitted — read the ``pool_is_covered`` docstring for why it is not a third of
+  the bars below. And it only reorders the two moves: when discovery can't widen
+  (saturated, provider down) the label still happens, so unlike a gate on labelling it
+  has no stall state.
 - **exploit** (``neg > pos``) — prefer the strongest lead clearing ``min_gp_confidence``
   (``consumable_candidates``), the one whose qualification will buy an email rather than
   park at QUALIFIED. When none clears the gate, fall back to labelling the best lead
@@ -46,7 +54,11 @@ import numpy as np
 from openoutreach.core.conf import CAMPAIGN_CONFIG
 from openoutreach.core.ml.qualifier import BayesianQualifier
 from openoutreach.core.pipeline.discover import discover
-from openoutreach.core.pipeline.qualify import fetch_qualification_candidates, run_qualification
+from openoutreach.core.pipeline.qualify import (
+    fetch_qualification_candidates,
+    pool_is_covered,
+    run_qualification,
+)
 from openoutreach.core.pipeline.ready_pool import find_ready_candidate, promote_to_ready
 
 logger = logging.getLogger(__name__)
@@ -98,6 +110,15 @@ def _advance(session, qualifier: BayesianQualifier) -> bool:
         if discover(session, qualifier) <= 0:
             return False
         candidates = fetch_qualification_candidates(session)
+    elif pool_is_covered(qualifier, candidates):
+        # The pool is deep but not *new* — even its most novel lead re-samples ground
+        # the labelled set already covers, so a label here buys almost nothing. Widen
+        # first, then label from the enlarged pool. Failing to widen (saturated pool,
+        # provider down) falls through to labelling anyway: this decides *what to do
+        # first*, never whether to label at all, so it cannot stall the way a gate on
+        # labelling would.
+        if discover(session, qualifier) > 0:
+            candidates = fetch_qualification_candidates(session)
     return run_qualification(session, qualifier, candidates=candidates) is not None
 
 

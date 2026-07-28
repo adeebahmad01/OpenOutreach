@@ -6,13 +6,18 @@ failure). Enrichment / email-resolution moved to the find-email leg. Leads carry
 their own ``profile_text`` + embedding from discovery — no live scrape."""
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
 
 from openoutreach.core.ml.qualifier import BayesianQualifier
-from openoutreach.core.pipeline.qualify import farthest_from_labelled, run_qualification
+from openoutreach.core.pipeline.qualify import (
+    farthest_from_labelled,
+    labelled_resolution,
+    pool_is_covered,
+    run_qualification,
+)
 
 
 def _make_lead(profile_url="https://www.linkedin.com/in/alice/", profile_text="engineer at acme",
@@ -192,6 +197,16 @@ class TestFarthestFromLabelled:
         assert index == 1
         assert distance == pytest.approx(np.sqrt(2.0))
 
+    def test_resolution_is_the_mean_nearest_neighbour_distance(self):
+        # Three points on one axis at 0, 1, 4: nearest-neighbour distances are 1, 1, 3.
+        labelled = np.array([_axis(0, 0.0), _axis(0, 1.0), _axis(0, 4.0)], dtype=np.float64)
+
+        assert labelled_resolution(labelled) == pytest.approx(5.0 / 3.0)
+
+    def test_resolution_is_none_under_two_labels(self):
+        assert labelled_resolution(np.empty((0, 384))) is None
+        assert labelled_resolution(np.array([_axis(0)], dtype=np.float64)) is None
+
     def test_handles_a_candidate_identical_to_a_labelled_point(self):
         """Coincident points give distance 0 — the subtraction must not go negative."""
         labelled = np.array([_axis(0)], dtype=np.float64)
@@ -201,3 +216,53 @@ class TestFarthestFromLabelled:
 
         assert index == 0
         assert distance == pytest.approx(0.0)
+
+
+class TestPoolIsCovered:
+    """The explore branch's widen-vs-label signal, on its own geometry."""
+
+    @staticmethod
+    def _qualifier(labelled):
+        qualifier = Mock()
+        qualifier.labelled_embeddings = np.asarray(labelled, dtype=np.float64)
+        return qualifier
+
+    @staticmethod
+    def _pool(*embeddings):
+        return [Mock(embedding_array=e) for e in embeddings]
+
+    def test_covered_when_the_best_candidate_is_nearer_than_the_labelled_spacing(self):
+        # Labels 1.0 apart; the only candidate sits 0.1 from one of them.
+        qualifier = self._qualifier([_axis(0, 0.0), _axis(0, 1.0)])
+        pool = self._pool(_axis(0, 0.1))
+
+        assert pool_is_covered(qualifier, pool) is True
+
+    def test_not_covered_when_a_candidate_opens_new_ground(self):
+        qualifier = self._qualifier([_axis(0, 0.0), _axis(0, 1.0)])
+        pool = self._pool(_axis(0, 0.1), _axis(1, 9.0))
+
+        assert pool_is_covered(qualifier, pool) is False
+
+    def test_not_covered_under_two_labels(self):
+        """No spacing to measure yet — never widen on an unmeasurable comparison."""
+        qualifier = self._qualifier([_axis(0)])
+
+        assert pool_is_covered(qualifier, self._pool(_axis(0))) is False
+
+    def test_not_covered_when_the_pool_is_empty(self):
+        """The empty-pool path is the caller's; this must not claim coverage for it."""
+        qualifier = self._qualifier([_axis(0, 0.0), _axis(0, 1.0)])
+
+        assert pool_is_covered(qualifier, []) is False
+
+    def test_ratio_scales_the_bar(self):
+        qualifier = self._qualifier([_axis(0, 0.0), _axis(0, 1.0)])
+        pool = self._pool(_axis(0, 0.5))  # 0.5 away, labels spaced 1.0 apart
+
+        with patch.dict("openoutreach.core.pipeline.qualify.CAMPAIGN_CONFIG",
+                        {"novelty_ratio": 0.25}):
+            assert pool_is_covered(qualifier, pool) is False
+        with patch.dict("openoutreach.core.pipeline.qualify.CAMPAIGN_CONFIG",
+                        {"novelty_ratio": 2.0}):
+            assert pool_is_covered(qualifier, pool) is True
