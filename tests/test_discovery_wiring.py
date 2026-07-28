@@ -36,12 +36,17 @@ def _node(campaign, clauses, offset=0):
     return node
 
 
-def _cold_qualifier():
+def _unfitted_qualifier(has_real_positive=True):
     """An unfitted GP — ``acquisition_mode`` returns None, so selection is the
-    deterministic seed-first, fresh-first fallback (no exact-embed, no scoring)."""
+    deterministic seed-first, fresh-first fallback (no exact-embed, no scoring).
+
+    ``has_real_positive`` is the separate *phase* axis: it gates the cold-phase rules
+    (mint every pass, never deepen) and defaults True so these cases exercise the walk
+    itself. The cold-phase behaviour is tested explicitly."""
     q = MagicMock()
     q.acquisition_mode.return_value = None
     q.acquisition_scores.return_value = None
+    q.has_real_positive = has_real_positive
     return q
 
 
@@ -130,16 +135,16 @@ class TestDiscover:
     def test_skips_freemium_campaign(self, db):
         _set_key()
         session = MagicMock(campaign=_campaign(is_freemium=True))
-        assert discover(session, _cold_qualifier()) == 0
+        assert discover(session, _unfitted_qualifier()) == 0
 
     def test_skips_without_finder_key(self, db):
         session = MagicMock(campaign=_campaign())
-        assert discover(session, _cold_qualifier()) == 0
+        assert discover(session, _unfitted_qualifier()) == 0
 
     def test_skips_without_product_or_objective(self, db):
         _set_key()
         session = MagicMock(campaign=_campaign(product_docs="", campaign_target=""))
-        assert discover(session, _cold_qualifier()) == 0
+        assert discover(session, _unfitted_qualifier()) == 0
 
     def test_fetches_the_seed_maximal_and_injects_its_keywords(self, db):
         _set_key()
@@ -153,7 +158,7 @@ class TestDiscover:
         with _patch_select_embed(), \
              patch("openoutreach.discovery.search", return_value=rows) as search, \
              patch("openoutreach.core.db.leads.create_lead", return_value=True) as create:
-            assert discover(session, _cold_qualifier()) == 2
+            assert discover(session, _unfitted_qualifier()) == 2
 
         assert search.call_args.kwargs["offset"] == 0
         node = DiscoveryQuery.objects.get(campaign=campaign, offset=0)
@@ -176,7 +181,7 @@ class TestDiscover:
         with _patch_select_embed(), \
              patch("openoutreach.discovery.search", return_value=rows) as search, \
              patch("openoutreach.core.db.leads.create_lead", return_value=True):
-            assert discover(session, _cold_qualifier()) == 1
+            assert discover(session, _unfitted_qualifier()) == 1
 
         assert search.call_args.kwargs["offset"] == 100
 
@@ -190,7 +195,7 @@ class TestDiscover:
         with _patch_select_embed(), \
              patch("openoutreach.discovery.search",
                    side_effect=BetterContactUnavailable("poll timed out")):
-            assert discover(session, _cold_qualifier()) == 0
+            assert discover(session, _unfitted_qualifier()) == 0
 
         node = DiscoveryQuery.objects.get(campaign=campaign, clause_key=clause_key(SEED))
         assert node.exhausted
@@ -207,7 +212,7 @@ class TestDiscover:
         with _patch_select_embed(), \
              patch("openoutreach.discovery.search", return_value=[]), \
              patch("openoutreach.core.pipeline.mint.mint_clauses", return_value=[]):
-            assert discover(session, _cold_qualifier()) == 0
+            assert discover(session, _unfitted_qualifier()) == 0
 
         assert DiscoveryQuery.objects.filter(
             campaign=campaign, clause_key=clause_key(SEED), exhausted=True,
@@ -224,7 +229,7 @@ class TestDiscover:
         with _patch_select_embed(), \
              patch("openoutreach.discovery.search", return_value=[]), \
              patch("openoutreach.core.pipeline.mint.mint_clauses", return_value=[]) as mint:
-            assert discover(session, _cold_qualifier()) == 0
+            assert discover(session, _unfitted_qualifier()) == 0
 
         assert EmptyClauseSet.objects.get().clause_key == clause_key(SEED)
         mint.assert_called_once()  # saturation trigger
@@ -250,7 +255,7 @@ class TestDiscover:
              patch("openoutreach.discovery.search", return_value=rows), \
              patch("openoutreach.core.pipeline.mint.mint_clauses", side_effect=_mint), \
              patch("openoutreach.core.db.leads.create_lead", return_value=True):
-            assert discover(session, _cold_qualifier()) == 1
+            assert discover(session, _unfitted_qualifier()) == 1
 
         # fetched the minted maximal (owner AND Japan), fresh at offset 0
         assert DiscoveryQuery.objects.filter(
@@ -274,9 +279,41 @@ class TestDiscover:
              patch("openoutreach.discovery.search", return_value=rows), \
              patch("openoutreach.core.pipeline.mint.mint_clauses", return_value=[]) as mint, \
              patch("openoutreach.core.db.leads.create_lead", return_value=True):
-            discover(session, _cold_qualifier())
+            discover(session, _unfitted_qualifier())
 
         mint.assert_called_once()
+
+    def test_cold_phase_mints_every_pass(self, db):
+        """No lead has qualified, so the pool is one conjunction and ranking it ranks
+        nothing — widen first, every pass, with no qualified-count trigger to wait on."""
+        _set_key()
+        campaign = _campaign()
+        campaign.clauses.set(Clause.rows_for(SEED))
+        session = MagicMock(campaign=campaign)
+        rows = [{"contact_linkedin_profile_url": "https://www.linkedin.com/in/a/"}]
+        with _patch_select_embed(), \
+             patch("openoutreach.discovery.search", return_value=rows), \
+             patch("openoutreach.core.pipeline.mint.mint_clauses", return_value=[]) as mint, \
+             patch("openoutreach.core.db.leads.create_lead", return_value=True):
+            discover(session, _unfitted_qualifier(has_real_positive=False))
+
+        mint.assert_called_once()
+
+    def test_past_the_cold_phase_mint_waits_for_the_throughput_trigger(self, db):
+        """The every-pass mint is a cold-phase rule only — afterwards the qualified-count
+        trigger owns the cadence again."""
+        _set_key()
+        campaign = _campaign()
+        campaign.clauses.set(Clause.rows_for(SEED))
+        session = MagicMock(campaign=campaign)
+        rows = [{"contact_linkedin_profile_url": "https://www.linkedin.com/in/a/"}]
+        with _patch_select_embed(), \
+             patch("openoutreach.discovery.search", return_value=rows), \
+             patch("openoutreach.core.pipeline.mint.mint_clauses", return_value=[]) as mint, \
+             patch("openoutreach.core.db.leads.create_lead", return_value=True):
+            discover(session, _unfitted_qualifier())
+
+        mint.assert_not_called()
 
     def test_cold_start_seeds_the_pool_then_fetches_the_seed(self, db):
         _set_key()
@@ -293,7 +330,7 @@ class TestDiscover:
              patch("openoutreach.core.pipeline.icp.generate_seed", side_effect=_seed), \
              patch("openoutreach.discovery.search", return_value=rows), \
              patch("openoutreach.core.db.leads.create_lead", return_value=True):
-            assert discover(session, _cold_qualifier()) == 1
+            assert discover(session, _unfitted_qualifier()) == 1
 
         assert set(campaign.clauses.values_list("family", "value")) == set(pool)
         # pre-screen probed each seed value alone first, so filter to the seed maximal

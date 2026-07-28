@@ -8,9 +8,15 @@ whenever its candidate pool runs dry; each call fetches the single maximal the G
 scores highest — a fresh region to explore or a proven vein to page deeper.
 
 ``discover`` takes the qualifier because the GP is now the query selector too: it
-scores every candidate by its keywords (``select.next_query``). Two things grow the
-vocabulary, both here, neither a GP-confidence gate:
+scores every candidate by its keywords (``select.next_query``). Three things grow the
+vocabulary, all here, none a GP-confidence gate:
 
+- **cold phase** — while no lead has qualified, mint on *every* pass. The seed is one
+  conjunction, so the pool spans one maximal and ranking it ranks nothing; breadth is
+  what gives the GP a set worth sorting, and it is the cheap half of the work (one LLM
+  call proposes many values, one fetch tests one conjunction). The phase also never
+  deepens a vein (``select.next_query``), so the whole cold walk is: widen, then fetch
+  the best fresh query out of a pool that keeps getting bigger;
 - **throughput** — every ``MINT_EVERY_N_QUALIFIED`` new qualified leads, mint clauses
   from them (fold in what they taught us) before selecting;
 - **saturation** — the selector returns ``None`` (nothing fetchable), so mint, and
@@ -178,11 +184,22 @@ def discover(session, qualifier) -> int:
     if not campaign.clauses.exists():
         _prescreen(campaign, generate_seed(campaign))
 
-    # Throughput mint: fold in the leads that qualified since the last mint, then
-    # pre-screen the fresh values so a dead axis never poisons a product slab.
-    qualified = _qualified_count(campaign)
-    if qualified and qualified - campaign.discovery_minted_at_qualified >= CAMPAIGN_CONFIG["mint_every_n_qualified"]:
+    if not qualifier.has_real_positive:
+        # Cold phase: mint every pass. The seed is a single conjunction, so the pool
+        # spans one maximal and the GP's ranking of it is a ranking of one — there is
+        # nothing to sort. Widening is what gives the model a set worth sorting, and it
+        # is the cheap half of the work here: one LLM call proposes many clause values,
+        # while firing a query costs a page fetch and tells us about one conjunction. So
+        # generate breadth first and let the GP order it, rather than walking a narrow
+        # pool query by query. Values are still pre-screened, so the breadth is real —
+        # that is the cost of this trade, paid one probe per new value.
         _prescreen(campaign, mint_clauses(campaign))
+    else:
+        # Throughput mint: fold in the leads that qualified since the last mint, then
+        # pre-screen the fresh values so a dead axis never poisons a product slab.
+        qualified = _qualified_count(campaign)
+        if qualified - campaign.discovery_minted_at_qualified >= CAMPAIGN_CONFIG["mint_every_n_qualified"]:
+            _prescreen(campaign, mint_clauses(campaign))
 
     empties = 0
     minted = False

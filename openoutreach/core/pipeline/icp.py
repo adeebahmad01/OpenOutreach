@@ -154,8 +154,11 @@ class _AnchorProfiles(BaseModel):
     )
 
 
-def generate_anchors(campaign) -> list[str]:
-    """LLM-invent ideal-lead profiles for a campaign. ``[]`` on an outage or empty ICP.
+def generate_anchors(campaign, count: int = ANCHOR_COUNT, existing=()) -> list[str]:
+    """LLM-invent ``count`` ideal-lead profiles. ``[]`` on an outage or empty ICP.
+
+    ``existing`` are the profiles already written for this campaign — shown to the model
+    so a top-up round widens the positive region instead of restating it.
 
     Best-effort by design: an unanchored campaign still runs, it just spends its cold
     phase without a fitted GP, so failure must not propagate to the caller.
@@ -168,7 +171,8 @@ def generate_anchors(campaign) -> list[str]:
     prompt = env.get_template("anchor_profiles.j2").render(
         product_docs=campaign.product_docs,
         campaign_target=campaign.campaign_target,
-        count=ANCHOR_COUNT,
+        count=count,
+        existing=list(existing),
     )
 
     try:
@@ -187,13 +191,27 @@ def generate_anchors(campaign) -> list[str]:
     return [p.strip().lower() for p in result.profiles if p.strip()]
 
 
-def ensure_anchors(campaign) -> np.ndarray | None:
-    """The campaign's anchor embeddings as ``(N, dim)``, generating them on first use.
+def stored_anchors(campaign) -> np.ndarray | None:
+    """The campaign's persisted anchor embeddings as ``(N, dim)``, or ``None``."""
+    if not (campaign.anchor_embeddings and campaign.anchor_profiles):
+        return None
+    stored = np.frombuffer(bytes(campaign.anchor_embeddings), dtype=np.float32)
+    return stored.reshape(len(campaign.anchor_profiles), -1).copy()
 
-    Persisted on the campaign so the daemon doesn't re-invent them (and re-anchor the GP
-    somewhere slightly different) on every restart. ``None`` when the campaign has no
-    ICP text to work from or the LLM call failed — callers treat that as "no anchors",
-    never as an error.
+
+def ensure_anchors(campaign, minimum: int = ANCHOR_COUNT) -> np.ndarray | None:
+    """The campaign's anchor embeddings as ``(N, dim)``, topped up to ``minimum``.
+
+    Generates on first use and **adds** on later calls, so the synthetic positive class
+    can be grown to track the rejections piling up against it (see
+    ``pools._rebalance_anchors``). Already-written profiles are shown to the model so a
+    top-up widens the ideal region rather than restating it, and the whole accumulated
+    set is persisted — the daemon must not re-invent anchors (and re-anchor the GP
+    somewhere slightly different) on every restart.
+
+    ``None`` when the campaign has no ICP text to work from, or the LLM call failed and
+    nothing is stored — callers treat that as "no anchors", never as an error. A failed
+    *top-up* keeps whatever is already there.
 
     Only ever called while a campaign has no real positive; ``BayesianQualifier`` clears
     both the stored profiles and these embeddings the moment one arrives, so a returning
@@ -201,21 +219,28 @@ def ensure_anchors(campaign) -> np.ndarray | None:
     """
     from openoutreach.discovery import embed_profile
 
-    if campaign.anchor_embeddings and campaign.anchor_profiles:
-        stored = np.frombuffer(bytes(campaign.anchor_embeddings), dtype=np.float32)
-        return stored.reshape(len(campaign.anchor_profiles), -1).copy()
+    profiles = list(campaign.anchor_profiles or [])
+    stored = stored_anchors(campaign)
+    if len(profiles) >= minimum:
+        return stored
 
     if not (campaign.product_docs or campaign.campaign_target):
-        return None
+        return stored
 
-    profiles = generate_anchors(campaign)
-    if not profiles:
-        return None
+    fresh = [
+        p for p in generate_anchors(campaign, count=minimum - len(profiles), existing=profiles)
+        if p not in profiles
+    ]
+    if not fresh:
+        return stored
 
-    embeddings = np.array([embed_profile(p) for p in profiles], dtype=np.float32)
-    campaign.anchor_profiles = profiles
+    embeddings = np.array([embed_profile(p) for p in fresh], dtype=np.float32)
+    if stored is not None:
+        embeddings = np.vstack([stored, embeddings])
+
+    campaign.anchor_profiles = profiles + fresh
     campaign.anchor_embeddings = embeddings.tobytes()
     campaign.save(update_fields=["anchor_profiles", "anchor_embeddings"])
-    logger.info("[%s] %s: %d synthetic ideal profile(s)", campaign,
-                colored("anchors", "cyan", attrs=["bold"]), len(profiles))
+    logger.info("[%s] %s: +%d synthetic ideal profile(s) (%d total)", campaign,
+                colored("anchors", "cyan", attrs=["bold"]), len(fresh), len(embeddings))
     return embeddings

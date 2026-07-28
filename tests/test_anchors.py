@@ -91,6 +91,109 @@ class TestEnsureAnchors:
             assert ensure_anchors(_campaign()) is None
 
 
+class TestAnchorTopUp:
+    """The synthetic positive class grows to keep pace with the rejections it faces."""
+
+    def test_tops_up_to_the_requested_minimum(self):
+        campaign = _campaign()
+        with _llm_returns(["a one", "b two"]), _stub_embed():
+            ensure_anchors(campaign, minimum=2)
+        with _llm_returns(["c three", "d four"]), _stub_embed():
+            embeddings = ensure_anchors(campaign, minimum=4)
+
+        assert embeddings.shape == (4, 384)
+        campaign.refresh_from_db()
+        assert campaign.anchor_profiles == ["a one", "b two", "c three", "d four"]
+
+    def test_asks_only_for_the_shortfall_and_shows_what_exists(self):
+        """A top-up must widen the ideal region, not restate it."""
+        campaign = _campaign()
+        with _llm_returns(["a one"]), _stub_embed():
+            ensure_anchors(campaign, minimum=1)
+
+        with (
+            patch("openoutreach.core.pipeline.icp.generate_anchors",
+                  return_value=["b two", "c three"]) as gen,
+            _stub_embed(),
+        ):
+            ensure_anchors(campaign, minimum=3)
+
+        assert gen.call_args.kwargs == {"count": 2, "existing": ["a one"]}
+
+    def test_drops_profiles_the_model_repeated(self):
+        campaign = _campaign()
+        with _llm_returns(["a one"]), _stub_embed():
+            ensure_anchors(campaign, minimum=1)
+        with _llm_returns(["a one", "b two"]), _stub_embed():
+            ensure_anchors(campaign, minimum=3)
+
+        campaign.refresh_from_db()
+        assert campaign.anchor_profiles == ["a one", "b two"]
+
+    def test_a_failed_top_up_keeps_what_is_already_there(self):
+        campaign = _campaign()
+        with _llm_returns(["a one"]), _stub_embed():
+            first = ensure_anchors(campaign, minimum=1)
+
+        with _llm_returns([]), _stub_embed():
+            still = ensure_anchors(campaign, minimum=5)
+
+        assert np.array_equal(first, still)
+
+    def test_no_call_when_the_minimum_is_already_met(self):
+        campaign = _campaign()
+        with _llm_returns(["a one", "b two"]), _stub_embed():
+            ensure_anchors(campaign, minimum=2)
+
+        with patch("openoutreach.core.pipeline.icp.generate_anchors",
+                   side_effect=AssertionError("already balanced")):
+            assert ensure_anchors(campaign, minimum=2).shape == (2, 384)
+
+
+class TestRebalanceAnchors:
+    """``pools._rebalance_anchors`` — the hook that keeps the classes level while cold."""
+
+    def test_tops_up_when_rejections_outnumber_the_anchors(self):
+        from openoutreach.core.pipeline.icp import ANCHOR_COUNT
+        from openoutreach.core.pipeline.pools import _rebalance_anchors
+
+        qualifier = BayesianQualifier(seed=42)
+        session = MagicMock(campaign=_campaign())
+        with (
+            patch("openoutreach.core.pipeline.icp.ensure_anchors") as ensure,
+            patch.object(BayesianQualifier, "class_counts", property(lambda self: (10, 3))),
+        ):
+            _rebalance_anchors(session, qualifier)
+
+        assert ensure.call_args.kwargs["minimum"] == 10 + ANCHOR_COUNT
+
+    def test_feeds_the_grown_set_back_into_the_qualifier(self):
+        from openoutreach.core.pipeline.pools import _rebalance_anchors
+
+        qualifier = BayesianQualifier(seed=42)
+        session = MagicMock(campaign=_campaign())
+        grown = np.ones((7, 384), dtype=np.float32)
+        with (
+            patch("openoutreach.core.pipeline.icp.ensure_anchors", return_value=grown),
+            patch.object(BayesianQualifier, "class_counts", property(lambda self: (10, 3))),
+        ):
+            _rebalance_anchors(session, qualifier)
+
+        assert len(qualifier._anchor_X) == 7
+
+    def test_no_top_up_while_the_classes_are_level(self):
+        from openoutreach.core.pipeline.pools import _rebalance_anchors
+
+        qualifier = BayesianQualifier(seed=42)
+        session = MagicMock(campaign=_campaign())
+        with (
+            patch("openoutreach.core.pipeline.icp.ensure_anchors",
+                  side_effect=AssertionError("already balanced")),
+            patch.object(BayesianQualifier, "class_counts", property(lambda self: (3, 3))),
+        ):
+            _rebalance_anchors(session, qualifier)
+
+
 class TestAnchorLifecycle:
     def test_a_real_positive_clears_the_stored_anchors(self):
         """Point of the phase: real ground truth supersedes the guess, and a campaign

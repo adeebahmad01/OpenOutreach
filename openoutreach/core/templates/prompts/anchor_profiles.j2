@@ -6,6 +6,13 @@ You are a B2B go-to-market analyst. Invent {{ count }} example profiles of peopl
 ## Campaign Target
 {{ campaign_target }}
 
+{% if existing %}
+## Profiles you have already written
+{% for p in existing %}
+- {{ p }}{% endfor %}
+
+Every profile you return now must be **different from all of these** — a different title, seniority, industry or geography. Do not restate or lightly reword them.
+{% endif %}
 ## Instructions
 These are not real people and will never be contacted. They are reference points that tell our ranking model what a good lead looks like before any real lead has been judged, so what matters is that they read exactly like rows from a lead database.
 

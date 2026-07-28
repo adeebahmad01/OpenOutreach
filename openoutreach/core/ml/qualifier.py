@@ -247,17 +247,22 @@ class BayesianQualifier:
     # ------------------------------------------------------------------
 
     def set_anchors(self, embeddings: np.ndarray):
-        """Seed synthetic positives so the GP can fit before any real lead qualifies.
+        """Set the synthetic positives so the GP can fit before any real lead qualifies.
 
         Without them a first run is unfittable, not merely uninformed: every verdict is
         a rejection until the ICP is right, one class yields no posterior, and BALD,
         P(f>0.5), the promote gate and the query selector all go dark together for the
         whole cold phase. One imagined positive region restores every one of them.
 
-        Ignored once a real positive exists (the cold phase is over) or when anchors are
-        already set, so this is safe to call on every daemon boot.
+        **Replaces** the anchor set rather than adding to it — the caller owns the whole
+        set (``icp.ensure_anchors`` returns every profile written so far, grown as the
+        rejections mount), so passing a superset is how a top-up lands and passing the
+        stored set again on a daemon boot is a no-op.
+
+        Ignored once a real positive exists: the cold phase is over and the guess has
+        been superseded, so this is safe to call unconditionally.
         """
-        if self.has_real_positive or self._anchor_X:
+        if self.has_real_positive:
             return
         self._anchor_X = [np.asarray(e, dtype=np.float64).ravel() for e in embeddings]
         self._fitted = False

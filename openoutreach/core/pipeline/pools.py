@@ -82,6 +82,32 @@ def consumable_candidates(qualifier: BayesianQualifier, candidates: list) -> lis
     return [c for c, p in zip(candidates, probs) if p >= threshold]
 
 
+def _rebalance_anchors(session, qualifier: BayesianQualifier) -> None:
+    """Grow the synthetic positive class to keep pace with the rejections it faces.
+
+    The anchors start at ``ANCHOR_COUNT`` and the rejections do not stop, so a cold phase
+    left alone slides into a class balance of 3-against-hundreds. Two things go wrong
+    there, and both are about the *balance*, not the count: ``acquisition_mode`` flips to
+    exploit as soon as ``n_neg > n_pos`` — chasing conversions on evidence that is
+    entirely invented — and the fit sees a positive class so outnumbered that the
+    posterior flattens toward "no" everywhere, which is the same blindness the anchors
+    were introduced to remove.
+
+    So while the phase lasts, top the anchors up to the rejection count (plus a little
+    headroom, so this costs one LLM call per ``ANCHOR_COUNT`` rejections rather than one
+    per rejection). Best-effort: a failed top-up leaves the existing anchors in place.
+    """
+    from openoutreach.core.pipeline.icp import ANCHOR_COUNT, ensure_anchors
+
+    n_neg, n_pos = qualifier.class_counts
+    if n_pos >= n_neg:
+        return
+
+    anchors = ensure_anchors(session.campaign, minimum=n_neg + ANCHOR_COUNT)
+    if anchors is not None:
+        qualifier.set_anchors(anchors)
+
+
 def _advance(session, qualifier: BayesianQualifier) -> bool:
     """Spend one unit of work — label a lead, discover leads, or (cold) both. Returns
     whether it did.
@@ -99,6 +125,7 @@ def _advance(session, qualifier: BayesianQualifier) -> bool:
     # guessing. Discovery's return is deliberately ignored: a saturated pool or a
     # provider outage still leaves leads to label, and only an empty pool stalls.
     if not qualifier.has_real_positive:
+        _rebalance_anchors(session, qualifier)
         discover(session, qualifier)
         candidates = fetch_qualification_candidates(session)
         if not candidates:
