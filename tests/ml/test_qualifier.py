@@ -302,3 +302,39 @@ class TestAnchors:
 
         assert qualifier.class_counts == (2, 3)
         assert qualifier.has_real_positive is False
+
+
+class TestColdPhaseAcquisition:
+    """While the only positives are invented, the axis is exploit — see acquisition_mode."""
+
+    @staticmethod
+    def _cold(n_rejections: int, n_anchors: int):
+        rng = np.random.RandomState(0)
+        q = BayesianQualifier(embedding_dim=8)
+        q.set_anchors(rng.rand(n_anchors, 8))
+        for _ in range(n_rejections):
+            q.update(rng.rand(8), 0)
+        return q
+
+    def test_cold_phase_exploits_however_the_classes_balance(self):
+        # The live bug: _rebalance_anchors keeps anchors >= rejections, so `n_neg > n_pos`
+        # was never true and the axis was pinned to BALD for the whole cold phase.
+        for rejections, anchors in ((6, 7), (9, 11), (50, 3)):
+            q = self._cold(rejections, anchors)
+            assert q.acquisition_mode() == "exploit (p)", (rejections, anchors)
+
+    def test_a_real_positive_hands_the_axis_back_to_the_balance(self):
+        q = self._cold(n_rejections=2, n_anchors=3)
+        q.update(np.random.RandomState(1).rand(8), 1)   # drops the anchors
+
+        assert q.has_real_positive
+        n_neg, n_pos = q.class_counts
+        assert (n_neg, n_pos) == (2, 1)
+        assert q.acquisition_mode() == "exploit (p)"    # neg > pos
+
+        for _ in range(3):
+            q.update(np.random.RandomState(2).rand(8), 1)
+        assert q.acquisition_mode() == "explore (BALD)"  # pos caught up
+
+    def test_unfitted_model_still_reports_no_axis(self):
+        assert BayesianQualifier(embedding_dim=8).acquisition_mode() is None

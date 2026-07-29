@@ -86,12 +86,15 @@ def _rebalance_anchors(session, qualifier: BayesianQualifier) -> None:
     """Grow the synthetic positive class to keep pace with the rejections it faces.
 
     The anchors start at ``ANCHOR_COUNT`` and the rejections do not stop, so a cold phase
-    left alone slides into a class balance of 3-against-hundreds. Two things go wrong
-    there, and both are about the *balance*, not the count: ``acquisition_mode`` flips to
-    exploit as soon as ``n_neg > n_pos`` — chasing conversions on evidence that is
-    entirely invented — and the fit sees a positive class so outnumbered that the
-    posterior flattens toward "no" everywhere, which is the same blindness the anchors
-    were introduced to remove.
+    left alone slides into a class balance of 3-against-hundreds, and the fit sees a
+    positive class so outnumbered that the posterior flattens toward "no" everywhere —
+    the same blindness the anchors were introduced to remove.
+
+    *(This used to carry a second argument: that the imbalance would flip
+    ``acquisition_mode`` to exploit and chase conversions on invented evidence. That is
+    now the intended cold-phase behaviour — the fastest route to the first real positive
+    is the lead most like the ideal profile — so only the flattening argument remains.
+    Keeping the classes level still matters for it.)*
 
     So while the phase lasts, top the anchors up to the rejection count (plus a little
     headroom, so this costs one LLM call per ``ANCHOR_COUNT`` rejections rather than one

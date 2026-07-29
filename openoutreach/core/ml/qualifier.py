@@ -200,10 +200,17 @@ class BayesianQualifier:
     def class_counts(self) -> tuple[int, int]:
         """Return (n_negatives, n_positives) — anchors counted as positives.
 
-        Counting them is what keeps the acquisition axis honest during the cold phase:
-        the anchors *are* the model's positive class there, so hiding them would report
-        ``pos=0`` against a growing pile of rejections and pin the qualifier to exploit
-        on a posterior that only exists because of them.
+        Read by ``_rebalance_anchors``, which is asking "is the invented positive class
+        keeping pace with the rejections?" — a question about the anchors, so they belong
+        in the count.
+
+        It used to steer the acquisition axis during the cold phase too, on the argument
+        that hiding the anchors would report ``pos=0`` against a growing pile of
+        rejections and pin the qualifier to exploit on an invented posterior. That
+        argument is retired: exploiting the anchors is now the *deliberate* cold-phase
+        behaviour (see ``acquisition_mode``), and the balance no longer decides anything
+        until real positives exist — by which point ``_drop_anchors`` has run and this
+        count is real on both sides.
         """
         n_pos = sum(self._y) + len(self._anchor_X)
         return len(self._y) - sum(self._y), n_pos
@@ -462,12 +469,31 @@ class BayesianQualifier:
     def acquisition_mode(self, embeddings: np.ndarray | None = None) -> str | None:
         """The live acquisition axis: ``"exploit (p)"``, ``"explore (BALD)"``, or None.
 
-        Balance-driven: exploit once negatives outnumber positives, explore while the
-        classes are still even. None on cold start (model not fitted yet). Exposed so
-        the selector can pick which cheap prefilter to run *before* it exact-embeds.
+        **Cold phase — always exploit.** While the only positives are anchors, the
+        campaign has exactly one goal: find the *first real positive*, because that is
+        what ends the phase, retires the anchors and turns every downstream ranking into
+        one backed by ground truth. Exploit serves it directly — the highest-P lead is
+        the one most like the ideal profile, so it is the likeliest genuine fit.
+
+        BALD serves the opposite. Information gain is the right objective when both
+        classes are real and the question is where the boundary sits; with invented
+        positives it spends every LLM call on the lead the model is *most confused*
+        about, which is precisely the lead least like the ICP. A live run made that
+        concrete — four consecutive picks at P(f>0.5) ≈ 0.25–0.42, and the verdicts were
+        veterinary services, cybersecurity education, K-12 tutoring and a metaverse
+        product manager, against a health-and-wellness ICP. Every one an accurate
+        rejection, and not one of them a step toward the first acceptance.
+
+        Past the cold phase it is balance-driven as before: exploit once real negatives
+        outnumber real positives, explore while the classes are still even.
+
+        None on cold start (model not fitted yet). Exposed so callers can pick which
+        cheap prefilter to run *before* they exact-embed.
         """
         if not self._fit_if_needed():
             return None
+        if not self.has_real_positive:
+            return "exploit (p)"
         n_neg, n_pos = self.class_counts
         return "exploit (p)" if n_neg > n_pos else "explore (BALD)"
 
