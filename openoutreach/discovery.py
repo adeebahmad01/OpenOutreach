@@ -249,9 +249,16 @@ def search(filters: dict, limit: int = 100, offset: int = 0) -> Page:
     result = submit_and_poll(api_key, LEAD_FINDER_URL, body)
 
     leads = result.get("leads", [])
-    found = (result.get("summary") or {}).get("leads_found") if offset == 0 else None
+    summary = result.get("summary") or {}
+    found = summary.get("leads_found") if offset == 0 else None
     detail = f"{len(leads)} leads" + (f" · {found:,} in the index" if found else "")
     logger.info("%s", step_line("leadfinder", detail))
+    # A zero is the one answer worth seeing whole. §4 measured the provider handing back
+    # an empty page for a 71-million-lead query under burst, so when rows come back empty
+    # the raw summary and status are the evidence for whether that is what happened.
+    if not leads:
+        logger.debug("    raw response: status=%s summary=%s credits_left=%s",
+                     result.get("status"), summary, result.get("credits_left"))
     return Page(leads, found)
 
 

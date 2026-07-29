@@ -134,6 +134,9 @@ def _handle_empty(node, offset: int, page) -> str | None:
     if offset == 0:
         # One spaced retry before believing a zero. The record it would otherwise write is
         # permanent and prunes a whole subtree, so it is worth 5 seconds to be sure.
+        logger.info("%s", step_line(
+            "fetch", f"empty and no count — re-asking in {EMPTY_RETRY_DELAY_S:.0f}s before "
+                     f"believing it", glyph="↻", color="yellow"))
         time.sleep(EMPTY_RETRY_DELAY_S)
         retry = _fetch(node, 0)
         if retry is None or retry.leads:

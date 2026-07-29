@@ -10,8 +10,17 @@ logger = logging.getLogger(__name__)
 class Command(BaseCommand):
     help = "Run the OpenOutreach daemon (onboard, validate, start task queue)."
 
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--log-level",
+            choices=("debug", "info", "warning", "error"),
+            help="Log verbosity (default: info). `debug` shows the discovery walk's "
+                 "reasoning — the frontier, each node's counts and draw, why a node "
+                 "was expanded or not, and the provider's raw answer.",
+        )
+
     def handle(self, *args, **options):
-        self._configure_logging(verbose=options["verbosity"] >= 2)
+        self._configure_logging(options.get("log_level"), options["verbosity"])
         self._ensure_db()
         self._ensure_onboarded()
         session = self._create_session()
@@ -21,10 +30,14 @@ class Command(BaseCommand):
 
     # -- Steps ---------------------------------------------------------------
 
-    def _configure_logging(self, verbose: bool = False):
+    def _configure_logging(self, log_level: str | None, verbosity: int):
+        """``--log-level`` wins; Django's ``-v 2`` stays as the shorthand for debug."""
         from openoutreach.core.logging import configure_logging, print_banner
 
-        level = logging.DEBUG if verbose else logging.INFO
+        if log_level:
+            level = getattr(logging, log_level.upper())
+        else:
+            level = logging.DEBUG if verbosity >= 2 else logging.INFO
         configure_logging(level=level)
         print_banner()
 

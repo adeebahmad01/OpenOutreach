@@ -109,6 +109,11 @@ def refresh(campaign) -> int:
 
     profiles = _qualified_source_fields(campaign)
     if not profiles:
+        # The cold-phase reality, and worth naming: with nothing qualified yet there are
+        # no words to count, so the vocabulary is whatever the ICP seed put there and the
+        # frontier cannot grow past its depth-1 nodes until the first lead is accepted.
+        logger.debug("[%s] vocabulary: no qualified lead carries per-field text yet — "
+                     "nothing to grow from (seed vocabulary stands)", campaign)
         return 0
 
     # Document frequency per (field, token): how many qualified profiles carry it.
@@ -120,6 +125,9 @@ def refresh(campaign) -> int:
                 frequency[(search_field, token)] = frequency.get((search_field, token), 0) + 1
 
     admitted = [pair for pair, df in frequency.items() if df >= MIN_DOCUMENT_FREQUENCY]
+    logger.debug("[%s] vocabulary: %d qualified profile(s) → %d distinct token(s) → "
+                 "%d admitted at df>=%d", campaign, len(profiles), len(frequency),
+                 len(admitted), MIN_DOCUMENT_FREQUENCY)
     if not admitted:
         return 0
 

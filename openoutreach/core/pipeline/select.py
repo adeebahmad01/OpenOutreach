@@ -55,9 +55,15 @@ import logging
 
 import numpy as np
 
+from openoutreach.discovery import describe_filters, filters_for
+
 logger = logging.getLogger(__name__)
 
 DISCOVERY_PAGE_SIZE = 100
+
+# How much of the frontier a debug run prints. The frontier is the whole decision, but
+# printing thousands of rows per pass buries the answer it is meant to explain.
+_DEBUG_FRONTIER_ROWS = 10
 
 # Elasticsearch's ``index.max_result_window``, measured (§7): every query is worth at most
 # 10,000 rows however many millions it counts. Reaching it means "capped", which is a very
@@ -122,6 +128,11 @@ class LabelStore:
 
     def __len__(self) -> int:
         return len(self._labels)
+
+    @property
+    def qualified_count(self) -> int:
+        """How many labelled profiles were accepted — what expansion has to work from."""
+        return sum(self._labels)
 
     @property
     def base_rate(self) -> float:
@@ -251,9 +262,26 @@ def next_node(campaign, store: LabelStore, rng=None):
         score = rng.beta(alpha, beta) if THOMPSON else alpha / (alpha + beta)
         scored.append((score, node))
 
-    score, best = max(scored, key=lambda pair: pair[0])
-    logger.debug("[%s] frontier %d node(s), picked %s at %.3f",
-                 campaign, len(candidates), best, score)
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    score, best = scored[0]
+
+    if logger.isEnabledFor(logging.DEBUG):
+        # Why *this* query: the whole decision is these numbers, so print them rather
+        # than the conclusion. `a`/`b` are the node's own counts, `lvl` its inherited
+        # level, `P̂` the smoothed estimate and `draw` what Thompson actually sampled —
+        # a node winning on a low P̂ means its posterior was wide, which is the point.
+        logger.debug("[%s] frontier: %d node(s), base rate %.3f over %d label(s)",
+                     campaign, len(candidates), store.base_rate, len(store))
+        for rank, (drawn, node) in enumerate(scored[:_DEBUG_FRONTIER_ROWS], start=1):
+            a, b = store.counts(node.pairs)
+            level = estimate(node.parent, store, cache) if node.parent_id else store.base_rate
+            marker = "→" if node.pk == best.pk else " "
+            logger.debug("  %s #%d draw=%.3f P̂=%.3f  a=%d b=%d lvl=%.3f  %s@%d %s",
+                         marker, rank, drawn, estimate(node, store, cache), a, b, level,
+                         describe_filters(filters_for(node.pairs)),
+                         node.next_offset, node.state)
+        if len(scored) > _DEBUG_FRONTIER_ROWS:
+            logger.debug("  … %d more", len(scored) - _DEBUG_FRONTIER_ROWS)
     return best
 
 
@@ -326,14 +354,29 @@ def expand(node, store: LabelStore, candidates) -> int:
     dead = _dead_sets(campaign)
     cache: dict = {}
 
-    created = 0
-    for pair in store.cooccurring(pairs, candidates):
+    offered = store.cooccurring(pairs, candidates)
+    created = pruned = 0
+    for pair in offered:
         child_pairs = sorted([*pairs, pair])
         child_set = frozenset(child_pairs)
         if any(empty <= child_set for empty in dead):
+            pruned += 1
             continue
         if _upsert(campaign, child_pairs, parent=node, store=store, cache=cache) is not None:
             created += 1
+
+    if logger.isEnabledFor(logging.DEBUG):
+        # "+0 nodes" is the frontier's most confusing outcome, and it has three very
+        # different causes: no vocabulary to offer, no *qualified* profile pairing any
+        # of it with this node, or every child already known. Name which one.
+        logger.debug("  expand [%s]: %d vocabulary → %d co-occurring → "
+                     "%d new, %d dead-pruned, %d already known",
+                     describe_filters(filters_for(pairs)), len(candidates), len(offered),
+                     created, pruned, len(offered) - created - pruned)
+        if candidates and not offered:
+            logger.debug("    nothing co-occurs: the store holds %d qualified profile(s), "
+                         "and expansion only offers tokens seen alongside this node in one",
+                         store.qualified_count)
     return created
 
 
