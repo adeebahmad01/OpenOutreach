@@ -101,9 +101,23 @@ def hyperlink(url: str, text: str | None = None) -> str:
 
 # ── Public API ──────────────────────────────────────────────────────
 
+# Libraries whose own DEBUG output would bury ours. Held at WARNING no matter what level
+# the daemon runs at — the point of ``--log-level debug`` is to see the engine reason, and
+# every LLM SDK dumps the full request body at DEBUG (``Request options: {'method': ...}``,
+# one screen per call).
+#
+# **Every provider in ``llm._PROVIDER_BUILDERS`` needs its SDK here**, not just the one
+# currently configured: the list is invisible until someone switches models and then finds
+# their debug run unreadable. ``tests/test_llm.py`` asserts the two stay in step, because
+# this is exactly the kind of list that rots silently.
 SILENCED_LOGGERS = (
-    "urllib3", "httpx", "pydantic_ai", "openai",
-    "httpcore", "fastembed", "huggingface_hub", "filelock", "asyncio",
+    # LLM SDKs — one entry per supported provider
+    "openai", "anthropic", "google", "google_genai", "googleapiclient",
+    "groq", "mistralai", "cohere", "pydantic_ai",
+    # HTTP transports underneath them
+    "urllib3", "httpx", "httpcore", "h11", "hpack",
+    # Embeddings + runtime
+    "fastembed", "huggingface_hub", "filelock", "onnxruntime", "asyncio",
 )
 
 
