@@ -130,10 +130,17 @@ class LabelStore:
         The root's stand-in. The walk deliberately never *fires* the empty query (it
         matches everyone, and its 10k window is the provider's famous-company head), so
         the one thing a root would have supplied is taken from the labels instead.
+
+        **Laplace-smoothed, and that is load-bearing rather than tidy.** The raw rate is 0
+        for a campaign whose every verdict so far is a rejection — the exact state the
+        anchors exist for, so a common one, not an edge case — and a level of 0 makes
+        ``α = a + 2·0`` zero for every unlabelled node, which is not a distribution.
+        Smoothing here fixes it for the whole walk by induction: with the level strictly
+        inside (0, 1), every ``_beta_params`` is positive on both sides, so every
+        ``estimate`` is again strictly inside (0, 1) for the children below it. An empty
+        store still reads 0.5.
         """
-        if not self._labels:
-            return 0.5
-        return sum(self._labels) / len(self._labels)
+        return (sum(self._labels) + 1) / (len(self._labels) + 2)
 
     def counts(self, pairs) -> tuple[int, int]:
         """``(a, b)`` — labelled profiles containing every one of a node's tokens.
@@ -181,6 +188,9 @@ def _beta_params(node, store: LabelStore, cache: dict) -> tuple[float, float]:
     Two pseudo-counts of prior mass pointed at the parent's rate. The budget of 2 is
     ordinary Laplace, not a tuned knob: it is the same "one imagined success and one
     imagined failure" that keeps a zero-count node from reading as certain.
+
+    Both sides are strictly positive because the level is (see ``LabelStore.base_rate``),
+    which is what makes the result a usable Beta rather than a degenerate one.
     """
     a, b = store.counts(node.pairs)
     level = estimate(node.parent, store, cache) if node.parent_id else store.base_rate

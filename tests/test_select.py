@@ -69,10 +69,25 @@ class TestLabelStore:
         _labelled(c, "alpha", qualified=True)
         _labelled(c, "beta", qualified=True)
         _labelled(c, "gamma", qualified=False)
-        assert LabelStore.load(c).base_rate == pytest.approx(2 / 3)
+        # Laplace: (2 + 1) / (3 + 2)
+        assert LabelStore.load(c).base_rate == pytest.approx(3 / 5)
 
     def test_empty_store_is_an_even_prior(self, db):
         assert LabelStore.load(_campaign()).base_rate == 0.5
+
+    def test_an_all_rejection_campaign_still_has_a_usable_level(self, db):
+        # The state the anchors exist for, so a common one. A raw rate of 0 here makes
+        # every unlabelled node's Beta degenerate (α = a + 2·0 = 0).
+        c = _campaign()
+        for _ in range(20):
+            _labelled(c, "nope", qualified=False)
+        assert 0 < LabelStore.load(c).base_rate < 0.5
+
+    def test_an_all_qualified_campaign_stays_below_one(self, db):
+        c = _campaign()
+        for _ in range(20):
+            _labelled(c, "yes", qualified=True)
+        assert 0.5 < LabelStore.load(c).base_rate < 1
 
     def test_cooccurring_only_offers_tokens_seen_with_a_qualified_lead(self, db):
         c = _campaign()
@@ -155,6 +170,20 @@ class TestFrontier:
         c = _campaign()
         _node(c, [("lead_job_title", "a")], state=QueryNode.State.DEAD)
         assert select.next_node(c, LabelStore.load(c)) is None
+
+    @pytest.mark.parametrize("qualified", [True, False])
+    def test_a_single_class_store_can_still_be_drawn_from(self, db, qualified):
+        # Reproduces a live crash: a campaign whose every verdict was a rejection gave
+        # base_rate 0, so `rng.beta(0, ...)` raised `ValueError: a <= 0` and killed the
+        # find_email task. Both saturated directions must stay drawable.
+        c = _campaign()
+        for _ in range(20):
+            _labelled(c, "seen", qualified=qualified)
+        store = LabelStore.load(c)
+        _node(c, [("lead_job_title", "seen")])
+        _node(c, [("lead_job_title", "unseen")])
+
+        assert select.next_node(c, store) is not None
 
     def test_greedy_picks_the_best_estimate(self, db, monkeypatch):
         monkeypatch.setattr(select, "THOMPSON", False)
