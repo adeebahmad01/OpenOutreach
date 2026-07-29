@@ -122,9 +122,10 @@ class LabelStore:
         shape, so they tokenize like any lead and say which words describe the people
         this campaign wants — which is exactly the claim co-occurrence needs. It is the
         same bargain the GP already takes, on the same evidence, with the same expiry:
-        ``BayesianQualifier`` clears ``Campaign.anchor_profiles`` the moment a real lead
-        qualifies, so reading the field needs no phase check — it is empty precisely when
-        the cold phase is over, and from then on the walk counts only ground truth.
+        ``BayesianQualifier`` retires one stored profile per real acceptance and the field
+        empties when real positives reach the rejection count, so reading it needs no
+        phase check — the invented evidence thins out of this count at exactly the rate
+        ground truth replaces it, and is gone when the cold phase is.
 
         They deliberately do **not** feed the vocabulary (``vocabulary.refresh``): an
         anchor is one flat string with no per-field structure, and splitting it by guess

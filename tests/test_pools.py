@@ -23,17 +23,18 @@ PROFILE_URL = "https://www.linkedin.com/in/alice/"
 CANDIDATE = {"lead_id": 1, "profile_url": PROFILE_URL, "meta": {}}
 
 
-def _qualifier(mode, probs=None, has_real_positive=True, class_counts=(1, 1)):
+def _qualifier(mode, probs=None, is_cold=False, anchor_budget=0, n_anchors=0):
     """A qualifier in ``mode`` ("exploit (p)" / "explore (BALD)" / None) scoring the
     pool at ``probs`` (None is an unfitted GP).
 
-    ``has_real_positive`` is the engine's phase test and is independent of ``mode``: an
-    anchored cold campaign is fitted and ranks fine, it just has no observed positive
-    yet. Defaults True so the explore/exploit cases skip the cold branch; ``class_counts``
-    feeds the cold branch's anchor top-up and defaults to balanced (no top-up)."""
+    ``is_cold`` is the engine's phase test and is independent of ``mode``: a campaign
+    still carrying anchors is fitted and ranks fine, its positive class is just part
+    invented. Defaults False so the explore/exploit cases skip the cold branch;
+    ``anchor_budget``/``n_anchors`` feed the cold branch's top-up and default to no gap."""
     qualifier = Mock()
-    qualifier.has_real_positive = has_real_positive
-    qualifier.class_counts = class_counts
+    qualifier.is_cold = is_cold
+    qualifier.anchor_budget = anchor_budget
+    qualifier.n_anchors = n_anchors
     qualifier.acquisition_mode.return_value = mode
     qualifier.predict_probs.return_value = (
         None if probs is None else np.asarray(probs, dtype=float)
@@ -120,15 +121,15 @@ class TestAdvanceExplore:
 
 
 class TestAdvanceColdPhase:
-    """No lead has ever qualified, so every ranking rests on the anchors' guess — do
-    both moves every pass, one query in and one label out. Keyed on
-    ``has_real_positive``, not on fittedness: an anchored campaign ranks fine and still
-    belongs here."""
+    """Invented positives are still padding the class, so rankings rest partly on the
+    anchors' guess — do both moves every pass, one query in and one label out. Keyed on
+    ``is_cold`` (any anchor still standing), not on fittedness and not on the first real
+    acceptance: an anchored campaign ranks fine and still belongs here."""
 
     def test_discovers_and_labels_in_the_same_pass(self):
         pool = [Mock(embedding_array=np.zeros(384))]
         with _engine(pool, discovered=100) as (mock_qualify, mock_discover):
-            assert _advance("session", _qualifier("explore (BALD)", has_real_positive=False)) is True
+            assert _advance("session", _qualifier("explore (BALD)", is_cold=True)) is True
 
         mock_discover.assert_called_once()
         assert mock_qualify.call_args.kwargs["candidates"] == pool
@@ -143,7 +144,7 @@ class TestAdvanceColdPhase:
                   return_value=PROFILE_URL) as mock_qualify,
             patch("openoutreach.core.pipeline.pools.discover", return_value=100),
         ):
-            assert _advance("session", _qualifier("explore (BALD)", has_real_positive=False)) is True
+            assert _advance("session", _qualifier("explore (BALD)", is_cold=True)) is True
 
         mock_fetch.assert_called_once()  # not fetched before the discover
         assert mock_qualify.call_args.kwargs["candidates"] == grown
@@ -153,14 +154,14 @@ class TestAdvanceColdPhase:
         return is ignored, so only an empty pool stalls."""
         pool = [Mock(embedding_array=np.zeros(384))]
         with _engine(pool, discovered=0) as (mock_qualify, mock_discover):
-            assert _advance("session", _qualifier("explore (BALD)", has_real_positive=False)) is True
+            assert _advance("session", _qualifier("explore (BALD)", is_cold=True)) is True
 
         mock_discover.assert_called_once()
         assert mock_qualify.call_args.kwargs["candidates"] == pool
 
     def test_stalls_only_when_nothing_is_left_to_label(self):
         with _engine([], discovered=0) as (mock_qualify, mock_discover):
-            assert _advance("session", _qualifier("explore (BALD)", has_real_positive=False)) is False
+            assert _advance("session", _qualifier("explore (BALD)", is_cold=True)) is False
 
         mock_discover.assert_called_once()
         mock_qualify.assert_not_called()

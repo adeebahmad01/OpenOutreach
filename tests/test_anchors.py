@@ -4,7 +4,7 @@ lead has qualified.
 
 The LLM call (``run_agent_sync``) and the embedder are stubbed, so these assert the
 lifecycle rather than the model: generated once, persisted on the campaign, reloaded
-without a second LLM call, and cleared the moment a real lead qualifies.
+without a second LLM call, and retired one at a time as real acceptances replace them.
 """
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
@@ -150,81 +150,120 @@ class TestAnchorTopUp:
             assert ensure_anchors(campaign, minimum=2).shape == (2, 384)
 
 
-class TestRebalanceAnchors:
-    """``pools._rebalance_anchors`` — the hook that keeps the classes level while cold."""
+def _rejections(qualifier, n):
+    rng = np.random.RandomState(3)
+    for _ in range(n):
+        qualifier.update(rng.randn(384).astype(np.float32), 0)
 
-    def test_tops_up_when_rejections_outnumber_the_anchors(self):
-        from openoutreach.core.pipeline.icp import ANCHOR_COUNT
+
+class TestRebalanceAnchors:
+    """``pools._rebalance_anchors`` — the growing half of the anchor budget."""
+
+    def test_tops_up_to_the_shortfall_the_real_positives_leave(self):
         from openoutreach.core.pipeline.pools import _rebalance_anchors
 
         qualifier = BayesianQualifier(seed=42)
+        _rejections(qualifier, 10)
         session = MagicMock(campaign=_campaign())
-        with (
-            patch("openoutreach.core.pipeline.icp.ensure_anchors") as ensure,
-            patch.object(BayesianQualifier, "class_counts", property(lambda self: (10, 3))),
-        ):
+        with patch("openoutreach.core.pipeline.icp.ensure_anchors") as ensure:
             _rebalance_anchors(session, qualifier)
 
-        assert ensure.call_args.kwargs["minimum"] == 10 + ANCHOR_COUNT
+        assert ensure.call_args.kwargs["minimum"] == 10  # n_neg - n_real_pos, no headroom
+
+    def test_the_shortfall_shrinks_as_real_positives_arrive(self):
+        """Anchors pad what ground truth has not supplied — a real acceptance is one
+        fewer invented profile the campaign is entitled to."""
+        from openoutreach.core.pipeline.pools import _rebalance_anchors
+
+        qualifier = BayesianQualifier(seed=42)
+        _rejections(qualifier, 10)
+        qualifier.update(np.ones(384, dtype=np.float32), 1)
+        qualifier.update(np.ones(384, dtype=np.float32), 1)
+        session = MagicMock(campaign=_campaign())
+        with patch("openoutreach.core.pipeline.icp.ensure_anchors") as ensure:
+            _rebalance_anchors(session, qualifier)
+
+        assert ensure.call_args.kwargs["minimum"] == 8
 
     def test_feeds_the_grown_set_back_into_the_qualifier(self):
         from openoutreach.core.pipeline.pools import _rebalance_anchors
 
         qualifier = BayesianQualifier(seed=42)
+        _rejections(qualifier, 10)
         session = MagicMock(campaign=_campaign())
         grown = np.ones((7, 384), dtype=np.float32)
-        with (
-            patch("openoutreach.core.pipeline.icp.ensure_anchors", return_value=grown),
-            patch.object(BayesianQualifier, "class_counts", property(lambda self: (10, 3))),
-        ):
+        with patch("openoutreach.core.pipeline.icp.ensure_anchors", return_value=grown):
             _rebalance_anchors(session, qualifier)
 
-        assert len(qualifier._anchor_X) == 7
+        assert qualifier.n_anchors == 7
 
-    def test_no_top_up_while_the_classes_are_level(self):
+    def test_no_top_up_until_the_gap_is_a_full_batch_wide(self):
+        """Rationing: one LLM call per ANCHOR_COUNT rejections, not one per rejection."""
         from openoutreach.core.pipeline.pools import _rebalance_anchors
 
         qualifier = BayesianQualifier(seed=42)
+        _rejections(qualifier, 4)
+        qualifier.set_anchors(np.ones((3, 384), dtype=np.float32))
         session = MagicMock(campaign=_campaign())
-        with (
-            patch("openoutreach.core.pipeline.icp.ensure_anchors",
-                  side_effect=AssertionError("already balanced")),
-            patch.object(BayesianQualifier, "class_counts", property(lambda self: (3, 3))),
-        ):
+        with patch("openoutreach.core.pipeline.icp.ensure_anchors",
+                   side_effect=AssertionError("gap is only 1 wide")):
             _rebalance_anchors(session, qualifier)
 
 
 class TestAnchorLifecycle:
-    def test_a_real_positive_clears_the_stored_anchors(self):
-        """Point of the phase: real ground truth supersedes the guess, and a campaign
-        carrying anchors is exactly one still waiting for its first positive."""
-        campaign = _campaign()
-        with _llm_returns(["cmo acme"]), _stub_embed():
-            anchors = ensure_anchors(campaign)
-
+    def _anchored(self, campaign, profiles):
+        with _llm_returns(profiles), _stub_embed():
+            anchors = ensure_anchors(campaign, minimum=len(profiles))
         qualifier = BayesianQualifier(seed=42, campaign=campaign)
+        _rejections(qualifier, len(profiles))
         qualifier.set_anchors(anchors)
+        return qualifier
+
+    def test_a_real_positive_retires_one_stored_anchor(self):
+        """The handover is one-for-one: ground truth displaces the guess a lead at a
+        time, so the positive class never lurches from dozens to one."""
+        campaign = _campaign()
+        qualifier = self._anchored(campaign, ["cmo acme", "cto northwind", "vp sales bo"])
+
         qualifier.update(np.zeros(384, dtype=np.float32), 0)
         campaign.refresh_from_db()
-        assert campaign.anchor_profiles == ["cmo acme"]  # a rejection changes nothing
+        assert len(campaign.anchor_profiles) == 3  # a rejection retires nothing
 
         qualifier.update(np.ones(384, dtype=np.float32), 1)
+
+        campaign.refresh_from_db()
+        # 4 rejections, 1 real positive -> a budget of 3, and the newest anchor goes first
+        assert campaign.anchor_profiles == ["cmo acme", "cto northwind", "vp sales bo"]
+
+        qualifier.update(np.ones(384, dtype=np.float32), 1)
+        campaign.refresh_from_db()
+        assert campaign.anchor_profiles == ["cmo acme", "cto northwind"]
+        assert qualifier.n_anchors == 2
+        assert qualifier.is_cold is True
+
+    def test_the_last_anchor_goes_when_positives_reach_the_rejections(self):
+        campaign = _campaign()
+        qualifier = self._anchored(campaign, ["cmo acme", "cto northwind"])
+
+        for _ in range(2):
+            qualifier.update(np.ones(384, dtype=np.float32), 1)
 
         campaign.refresh_from_db()
         assert campaign.anchor_profiles == []
         assert campaign.anchor_embeddings is None
-        assert qualifier.has_real_positive is True
+        assert qualifier.is_cold is False
+        assert qualifier.class_counts == (2, 2)
 
-    def test_a_cleared_campaign_is_not_re_anchored(self):
-        """The cold phase ends once, not once per boot."""
+    def test_a_retired_anchor_cannot_be_restored_by_a_later_boot(self):
+        """The budget is re-applied on every ``set_anchors``, so a stale stored set (or a
+        top-up racing a retirement) can never resurrect an anchor a positive displaced."""
         campaign = _campaign()
-        with _llm_returns(["cmo acme"]), _stub_embed():
-            anchors = ensure_anchors(campaign)
+        qualifier = self._anchored(campaign, ["cmo acme", "cto northwind"])
+        stale = np.ones((2, 384), dtype=np.float32)
 
-        qualifier = BayesianQualifier(seed=42, campaign=campaign)
-        qualifier.set_anchors(anchors)
-        qualifier.update(np.ones(384, dtype=np.float32), 1)
+        for _ in range(2):
+            qualifier.update(np.ones(384, dtype=np.float32), 1)
+        qualifier.set_anchors(stale)
 
-        qualifier.set_anchors(anchors)  # a later boot re-offering them
-
-        assert qualifier.class_counts == (0, 1)
+        assert qualifier.n_anchors == 0
+        assert qualifier.class_counts == (2, 2)

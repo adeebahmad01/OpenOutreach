@@ -241,16 +241,36 @@ class TestAnchors:
         assert qualifier.n_obs == 4
         assert qualifier.has_real_positive is False
 
-    def test_a_real_positive_drops_the_anchors(self):
+    def test_a_real_positive_retires_one_anchor_not_all_of_them(self):
+        """The handover is gradual. Dropping every anchor at the first acceptance took
+        the positive class from dozens to one against a pile of rejections in a single
+        step — the flat posterior the anchors exist to prevent, one lead into the real
+        evidence."""
         qualifier = BayesianQualifier(seed=42)
-        qualifier.update(np.zeros(384, dtype=np.float32), 0)
+        rng = np.random.RandomState(1)
+        for _ in range(10):
+            qualifier.update(rng.randn(384).astype(np.float32) - 1.0, 0)
         qualifier.set_anchors(self._anchors())
 
         qualifier.update(np.ones(384, dtype=np.float32), 1)
 
         assert qualifier.has_real_positive is True
-        assert qualifier.class_counts == (1, 1)  # the anchors are gone, not counted
-        assert qualifier.n_obs == 2
+        assert qualifier.is_cold is True          # budget 10 - 1 still covers all three
+        assert qualifier.class_counts == (10, 4)  # one real positive + three anchors
+
+    def test_the_anchors_are_gone_once_positives_reach_the_rejections(self):
+        qualifier = BayesianQualifier(seed=42)
+        rng = np.random.RandomState(1)
+        for _ in range(2):
+            qualifier.update(rng.randn(384).astype(np.float32) - 1.0, 0)
+        qualifier.set_anchors(self._anchors())
+
+        for _ in range(2):
+            qualifier.update(np.ones(384, dtype=np.float32), 1)
+
+        assert qualifier.is_cold is False
+        assert qualifier.class_counts == (2, 2)  # no padding left, and none needed
+        assert qualifier.n_obs == 4
 
     def test_a_rejection_keeps_the_anchors(self):
         """Only a positive ends the cold phase — rejections are what it is made of."""
@@ -262,8 +282,9 @@ class TestAnchors:
         assert qualifier.class_counts == (1, 3)
         assert qualifier.has_real_positive is False
 
-    def test_anchoring_is_ignored_once_a_real_positive_exists(self):
-        """Safe to call on every daemon boot — a warm campaign must not be re-anchored."""
+    def test_anchoring_is_trimmed_to_the_budget_on_every_call(self):
+        """Safe to call on every daemon boot — a campaign whose real positives already
+        cover the rejections must not be re-padded."""
         qualifier = BayesianQualifier(seed=42)
         qualifier.update(np.ones(384, dtype=np.float32), 1)
         qualifier.update(np.zeros(384, dtype=np.float32), 0)
@@ -271,6 +292,7 @@ class TestAnchors:
         qualifier.set_anchors(self._anchors())
 
         assert qualifier.class_counts == (1, 1)
+        assert qualifier.is_cold is False
 
     def test_anchoring_twice_does_not_stack(self):
         qualifier = BayesianQualifier(seed=42)
@@ -323,18 +345,21 @@ class TestColdPhaseAcquisition:
             q = self._cold(rejections, anchors)
             assert q.acquisition_mode() == "exploit (p)", (rejections, anchors)
 
-    def test_a_real_positive_hands_the_axis_back_to_the_balance(self):
-        q = self._cold(n_rejections=2, n_anchors=3)
-        q.update(np.random.RandomState(1).rand(8), 1)   # drops the anchors
+    def test_the_axis_returns_to_the_balance_only_when_the_last_anchor_goes(self):
+        """A first acceptance does not end the phase — it retires one anchor. The axis
+        stays on exploit while any invented positive is still propping the class up."""
+        q = self._cold(n_rejections=3, n_anchors=3)
+        q.update(np.random.RandomState(1).rand(8), 1)
 
-        assert q.has_real_positive
-        n_neg, n_pos = q.class_counts
-        assert (n_neg, n_pos) == (2, 1)
-        assert q.acquisition_mode() == "exploit (p)"    # neg > pos
+        assert q.has_real_positive and q.is_cold
+        assert q.acquisition_mode() == "exploit (p)"
 
-        for _ in range(3):
+        for _ in range(2):
             q.update(np.random.RandomState(2).rand(8), 1)
-        assert q.acquisition_mode() == "explore (BALD)"  # pos caught up
+
+        assert q.is_cold is False
+        assert q.class_counts == (3, 3)
+        assert q.acquisition_mode() == "explore (BALD)"  # real positives caught up
 
     def test_unfitted_model_still_reports_no_axis(self):
         assert BayesianQualifier(embedding_dim=8).acquisition_mode() is None

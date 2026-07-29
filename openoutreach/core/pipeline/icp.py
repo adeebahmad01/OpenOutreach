@@ -257,9 +257,11 @@ def ensure_anchors(campaign, minimum: int = ANCHOR_COUNT) -> np.ndarray | None:
     nothing is stored — callers treat that as "no anchors", never as an error. A failed
     *top-up* keeps whatever is already there.
 
-    Only ever called while a campaign has no real positive; ``BayesianQualifier`` clears
-    both the stored profiles and these embeddings the moment one arrives, so a returning
-    value here always means the cold phase is still running.
+    Never called to *invent* anchors once a real lead has qualified: from that point the
+    set only shrinks, one profile per acceptance (``BayesianQualifier._retire_anchors``,
+    which truncates the same two fields), and the daemon restores the survivors with
+    ``stored_anchors`` instead. A value returned from here therefore always means the
+    campaign's positive class is still short of the rejections it faces.
     """
     from openoutreach.discovery import embed_profile
 

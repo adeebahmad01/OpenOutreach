@@ -94,7 +94,7 @@ def _build_qualifiers(campaigns, cfg, kit_model=None):
     is available; every other campaign gets a warm-started GP qualifier, anchored on
     synthetic ideal profiles while it is still waiting for its first real positive.
     """
-    from openoutreach.core.pipeline.icp import ensure_anchors
+    from openoutreach.core.pipeline.icp import ensure_anchors, stored_anchors
     from openoutreach.crm.models import Lead
 
     qualifiers: dict[int, BayesianQualifier | KitQualifier] = {}
@@ -120,19 +120,20 @@ def _build_qualifiers(campaigns, cfg, kit_model=None):
                 len(y), int((y == 1).sum()), int((y == 0).sum()), campaign,
             )
 
-        # Cold phase — no lead has ever qualified, so every label is one class and the
-        # GP cannot fit at all. Anchor it on invented ideal profiles so acquisition,
-        # the promote gate and the query selector work from the first pass; they are
-        # dropped the moment a real lead qualifies.
-        if not q.has_real_positive:
-            anchors = ensure_anchors(campaign)
-            if anchors is not None:
-                q.set_anchors(anchors)
+        # Cold phase — the positive class is still partly invented. With no acceptance at
+        # all the labels are one class and the GP cannot fit, so generate the anchors;
+        # once real positives have started arriving, restore whatever survived their
+        # retirement (``BayesianQualifier._retire_anchors``) but never invent more — the
+        # padding only ever shrinks from there.
+        anchors = stored_anchors(campaign) if q.has_real_positive else ensure_anchors(campaign)
+        if anchors is not None:
+            q.set_anchors(anchors)
+            if q.is_cold:
                 logger.info(
                     colored("GP anchored", "cyan")
                     + " on %d synthetic ideal profile(s) for campaign %s"
-                    + " — no lead has qualified yet",
-                    len(anchors), campaign,
+                    + " — %d real positive(s) so far",
+                    q.n_anchors, campaign, q.n_real_positives,
                 )
 
         qualifiers[campaign.pk] = q

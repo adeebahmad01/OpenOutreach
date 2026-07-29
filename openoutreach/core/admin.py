@@ -29,10 +29,12 @@ class CampaignAdmin(admin.ModelAdmin):
 
     @admin.display(description="phase")
     def phase(self, obj):
-        """Cold (still steering on invented profiles) vs learning (a lead qualified).
+        """Cold (still part-steering on invented profiles) vs learning (padding retired).
 
-        The anchors change what the engine does — the GP fits on them, discovery stays
-        shallow — so which phase a campaign is in should not need a log dig to answer.
+        The anchors change what the engine does — the GP fits on them, acquisition stays
+        on exploit, every pass discovers as well as labels — so which phase a campaign is
+        in should not need a log dig to answer. The count falls by one per real
+        acceptance, so it doubles as the handover's progress bar.
         """
         n = len(obj.anchor_profiles or [])
         return f"cold ({n} anchor{'' if n == 1 else 's'})" if n else "learning"
