@@ -44,7 +44,9 @@ existing installs stay on a forward-only, backward-compatible migration graph (t
 ## Entry Flow
 
 `manage.py` — stock Django management entrypoint. Bare `python manage.py` (no subcommand, or a
-leading flag) defaults to `rundaemon`.
+leading flag) defaults to `rundaemon`. A global `--db PATH` (or `--db=PATH`) is stripped from argv
+before Django parses it and exported as `OPENOUTREACH_DB`, which `settings.py` reads for the SQLite
+file (default `data/db.sqlite3`); the parent directory is created if missing.
 
 ### `rundaemon` management command (`management/commands/rundaemon.py`)
 

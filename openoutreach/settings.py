@@ -65,10 +65,14 @@ TEMPLATES = [
     },
 ]
 
+# `manage.py --db PATH` sets OPENOUTREACH_DB; otherwise the bundled data dir.
+DATABASE_PATH = Path(os.environ.get("OPENOUTREACH_DB") or ROOT_DIR / "data" / "db.sqlite3").expanduser()
+DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
-        "NAME": str(ROOT_DIR / "data" / "db.sqlite3"),
+        "NAME": str(DATABASE_PATH),
     }
 }
 
