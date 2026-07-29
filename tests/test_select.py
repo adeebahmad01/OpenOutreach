@@ -110,6 +110,65 @@ class TestLabelStore:
         assert ("lead_job_title", "founder") not in store.cooccurring(pairs, pairs)
 
 
+class TestAnchorsAsPositives:
+    """The cold phase's only positives — see ``LabelStore.load``."""
+
+    def test_anchors_count_as_qualified_profiles(self, db):
+        c = _campaign(anchor_profiles=["founder cto stealth ai health startup"])
+        _labelled(c, "utilities telecom manager", qualified=False)
+        store = LabelStore.load(c)
+
+        assert store.qualified_count == 1
+        assert store.counts([("lead_job_title", "founder")]) == (1, 0)
+
+    def test_they_unblock_expansion_when_nothing_has_qualified(self, db):
+        # Without them this is the closed loop: no qualified profile → nothing
+        # co-occurs → the frontier never grows past its one-token seed nodes → the
+        # queries stay too broad to qualify anybody → still nothing co-occurs.
+        c = _campaign(anchor_profiles=["founder cto health supplements startup"])
+        for _ in range(5):
+            _labelled(c, "utilities telecom manager", qualified=False)
+        store = LabelStore.load(c)
+        seed = [("lead_job_title", t) for t in ("founder", "cto", "health", "manager")]
+        node = _node(c, [("lead_job_title", "founder")])
+
+        assert select.expand(node, store, seed) == 2  # cto, health — not manager
+        assert QueryNode.objects.filter(parent=node).count() == 2
+
+    def test_without_anchors_a_cold_campaign_cannot_expand(self, db):
+        c = _campaign(anchor_profiles=[])
+        for _ in range(5):
+            _labelled(c, "founder utilities telecom", qualified=False)
+        store = LabelStore.load(c)
+        node = _node(c, [("lead_job_title", "founder")])
+
+        assert select.expand(node, store, [("lead_job_title", "telecom")]) == 0
+
+    def test_anchors_lift_a_matching_node_above_a_rejected_one(self, db):
+        c = _campaign(anchor_profiles=["founder cto health supplements"] * 4)
+        for _ in range(4):
+            _labelled(c, "content manager utilities", qualified=False)
+        store = LabelStore.load(c)
+        good = _node(c, [("lead_job_title", "founder")])
+        bad = _node(c, [("lead_job_title", "content")])
+
+        assert select.estimate(good, store) > select.estimate(bad, store)
+
+    def test_a_real_positive_ends_it_without_a_phase_check(self, db):
+        # BayesianQualifier clears anchor_profiles on the first real positive, so the
+        # field is empty exactly when the cold phase is over.
+        c = _campaign(anchor_profiles=["founder cto invented"])
+        assert LabelStore.load(c).qualified_count == 1
+
+        c.anchor_profiles = []
+        c.save(update_fields=["anchor_profiles"])
+        _labelled(c, "founder cto real", qualified=True)
+        store = LabelStore.load(c)
+
+        assert store.qualified_count == 1
+        assert store.counts([("lead_job_title", "invented")]) == (0, 0)
+
+
 class TestEstimate:
     def test_an_unseen_node_sits_at_the_inherited_level(self, db):
         c = _campaign()

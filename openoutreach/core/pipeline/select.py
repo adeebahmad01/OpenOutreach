@@ -105,7 +105,33 @@ class LabelStore:
 
     @classmethod
     def load(cls, campaign) -> "LabelStore":
-        """The campaign's labelled leads: qualified = any deal that is not a rejection."""
+        """The campaign's labelled leads, **plus the anchors as positives**.
+
+        Qualified = any deal that is not a rejection.
+
+        **The anchors are what make the cold phase work at all**, here for the same
+        reason they already anchor the GP. Expansion only offers a token that has shared
+        a *qualified* profile with the node, and a campaign that has never accepted
+        anybody has no qualified profile — so the frontier could not grow past its
+        depth-1 seed nodes, which are one-token queries matching millions of the wrong
+        people, so nothing qualified, so the frontier still could not grow. A closed
+        loop, and the seed's own tokens could never be conjoined into the precise query
+        (``"founder cto"``, not ``founder``) that the walk exists to find.
+
+        The synthetic ideal profiles break it: they are written in ``profile_text``'s
+        shape, so they tokenize like any lead and say which words describe the people
+        this campaign wants — which is exactly the claim co-occurrence needs. It is the
+        same bargain the GP already takes, on the same evidence, with the same expiry:
+        ``BayesianQualifier`` clears ``Campaign.anchor_profiles`` the moment a real lead
+        qualifies, so reading the field needs no phase check — it is empty precisely when
+        the cold phase is over, and from then on the walk counts only ground truth.
+
+        They deliberately do **not** feed the vocabulary (``vocabulary.refresh``): an
+        anchor is one flat string with no per-field structure, and splitting it by guess
+        would file ``united states`` as a job title — the error
+        ``discovery.KEYWORD_SOURCE_FIELDS`` exists to prevent. Anchors say which words go
+        *together*; only a real lead row says which field a word is searchable in.
+        """
         from openoutreach.core.pipeline.vocabulary import profile_tokens
         from openoutreach.crm.models import Deal, DealState, Lead, Outcome
 
@@ -124,6 +150,16 @@ class LabelStore:
             if text:
                 tokens.append(profile_tokens(text))
                 labels.append(verdicts[lead_id])
+
+        anchors = 0
+        for profile in campaign.anchor_profiles or []:
+            if profile:
+                tokens.append(profile_tokens(profile))
+                labels.append(1)
+                anchors += 1
+        if anchors:
+            logger.debug("[%s] label store: %d real verdict(s) + %d anchor(s) as positives",
+                         campaign, len(labels) - anchors, anchors)
         return cls(tokens, labels)
 
     def __len__(self) -> int:
