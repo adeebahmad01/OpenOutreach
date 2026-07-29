@@ -176,3 +176,41 @@ class TestDescribeFilters:
     def test_renders_an_unknown_key_rather_than_dropping_it(self):
         """Filters are free-form dicts; a key we don't model must still be visible."""
         assert discovery.describe_filters({"some_new_filter": "x"}) == "some_new_filter x"
+
+
+class TestSeedKeywords:
+    """The ICP becomes a *vocabulary*, not one precise query."""
+
+    def test_domain_words_reach_the_searchable_axis(self):
+        # The gap this closes: ICPSpec had no field for what the target company *does*,
+        # so a health-and-wellness campaign seeded on role words alone and every query
+        # it composed was blind to industry. lead_industry is inert (card §8), but
+        # domain words are alive in lead_job_title, which matches headline text too.
+        from openoutreach.core.pipeline.icp import ICPSpec, _seed_keywords
+
+        spec = ICPSpec(role_keywords=["founder", "head"],
+                       domain_keywords=["wellness", "supplement"],
+                       seniority="founder", location="United States")
+        keywords = _seed_keywords(spec)
+
+        assert ("lead_job_title", "wellness") in keywords
+        assert ("lead_job_title", "supplement") in keywords
+        assert ("lead_job_title", "founder") in keywords
+        assert ("lead_seniority", "founder") in keywords
+
+    def test_phrases_are_split_and_stopwords_dropped(self):
+        # Lead Finder ANDs the words inside a value, so "head of growth" would match
+        # nobody. Split into separate one-token nodes and let the walk conjoin them.
+        from openoutreach.core.pipeline.icp import ICPSpec, _seed_keywords
+
+        keywords = _seed_keywords(ICPSpec(role_keywords=["Head of Growth"]))
+
+        assert ("lead_job_title", "head") in keywords
+        assert ("lead_job_title", "growth") in keywords
+        assert ("lead_job_title", "of") not in keywords
+        assert ("lead_job_title", "head of growth") not in keywords
+
+    def test_an_empty_icp_seeds_nothing(self):
+        from openoutreach.core.pipeline.icp import ICPSpec, _seed_keywords
+
+        assert _seed_keywords(ICPSpec()) == []

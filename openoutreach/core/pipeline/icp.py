@@ -51,16 +51,41 @@ ANCHOR_COUNT = 3
 
 
 class ICPSpec(BaseModel):
-    """The LLM's provider-agnostic ICP output — one value per family.
+    """The LLM's provider-agnostic ICP output — the walk's opening **vocabulary**.
+
+    Not a query. The seed used to be "one value per family, the single most precise
+    conjunction", which is what the clause model needed; the walk now conjoins tokens
+    itself against measured feedback, so what it wants from the LLM is *words worth
+    trying*, and as many as the ICP genuinely implies.
+
+    **``domain_keywords`` is the field that makes an ICP an ICP.** The old spec had
+    nowhere to put "what the target company actually does" — no field for it — so a
+    health-and-wellness campaign seeded on ``content``/``lead``/``united``/``states``
+    and every query it could compose selected for *role* while being blind to
+    *industry*. The obvious home would be ``lead_industry``, and that field is inert:
+    a nonsense value returns the identical count to no filter at all (§8 of the roadmap
+    card). But domain words are demonstrably alive in ``lead_job_title``, which matches
+    title *and* headline text — ``saas`` counts 3,306, ``startup`` 6,223, ``llm`` 1,214,
+    ``agentic`` 1,213, ``stealth`` 932 (§10). So they go there, alongside the role words,
+    and the frontier conjoins the two.
 
     ``seniority`` is typed to Lead Finder's vocabulary, not ``str``: an unknown level
-    returns an empty page rather than an error, wasting a fetch. The other families
-    are free text — a value the index doesn't carry is a normal empty page, one fetch
-    spent. Each family is a single scalar: the seed is one precise conjunction, and
-    minting — not the seed — supplies the alternatives.
+    returns an empty page rather than an error, wasting a fetch. Everything else is free
+    text — a token the index doesn't carry is a normal empty page, one fetch spent, and
+    the walk retires it.
     """
 
-    job_title: str = ""
+    role_keywords: list[str] = Field(
+        default_factory=list,
+        description="Single lowercase words from the job titles the buyer holds — "
+                    "'founder', 'head', 'marketing', 'content'. Words, never phrases.",
+    )
+    domain_keywords: list[str] = Field(
+        default_factory=list,
+        description="Single lowercase words naming what the target company does or "
+                    "sells — 'wellness', 'supplement', 'nutrition', 'saas'. Words, "
+                    "never phrases.",
+    )
     seniority: Seniority | None = None
     location: str = ""
     headcount_min: int = 1
@@ -68,10 +93,13 @@ class ICPSpec(BaseModel):
     country_code: str = ""
 
 
-# The ICP's free-text axes, paired with the ``ICPSpec`` attr each reads. Headcount is
-# absent: it is a pair of numbers riding every query, not a search term.
+# Which ``ICPSpec`` attrs feed which search axis. Both keyword lists land in
+# ``lead_job_title`` — the only free-text axis, and the one that matches headline text as
+# well as titles, which is what makes a domain word like ``wellness`` reachable at all.
+# Headcount is absent: numbers riding every query, not search terms.
 _SEED_FIELDS = (
-    ("lead_job_title", "job_title"),
+    ("lead_job_title", "role_keywords"),
+    ("lead_job_title", "domain_keywords"),
     ("lead_seniority", "seniority"),
     ("lead_location", "location"),
 )
@@ -80,22 +108,23 @@ _SEED_FIELDS = (
 def _seed_keywords(spec: ICPSpec) -> list[tuple[str, str]]:
     """The ICP as ``(field, token)`` keywords — the vocabulary the walk opens with.
 
-    **Split into words**, because a keyword is one word: the LLM writes ``"Head of
-    Growth"`` and Lead Finder reads that as three ANDed tokens, which is a query narrow
-    enough to be empty before the walk has learned anything. Splitting hands the frontier
-    three separate one-token nodes instead, and lets *measurement* decide which pair is
-    worth conjoining — which is how ``"founder cto"`` (9,027 rows, near-perfect precision)
-    gets found and ``"head of growth"`` does not get fired.
-
-    Stopwords go with them, so ``of`` never becomes a search term.
+    Everything is **split into words**, list or scalar, because a keyword is one word:
+    Lead Finder reads ``"Head of Growth"`` as three ANDed tokens, a query narrow enough
+    to be empty before the walk has learned anything. Splitting hands the frontier three
+    separate one-token nodes and lets *measurement* decide which pair is worth conjoining
+    — which is how ``"founder cto"`` (9,027 rows, near-perfect precision) gets found and
+    ``"head of growth"`` never gets fired. Stopwords go with them, so ``of`` never becomes
+    a search term, and the model's own phrasing survives being sloppy.
     """
     from openoutreach.core.pipeline.vocabulary import tokenize
 
     keywords = set()
     for field, attr in _SEED_FIELDS:
         value = getattr(spec, attr)
-        if value:
-            keywords |= {(field, token) for token in tokenize(str(value))}
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            if item:
+                keywords |= {(field, token) for token in tokenize(str(item))}
     return sorted(keywords)
 
 
