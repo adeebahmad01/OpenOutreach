@@ -1,174 +1,173 @@
 # openoutreach/core/pipeline/discover.py
-"""Discovery leg — fetch the GP's chosen maximal into first-touch Leads.
+"""Discovery leg — fire the frontier's best node into first-touch Leads.
 
-The top of the funnel: a page of ICP-matched rows becomes ``Lead`` rows (embedded
-with their retrieving query's keywords + profile_text) awaiting qualification. Free
-(Lead Finder bills nothing) and browserless. The qualify chain calls ``discover``
-whenever its candidate pool runs dry; each call fetches the single maximal the GP
-scores highest — a fresh region to explore or a proven vein to page deeper.
+The top of the funnel: a page of ICP-matched rows becomes ``Lead`` rows awaiting
+qualification. Free (Lead Finder bills nothing, for counting calls *and* paged ones) and
+browserless, so wall-clock is the only budget — roughly 45s per page.
 
-``discover`` takes the qualifier because the GP is now the query selector too: it
-scores every candidate by its keywords (``select.next_query``). Three things grow the
-vocabulary, all here, none a GP-confidence gate:
+One pass is: make sure there is a vocabulary and a frontier, draw a node
+(``select.next_node``), page it, and act on what came back. A page with rows is harvested,
+the node's offset advances and its children join the frontier. An empty page retires the
+node and the loop tries the next one, so a run of dead queries never yields an
+empty-handed pass while any live candidate remains.
 
-- **cold phase** — while no lead has qualified, mint on *every* pass. The seed is one
-  conjunction, so the pool spans one maximal and ranking it ranks nothing; breadth is
-  what gives the GP a set worth sorting, and it is the cheap half of the work (one LLM
-  call proposes many values, one fetch tests one conjunction). The phase also never
-  deepens a vein (``select.next_query``), so the whole cold walk is: widen, then fetch
-  the best fresh query out of a pool that keeps getting bigger;
-- **throughput** — every ``MINT_EVERY_N_QUALIFIED`` new qualified leads, mint clauses
-  from them (fold in what they taught us) before selecting;
-- **saturation** — the selector returns ``None`` (nothing fetchable), so mint, and
-  stop only if minting adds a value that survives the pre-screen.
+**Empty is three different facts and they are not interchangeable** — the provider reports
+``0`` for all of them (§7 of the roadmap card). ``search`` now also returns
+``summary.leads_found``, which separates the fourth case: rows empty while the count is
+positive is a *transport artifact*, not an answer. A burst of calls can hand back an empty
+page for a 71-million-lead query in 0.0s (§4), and the old walk wrote that down as
+"matches nobody" — permanently, and for every campaign. Nothing is retired on a first
+empty at offset 0 without a spaced retry agreeing.
 
-Every batch of new clauses — the cold-start seed and every mint — is **pre-screened**
-(``_prescreen``) before it composes any maximal: each new value is fetched **truly
-alone** (no headcount band, no sibling clauses — the check is only whether the keyword
-means anything to Lead Finder), its full page harvested like any other query, and a
-value that matches nobody is dropped from the pool so no product slab is ever built on
-a dead axis. Probing the value alone is what makes the size-1 empty record *sound* to
-write globally — it convicts the value itself, not the value-within-this-band. When a
-fired query matches nobody, ``select`` backs off to its one-clause-looser
-generalizations — the ``discover`` loop just keeps recording empties and re-selecting;
-the backoff itself lives in ``select._candidates``. See ``select.py``, ``mint.py`` and
-the roadmap cards ``p2-e3-discovery-unified-gp-query-selection`` and
-``p2-e3-discovery-empty-set-backoff``.
+There is no pre-screen, no clause minting, no LLM in the loop at all past the cold-start
+seed: the vocabulary is counted from qualified profiles (``vocabulary.refresh``) and the
+frontier is ranked by counting (``select``).
 """
 from __future__ import annotations
 
 import logging
+import time
 
 from termcolor import colored
 
 logger = logging.getLogger(__name__)
 
-
-def _move(offset: int) -> str:
-    """Name the move: ``deepen`` pages a known vein, ``explore`` opens a fresh one."""
-    return "deepen" if offset else "explore"
-
-
-def _qualified_count(campaign) -> int:
-    """Leads the LLM has accepted — any deal that is not a ``wrong_fit`` rejection."""
-    from openoutreach.crm.models import Deal, DealState, Outcome
-
-    return (
-        Deal.objects.filter(campaign=campaign, lead_id__isnull=False)
-        .exclude(state=DealState.FAILED, outcome=Outcome.WRONG_FIT).count()
-    )
+# Seconds to wait before re-asking a query that came back empty at offset 0. False zeros
+# are a burst artifact and return in ~0s where a real answer takes ~6s, so the retry only
+# has to break up the burst — it does not need to be long.
+EMPTY_RETRY_DELAY_S = 5.0
 
 
+def _harvest(campaign, node, rows: list[dict]) -> int:
+    """Persist a fetched page as first-touch Leads, keyworded by the retrieving node.
 
-def _harvest(campaign, clauses, offset: int, rows: list[dict]) -> int:
-    """Persist a fetched page as first-touch Leads, each keyworded by the retrieving
-    query so its terms ride the embedding (``db/leads.create_lead``).
-
-    Shared by the main walk and the pre-screen phase: every query that returns rows
-    creates leads, at any depth — there is no diagnostic-only fetch. Returns the count
-    of leads newly created (a re-surfaced profile keeps its original ``discovered_by``).
+    Returns the count of leads newly created; a re-surfaced profile keeps its original
+    ``discovered_by``. A page of entirely-familiar profiles therefore returns 0 while
+    still being a perfectly good page — which is why the caller does not read this as
+    "nothing left here" (that was bug 8: a full page of duplicates halting the engine with
+    the frontier wide open).
     """
     from openoutreach.core.db.leads import create_lead
-    from openoutreach.core.pipeline import select
-    from openoutreach.discovery import clause_terms
+    from openoutreach.discovery import keyword_terms
 
-    node = select.persist_fetched(campaign, clauses, offset)
-    query_terms = clause_terms(clauses)
+    pairs = node.pairs
+    terms = keyword_terms(pairs)
     return sum(
         create_lead(row, country_code=campaign.country_code,
-                    discovered_by=node, query_terms=query_terms)
+                    discovered_by=node, query_terms=terms)
         for row in rows
     )
 
 
-def _prescreen(campaign, new_pairs) -> int:
-    """Probe each new clause value **truly alone** and drop any the provider matches
-    nobody with, so no maximal is ever composed from a dead axis value.
+def _ensure_frontier(campaign, store) -> list[tuple[str, str]]:
+    """Make sure the campaign has a vocabulary and something to fire. Returns the vocabulary.
 
-    Runs at clause generation — the cold-start seed and every mint — so each value is
-    probed exactly once, before it enters the Cartesian product. The probe is an
-    ordinary fetch of the value **by itself** — no headcount band, no sibling clauses:
-    the only question is whether the keyword means anything to Lead Finder at all. A
-    value with support harvests its full page like any other query (the CRM holds every
-    profile; which of them to act on is decided downstream, not here); a value that
-    matches nobody is removed from the pool and recorded empty as the size-1 set of the
-    value alone. Probing the value alone is exactly what makes that singleton record
-    **sound to write globally**: it convicts the value itself — nothing else to blame —
-    so the cross-campaign prune it drives (``EmptyClauseSet`` carries no campaign FK) is
-    a true fact about the provider's index, not "empty within this campaign's size
-    band". A singleton empty prunes every maximal that contains the value *and*
-    generates no backoff generalization, so a pre-screened-dead value can never be
-    resurrected into a candidate whose family the pool no longer holds. The record is
-    idempotent and global — a re-minted dead value is dropped without another fetch, and
-    the record even spares a *different* campaign the probe. Best-effort: a provider
-    outage leaves the value in the pool, since a timeout is not proof of zero support.
-    Returns the number of values dropped. See ``p2-e3-discovery-empty-set-backoff``.
+    Cold start seeds from the ICP; every pass folds in the words of whatever has qualified
+    since. Both are cheap and idempotent — counting, not generation — so there is no
+    cadence to trigger and no high-water mark to store.
     """
-    from openoutreach.core.models import Clause, EmptyClauseSet
-    from openoutreach.core.pipeline import select
-    from openoutreach.discovery import filters_for, search, step_line
+    from openoutreach.core.models import QueryNode
+    from openoutreach.core.pipeline import select, vocabulary
+    from openoutreach.core.pipeline.icp import generate_seed
+
+    vocabulary.seed_seniorities()
+    existing = QueryNode.objects.filter(campaign=campaign).exists()
+    if not existing:
+        generate_seed(campaign)
+    vocabulary.refresh(campaign)
+
+    keywords = vocabulary.admitted_keywords()
+    if not keywords:
+        return keywords
+
+    if not existing:
+        opened = select.seed_frontier(campaign, keywords)
+        logger.info("[%s] frontier opened with %d keyword(s)", campaign, opened)
+        return keywords
+
+    # The vocabulary grew since the last pass — a new token is only ever a *child* of an
+    # already-fired node, so re-expanding those is what lets it reach the frontier at all.
+    for node in QueryNode.objects.filter(
+        campaign=campaign, state=QueryNode.State.FIRED,
+    ).prefetch_related("keywords"):
+        select.expand(node, store, keywords)
+    return keywords
+
+
+def _fetch(node, offset: int):
+    """One page, or ``None`` when the provider could not be reached.
+
+    An outage is explicitly *not* evidence about the query. The old walk called
+    ``mark_exhausted`` here, which was final and had no retry path, so one hiccup during
+    a seed fetch permanently retired a campaign's best query.
+    """
+    from openoutreach.core.pipeline.select import DISCOVERY_PAGE_SIZE
+    from openoutreach.discovery import search, step_line
     from openoutreach.emails import bettercontact
 
-    known_empty = set(EmptyClauseSet.objects.values_list("clause_key", flat=True))
-
-    dropped = 0
-    for pair in new_pairs:
-        pair = tuple(pair)
-
-        # Proven dead on an earlier pass (records are global, keyed on the value alone)
-        # — drop without a fetch.
-        if select.clause_key([pair]) in known_empty:
-            campaign.clauses.remove(*Clause.rows_for([pair]))
-            dropped += 1
-            continue
-
-        try:
-            rows = search(filters_for([pair]), limit=select.DISCOVERY_PAGE_SIZE, offset=0)
-        except bettercontact.BetterContactUnavailable:
-            continue  # can't fetch ≠ matches nobody — leave the value in the pool
-
-        if rows:
-            _harvest(campaign, [pair], 0, rows)
-            continue
-
-        select.record_empty([pair])
-        campaign.clauses.remove(*Clause.rows_for([pair]))
-        logger.info("%s", step_line(
-            "pre-screen", "nothing in Lead Finder's index — value dropped from the pool",
-            glyph="✗", color="yellow"))
-        dropped += 1
-    return dropped
+    try:
+        return search(node.to_filters(), limit=DISCOVERY_PAGE_SIZE, offset=offset)
+    except bettercontact.BetterContactUnavailable as exc:
+        logger.warning("%s", step_line(
+            "fetch", f"provider unavailable ({exc}) — leaving the node on the frontier",
+            glyph="⚠", color="red"))
+        return None
 
 
-def discover(session, qualifier) -> int:
-    """Fetch one query's page and persist its first-touch Leads. Returns the count.
+def _handle_empty(node, offset: int, page) -> str | None:
+    """Decide what an empty page means, and retire the node if it means anything.
 
-    Seeds and pre-screens the pool on a cold start, folds qualified learnings in on the
-    throughput cadence (pre-screening the minted values), then fetches the GP's
-    top-scored candidate. An empty page is recorded (its two shapes differently) and the
-    next candidate tried — an offset-0 empty also backs off, so ``select`` offers the
-    query's one-clause-looser generalizations next. The loop keeps firing the next-best
-    query until one returns leads, so a run of dead queries never yields an empty-handed
-    pass while any live candidate remains. Returns 0 only when the pool saturates
-    (minting adds no surviving value) or a fetch is unavailable (best-effort — a
-    provider outage must not fail the enclosing find_email task).
-
-    Cost of never capping: on a mostly-dead ICP one call can fire many queries serially
-    before it saturates, and each fetch is a blocking ~45s provider call. Termination
-    still holds even though an empty now *spawns* generalizations: each empty iteration
-    permanently records one distinct clause set (``next_query`` never re-picks a recorded
-    empty), and the subset lattice is finite, so the recorded-empty set grows
-    monotonically to a fixed bound and the loop ends at the non-empty frontier or at
-    saturation.
-
-    Gated as before: freemium campaigns seed from their kit, and a campaign with no
-    finder key or no product/target can't be searched.
+    Returns the verdict, or ``None`` when the page was a transport artifact and the node
+    keeps its place on the frontier.
     """
-    from openoutreach.core.conf import CAMPAIGN_CONFIG
     from openoutreach.core.pipeline import select
-    from openoutreach.core.pipeline.icp import generate_seed
-    from openoutreach.core.pipeline.mint import mint_clauses
-    from openoutreach.discovery import filters_for, search, step_line
+    from openoutreach.discovery import step_line
+
+    # The count came back positive while the rows did not: that is the burst artifact of
+    # §4, an answer about our call rather than about the query. Never retire on it.
+    if page.leads_found:
+        logger.warning("%s", step_line(
+            "fetch", f"empty page but {page.leads_found:,} in the index — transport "
+                     f"artifact, node kept", glyph="⚠", color="yellow"))
+        return None
+
+    if offset == 0:
+        # One spaced retry before believing a zero. The record it would otherwise write is
+        # permanent and prunes a whole subtree, so it is worth 5 seconds to be sure.
+        time.sleep(EMPTY_RETRY_DELAY_S)
+        retry = _fetch(node, 0)
+        if retry is None or retry.leads:
+            return None
+        if retry.leads_found:
+            return None
+
+    verdict = select.retire(node, at_offset=offset)
+    messages = {
+        "dead": "nobody in the index matches this combination — node and its whole "
+                "subtree pruned",
+        "drained": f"vein exhausted at offset {offset} — every match is already a lead "
+                   f"here, so the subtree is pruned too",
+        "capped": f"hit the {select.REACH_CAP:,}-row reach cap — node retired, but its "
+                  f"children open fresh windows",
+    }
+    logger.info("%s", step_line("fetch", messages[verdict], glyph="✗", color="yellow"))
+    return verdict
+
+
+def discover(session, qualifier=None) -> int:
+    """Fire frontier nodes until one returns leads. Returns the count of new Leads.
+
+    ``0`` means the frontier is spanned (nothing unfired and nothing left to deepen) or a
+    fetch was unavailable — both best-effort, since a provider outage must not fail the
+    enclosing task. ``qualifier`` is accepted and ignored: the GP no longer selects
+    queries (§13), and the parameter stays only so the call sites in ``pools`` read the
+    same for one release.
+
+    Gated as before: freemium campaigns seed from their kit, and a campaign with no finder
+    key or no product/target cannot be searched.
+    """
+    from openoutreach.core.pipeline import select
+    from openoutreach.discovery import step_line
     from openoutreach.emails import bettercontact
 
     campaign = session.campaign
@@ -181,85 +180,33 @@ def discover(session, qualifier) -> int:
 
     logger.info(colored(f"▶ discover · {campaign}", "blue", attrs=["bold"]))
 
-    if not campaign.clauses.exists():
-        _prescreen(campaign, generate_seed(campaign))
+    store = select.LabelStore.load(campaign)
+    keywords = _ensure_frontier(campaign, store)
 
-    if not qualifier.has_real_positive:
-        # Cold phase: mint every pass. The seed is a single conjunction, so the pool
-        # spans one maximal and the GP's ranking of it is a ranking of one — there is
-        # nothing to sort. Widening is what gives the model a set worth sorting, and it
-        # is the cheap half of the work here: one LLM call proposes many clause values,
-        # while firing a query costs a page fetch and tells us about one conjunction. So
-        # generate breadth first and let the GP order it, rather than walking a narrow
-        # pool query by query. Values are still pre-screened, so the breadth is real —
-        # that is the cost of this trade, paid one probe per new value.
-        _prescreen(campaign, mint_clauses(campaign))
-    else:
-        # Throughput mint: fold in the leads that qualified since the last mint, then
-        # pre-screen the fresh values so a dead axis never poisons a product slab.
-        qualified = _qualified_count(campaign)
-        if qualified - campaign.discovery_minted_at_qualified >= CAMPAIGN_CONFIG["mint_every_n_qualified"]:
-            _prescreen(campaign, mint_clauses(campaign))
-
-    empties = 0
-    minted = False
+    retired = 0
     while True:
-        query = select.next_query(campaign, qualifier)
-        if query is None:
-            # Saturation: the pool (with its backoff generalizations) spans nothing
-            # fetchable. Widen the axes once — if a minted value survives the pre-screen
-            # it opens a fresh maximal, so reselect; otherwise stop (the pool is bigger
-            # now, so the next call retries). One mint per call bounds the loop when
-            # every new value is either dead or empty-pruned.
-            if not minted:
-                fresh = mint_clauses(campaign)
-                survivors = len(fresh) - _prescreen(campaign, fresh)
-                if survivors > 0:
-                    minted = True
-                    continue
+        node = select.next_node(campaign, store)
+        if node is None:
             logger.info(colored(
-                f"■ discovery saturated · {campaign} — pool fully spanned "
-                f"({empties} dead quer{'y' if empties == 1 else 'ies'} this pass)", "blue"))
+                f"■ discovery saturated · {campaign} — frontier spanned "
+                f"({retired} node(s) retired this pass)", "blue"))
             return 0
 
-        filters = filters_for(query.clauses)
-        try:
-            rows = search(filters, limit=select.DISCOVERY_PAGE_SIZE, offset=query.offset)
-        except bettercontact.BetterContactUnavailable as exc:
-            # Best-effort: a provider outage or an un-fetchable query must not fail the
-            # caller. Retire the query (persist so it isn't re-picked, exhaust so it
-            # isn't deepened) but do NOT record it empty — we don't know it matches
-            # nobody, only that we couldn't fetch it.
-            logger.warning("%s", step_line(
-                _move(query.offset), f"provider unavailable ({exc}) — retiring this query",
-                glyph="⚠", color="red"))
-            select.persist_fetched(campaign, query.clauses, query.offset)
-            select.mark_exhausted(campaign, query.clauses)
-            return 0
+        offset = node.next_offset
+        page = _fetch(node, offset)
+        if page is None:
+            return 0  # outage: the node keeps its place, the caller carries on
 
-        if rows:
-            created = _harvest(campaign, query.clauses, query.offset, rows)
-            logger.info("%s", step_line(
-                _move(query.offset), f"{created} new lead(s) from {len(rows)} row(s)",
-                glyph="✓", color="green"))
-            return created
+        if not page.leads:
+            if _handle_empty(node, offset, page) is None:
+                return 0  # transport artifact — re-firing now would just repeat it
+            retired += 1
+            continue
 
-        # Empty page — record what it means, then try the next candidate. offset 0
-        # convicts the conjunction (matches nobody); a deeper empty is a vein run dry.
-        if query.offset == 0:
-            select.record_empty(query.clauses)
-            logger.info("%s", step_line(
-                "explore",
-                "dead end — nobody matches this whole combination; recorded so any narrower "
-                "query is pruned, backed off to its one-clause-looser generalizations",
-                glyph="✗", color="yellow"))
-        else:
-            logger.info("%s", step_line(
-                "deepen", f"vein empty — no more leads past offset {query.offset}; marked used up",
-                glyph="✗", color="yellow"))
-        select.persist_fetched(campaign, query.clauses, query.offset)
-        select.mark_exhausted(campaign, query.clauses)
-        empties += 1
-        # No cap: loop back and try the next-best query. Each empty is now recorded +
-        # exhausted, so next_query won't re-pick it and the candidate set shrinks —
-        # the loop ends at saturation (next_query is None), not on a dead-query count.
+        created = _harvest(campaign, node, page.leads)
+        select.advance(node, leads_found=page.leads_found)
+        grown = select.expand(node, store, keywords)
+        logger.info("%s", step_line(
+            "fetch", f"{created} new lead(s) from {len(page.leads)} row(s) · "
+                     f"+{grown} node(s) on the frontier", glyph="✓", color="green"))
+        return created

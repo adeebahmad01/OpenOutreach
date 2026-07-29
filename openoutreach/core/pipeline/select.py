@@ -1,341 +1,399 @@
 # openoutreach/core/pipeline/select.py
-"""Query selection — one GP scores every fetchable candidate, argmax wins.
+"""Query selection — the frontier is counted, drawn from, and fired. No model involved.
 
-The whole discovery walk, from first principles. Clauses are the axes; the primary
-queries are **maximals** — one value per family, the full Cartesian product of the
-campaign's clause pool. Breadth comes from *more clause values* (``mint.py``), never
-from dropping clauses at composition time. The one loosening is **lazy backoff**: a
-conjunction that matches nobody enqueues its one-clause-removed generalizations
-(``_generalizations``), so the walk descends toward the non-empty frontier instead of
-grinding through a Cartesian product of dead leaves — and recording those sub-maximal
-empties finally gives the anti-monotone prune teeth *within* a single pool. Every
-candidate, maximal or generalization, is scored the same way (see below) and, when it
-returns rows, harvested the same way. See ``p2-e3-discovery-empty-set-backoff``.
+The whole discovery walk, from first principles. A **node** is a set of ``(field, token)``
+keywords; firing it pages Lead Finder for the conjunction. Its **children** are itself
+plus one more token. There is no remove move: the frontier is global — every unfired child
+of every fired node, all in one pool — so a shallow node's untried siblings are always
+still reachable and removal would be a second way to say the same thing.
 
-Every next move is one candidate, scored by one value function:
+**A node's value is arithmetic over labels.**
 
-- a **fresh** maximal (offset 0) — explore a region,
-- a **deepen** of a fetched, non-exhausted maximal (its next page) — exploit a vein.
+    P̂(node) = (a + 2·P̂(parent)) / (a + b + 2)
 
-Both are scored the same way: embed the maximal's *keywords* (``discovery.embed_query``)
-and read the GP's balance-driven acquisition (``qualifier.acquisition_scores`` —
-predicted P in exploit mode, BALD info-gain in explore mode). Argmax picks the fetch.
+where ``a``/``b`` are the qualified/rejected leads in the store whose profile contains all
+of this node's tokens. That is ordinary Laplace smoothing with the prior pointed at the
+**parent's rate** instead of at 0.5, which is the whole idea: the parent supplies the
+level, the child's own counts move it off, and a child with thin evidence stays near its
+parent rather than swinging to 0 or 1.
 
-Exact-embedding every maximal is too costly once the pool is large, so ``_prefilter``
-first ranks the *whole* pool by a cheap composed score — embed only the pool's few
-dozen distinct clause phrases, then pool them per query — and keeps the top-K on the
-live axis (``qualifier.acquisition_mode``), and only those K are exact-embedded. Mean
-pooling tracks exploit's P well and is complete at a small K; explore's BALD is a
-variance that doesn't decompose over clauses, so it gets a larger K (see ``PREFILTER_K``).
-There is no deepen/visit alternation and no counted-deal metric: the GP that ranks
-which lead to label also ranks which query to fetch, because a discovered lead carries
-its retrieving query's keywords in its embedding (``db/leads.create_lead``), so the GP
-learns query-term → fit from ordinary labelling. Deepen-vs-explore is not two policies;
-it is argmax over one score, and a vein bounds itself — a maximal empties within the
-provider's 10k window and is marked ``exhausted``, dropping out of the candidates.
+**Why not the GP.** It used to score candidates by embedding their keywords. Measured
+head-to-head on 4,100 parent→child edges with the GP fit on one half of the labels and
+every truth measured on the other, the counts win outright and the GP adds *nothing* on
+top of them:
 
-Cold start (GP unfitted): acquisition returns ``None`` and selection falls back to
-seed-first, fresh-before-deep order — correct behaviour when the model has no signal,
-and strictly simpler than the walk it replaces.
+    child counts smoothed to parent   pearson 0.661     P(parent) only        0.567
+    P(child) counts alone             0.653             GP(child) alone       0.450
+    counts + 0.15·GP delta            0.660             P(parent) + GP delta  0.452
 
-``next_query`` returning ``None`` means the pool spans nothing fetchable — the
-saturation signal ``discover`` answers by minting clauses. See the roadmap card
-``p2-e3-discovery-unified-gp-query-selection``.
+The GP is not gone from the system — it still qualifies leads, and it is what produces the
+``a``/``b`` this module counts. It is gone from *choosing queries*. The residual-anchoring
+idea (``P(parent) + λ·GP delta``) was measured too: real, but worth 0.02 pearson at
+λ≈0.15, and worse than doing nothing at λ=1. See §13 of the roadmap card
+``p1-e3-leadfinder-index-semantics-and-query-model-rethink``.
+
+**Sampling is Thompson over the same two numbers.** ``θ ~ Beta(a + 2·P̂(parent), b +
+2·(1−P̂(parent)))`` — the Beta parameters *are* the smoothed estimate, so this is one line
+rather than a mechanism, and there is no constant to tune. Width tracks evidence:
+``Beta(141, 3)`` is razor-tight and ``Beta(2, 1)`` is wide, so a node nobody has tried gets
+tried and a node measured bad three times stops appearing. Set ``THOMPSON = False`` to fall
+back to greedy — defensible here, because depletion pushes the walk along on its own, and
+which is better cannot be settled offline (simulating it needs corpus answers for queries
+never fired).
+
+**Retirement is a corpus fact, never a model fact.** Nothing is retired for scoring badly —
+the qualifier refits constantly, and a barren yield is a verdict about a view, not about
+whether anybody matches. Only emptiness retires a node, and *which* emptiness depends on
+the offset, because the provider answers ``0`` both for a query matching nobody and for one
+paged past its end (§7).
 """
 from __future__ import annotations
 
 import hashlib
-import itertools
 import json
 import logging
-from collections import namedtuple
 
 import numpy as np
-
-from openoutreach.core.models import Clause, DiscoveryQuery, EmptyClauseSet
-from openoutreach.discovery import embed_queries, embed_query
 
 logger = logging.getLogger(__name__)
 
 DISCOVERY_PAGE_SIZE = 100
 
-# The campaign's fixed ICP size band — it rides every maximal unchanged and is never a
-# backoff axis (dropping a bound queries off-ICP; the provider fills a half-open or
-# inverted band with any-size companies rather than returning nothing). Mirrors
-# ``discover._HEADCOUNT_FAMILIES``.
-_HEADCOUNT_FAMILIES = ("company_headcount_min", "company_headcount_max")
+# Elasticsearch's ``index.max_result_window``, measured (§7): every query is worth at most
+# 10,000 rows however many millions it counts. Reaching it means "capped", which is a very
+# different fact from "drained" — a capped node's children still open fresh windows, a
+# drained node's children are already in our DB.
+REACH_CAP = 10_000
 
-# Exact-embedding every fetchable maximal is the cost — a large clause pool spans a
-# huge Cartesian product, and each candidate is a model forward pass (~10 ms). So the
-# selector prefilters the *whole* pool with a cheap composed score (embed only the
-# pool's few dozen distinct clause phrases, then pool them per query — free), keeps
-# the top-K on the live acquisition axis, and exact-embeds only those K.
-#
-# The two axes have very different prefilter accuracy, so each gets its own K:
-#   exploit — a query's embedding is ~the mean of its clause embeddings, so composed
-#     P(f>0.5) tracks the truth (Spearman ~0.9); the true top is recovered with recall
-#     1.0 by K≈128. A small K is genuinely complete here.
-#   explore — BALD rewards posterior *variance*, a quadratic form that does not
-#     decompose over clauses, so the cheap proxy (mean per-clause variance) is much
-#     weaker (recall ~0.44 at K=1024). It gets a larger budget; K=1024 is the knee of
-#     the recall/cost curve (~10 s) before deep diminishing returns. The proxy means
-#     rather than sums so a mixed-depth pool (backoff admits sub-maximals) compares
-#     candidates depth-neutrally, not by clause count.
-# See the roadmap card ``p2-e3-discovery-unified-gp-query-selection``.
-PREFILTER_K = {"exploit (p)": 256, "explore (BALD)": 1024}
-
-# The query to fetch next: a clause set and the offset to page it at. Nothing is
-# persisted until the fetch returns rows. offset 0 is a fresh maximal; offset > 0 is
-# a deepen of a vein already fetched.
-NextQuery = namedtuple("NextQuery", ["clauses", "offset"])
+# Draw the frontier's order from each node's Beta, rather than taking its mean. One line,
+# nothing to tune; see the module docstring.
+THOMPSON = True
 
 
-# ── clause-set identity ──────────────────────────────────────────────
+# ── node identity ────────────────────────────────────────────────────
 
-def canonicalize(clauses) -> str:
-    """Deterministic text for a clause set — sorted ``family=value`` pairs."""
-    return json.dumps(sorted(clauses), separators=(",", ":"))
+def token_key(keywords) -> str:
+    """sha256 of the canonicalized keyword set — the node-identity key.
 
-
-def clause_key(clauses) -> str:
-    """sha256 of the canonicalized clause set — the node-identity key for dedup."""
-    return hashlib.sha256(canonicalize(clauses).encode()).hexdigest()
-
-
-# ── persist / exhaust / blacklist ────────────────────────────────────
-
-def persist_fetched(campaign, clauses, offset: int) -> DiscoveryQuery:
-    """Record a just-fetched ``(clause set, offset)`` page, deduped on the triple.
-
-    Returns the node so its first-touch leads can point back via
-    ``Lead.discovered_by`` — the link that carries the query's keywords into each
-    lead's embedding.
+    Order-independent and field-aware, so ``{title:founder, title:cto}`` is one node
+    whichever parent reached it first. Add-only expansion over three fields means most
+    nodes *are* reachable several ways, so this is load-bearing rather than a dedup nicety.
     """
-    node, created = DiscoveryQuery.objects.get_or_create(
-        campaign=campaign, clause_key=clause_key(clauses), offset=offset,
+    canonical = json.dumps(sorted(tuple(k) for k in keywords), separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+# ── the label store ──────────────────────────────────────────────────
+
+class LabelStore:
+    """Every labelled profile as a token set plus a verdict — the walk's whole evidence.
+
+    Loaded once per discovery pass and held in memory: the store is hundreds of rows, so
+    counting a node is a set-containment scan that costs microseconds, and re-deriving it
+    each pass means there is no counter anywhere to drift out of step with the labels.
+    """
+
+    def __init__(self, tokens: list[frozenset[str]], labels: list[int]):
+        self._tokens = tokens
+        self._labels = labels
+
+    @classmethod
+    def load(cls, campaign) -> "LabelStore":
+        """The campaign's labelled leads: qualified = any deal that is not a rejection."""
+        from openoutreach.core.pipeline.vocabulary import profile_tokens
+        from openoutreach.crm.models import Deal, DealState, Lead, Outcome
+
+        verdicts = {}
+        for lead_id, state, outcome in (
+            Deal.objects.filter(campaign=campaign, lead_id__isnull=False)
+            .values_list("lead_id", "state", "outcome")
+        ):
+            verdicts[lead_id] = 0 if (state == DealState.FAILED
+                                      and outcome == Outcome.WRONG_FIT) else 1
+
+        tokens, labels = [], []
+        for lead_id, text in (
+            Lead.objects.filter(pk__in=verdicts).values_list("pk", "profile_text")
+        ):
+            if text:
+                tokens.append(profile_tokens(text))
+                labels.append(verdicts[lead_id])
+        return cls(tokens, labels)
+
+    def __len__(self) -> int:
+        return len(self._labels)
+
+    @property
+    def base_rate(self) -> float:
+        """The level a depth-1 node inherits — what an unfiltered query would qualify at.
+
+        The root's stand-in. The walk deliberately never *fires* the empty query (it
+        matches everyone, and its 10k window is the provider's famous-company head), so
+        the one thing a root would have supplied is taken from the labels instead.
+        """
+        if not self._labels:
+            return 0.5
+        return sum(self._labels) / len(self._labels)
+
+    def counts(self, pairs) -> tuple[int, int]:
+        """``(a, b)`` — labelled profiles containing every one of a node's tokens.
+
+        Field-agnostic (see ``vocabulary.profile_tokens``): a node's tokens are matched
+        anywhere in the profile, which is how the estimator was measured and what lets
+        rows predating per-field capture still count.
+        """
+        wanted = {token for _, token in pairs}
+        a = b = 0
+        for tokens, label in zip(self._tokens, self._labels):
+            if wanted <= tokens:
+                if label:
+                    a += 1
+                else:
+                    b += 1
+        return a, b
+
+    def cooccurring(self, pairs, candidates) -> list[tuple[str, str]]:
+        """Candidate keywords that appear alongside ``pairs`` in ≥1 *qualified* profile.
+
+        The expansion rule, and the reason the frontier stays small without a top-K cap.
+        A child whose tokens never co-occur in anything we have accepted is a guess the
+        store cannot speak to at all: it would enter with ``a = b = 0``, inherit its
+        parent's estimate exactly, and be indistinguishable from every one of its
+        thousand siblings — so the draw among them would be noise, and most would be
+        empty at the provider anyway. Requiring one real co-occurrence keeps every child
+        a proposition the evidence has something to say about, and it self-limits with
+        depth: a three-token node has few words that ever shared a profile with it.
+        """
+        wanted = {token for _, token in pairs}
+        live = set()
+        for tokens, label in zip(self._tokens, self._labels):
+            if label and wanted <= tokens:
+                live |= tokens
+        return [(field, token) for field, token in candidates
+                if token in live and (field, token) not in set(pairs)]
+
+
+# ── the estimator ────────────────────────────────────────────────────
+
+def _beta_params(node, store: LabelStore, cache: dict) -> tuple[float, float]:
+    """``(α, β)`` of a node's Beta — the smoothed estimate, in the form Thompson wants.
+
+    Two pseudo-counts of prior mass pointed at the parent's rate. The budget of 2 is
+    ordinary Laplace, not a tuned knob: it is the same "one imagined success and one
+    imagined failure" that keeps a zero-count node from reading as certain.
+    """
+    a, b = store.counts(node.pairs)
+    level = estimate(node.parent, store, cache) if node.parent_id else store.base_rate
+    return a + 2 * level, b + 2 * (1 - level)
+
+
+def estimate(node, store: LabelStore, cache: dict | None = None) -> float:
+    """``P̂(node)`` — the node's smoothed qualification rate.
+
+    Recurses to the parent for the level. Depth is the number of tokens in a node, so the
+    recursion is a handful of frames; the cache keeps a frontier of thousands from
+    re-walking shared ancestry.
+    """
+    cache = {} if cache is None else cache
+    if node is None:
+        return store.base_rate
+    if node.pk in cache:
+        return cache[node.pk]
+    alpha, beta = _beta_params(node, store, cache)
+    cache[node.pk] = value = alpha / (alpha + beta)
+    return value
+
+
+# ── the frontier ─────────────────────────────────────────────────────
+
+def frontier(campaign) -> list:
+    """Every node still worth firing: unfired children, plus fired veins with pages left.
+
+    One pool, deliberately. Deepening a proven vein and opening a fresh one are not two
+    policies needing an alternation rule — they are two rows scored the same way, and the
+    draw decides. A vein that stops paying accumulates ``b`` and sinks on its own.
+    """
+    from openoutreach.core.models import QueryNode
+
+    return list(
+        QueryNode.objects
+        .filter(campaign=campaign,
+                state__in=(QueryNode.State.FRONTIER, QueryNode.State.FIRED))
+        .prefetch_related("keywords").select_related("parent")
     )
-    if created:
-        node.clauses.set(Clause.rows_for(clauses))
-    return node
 
 
-def mark_exhausted(campaign, clauses) -> None:
-    """Flag every page of a maximal exhausted — its fetch hit an empty page.
+def next_node(campaign, store: LabelStore, rng=None):
+    """The node to fire next, or ``None`` when the frontier is empty.
 
-    The whole line shares the fate of its deepest, dry page, so it drops out of the
-    candidate set. Emptiness is the only thing that retires a line; a barren *yield*
-    (leads that exist but don't qualify) is a verdict about a view, not the query.
+    ``None`` is the saturation signal: nothing left unfired and nothing left to deepen,
+    which ``discover`` answers by refreshing the vocabulary and expanding again.
     """
-    DiscoveryQuery.objects.filter(
-        campaign=campaign, clause_key=clause_key(clauses),
-    ).update(exhausted=True)
-
-
-def record_empty(clauses) -> None:
-    """Blacklist a conjunction the index matched nobody with. Idempotent, global.
-
-    Only an offset-0 empty page belongs here — a deeper empty page is a vein running
-    out, not a conjunction that matches nobody. The set can be any depth: a fired
-    maximal, a backed-off generalization, or a size-1 pre-screen probe. Read back as the
-    anti-monotone prune — a candidate is dead iff some recorded set is a subset of it —
-    so recording a *sub*-maximal empty (e.g. the size-1 ``{location=Oman}`` a pre-screen
-    writes) prunes every maximal that contains it in one shot, which is the leverage the
-    backoff walks toward. See ``p2-e3-discovery-empty-set-backoff``.
-    """
-    entry, created = EmptyClauseSet.objects.get_or_create(clause_key=clause_key(clauses))
-    if created:
-        entry.clauses.set(Clause.rows_for(clauses))
-
-
-# ── the maximals the pool spans ──────────────────────────────────────
-
-def _pool(campaign) -> dict[str, list[str]]:
-    """Clause values grouped by family, in insertion order (the ICP's ranking)."""
-    pool: dict[str, list[str]] = {}
-    for family, value in campaign.clauses.order_by("pk").values_list("family", "value"):
-        pool.setdefault(family, []).append(value)
-    return pool
-
-
-def _maximals(pool: dict[str, list[str]]) -> list[list[tuple[str, str]]]:
-    """One value from every family — the Cartesian product, the only queries fired."""
-    families = sorted(pool)
-    return [
-        sorted(zip(families, combo))
-        for combo in itertools.product(*(pool[f] for f in families))
-    ]
-
-
-def _ranker(pool: dict[str, list[str]]):
-    """Order a conjunction by *mean* distance from the pool's head, so the seed leads.
-
-    The mean, not the sum: once backoff admits sub-maximal candidates the pool is
-    mixed-depth, and a summed rank would score a shorter conjunction closer to the
-    head purely for holding fewer clauses. Averaging keeps the cold-start order
-    depth-neutral — the same reason the explore prefilter proxy means its per-clause
-    variances rather than summing them.
-    """
-    rank = {f: {v: i for i, v in enumerate(vs)} for f, vs in pool.items()}
-    return lambda conjunction: (
-        sum(rank[f][v] for f, v in conjunction) / len(conjunction) if conjunction else 0.0
-    )
-
-
-def _line_state(campaign) -> dict[str, dict]:
-    """Per fetched maximal (by clause_key): high-water offset and whether exhausted."""
-    lines: dict[str, dict] = {}
-    for key, offset, exhausted in (
-        DiscoveryQuery.objects.filter(campaign=campaign)
-        .values_list("clause_key", "offset", "exhausted")
-    ):
-        line = lines.setdefault(key, {"max_offset": offset, "exhausted": exhausted})
-        line["max_offset"] = max(line["max_offset"], offset)
-        line["exhausted"] = line["exhausted"] or exhausted
-    return lines
-
-
-def _empty_sets() -> list[frozenset]:
-    """Recorded empty conjunctions as clause-pair sets, for the subset test."""
-    return [frozenset(s.clause_pairs) for s in EmptyClauseSet.objects.prefetch_related("clauses")]
-
-
-def _generalizations(empty_sets: list[frozenset]) -> list[list[tuple[str, str]]]:
-    """One-clause-removed children of every recorded empty conjunction — the lazy backoff.
-
-    Emptiness is monotone: a conjunction that matched nobody says nothing new about its
-    supersets (already empty) but licenses trying its immediate *sub*-conjunctions —
-    each drops a single clause and may well match someone. A child that itself fetches
-    empty is recorded in turn, so its own children surface next pass: the descent walks
-    one level at a time toward the non-empty frontier, generating only the children of
-    empties actually hit, never the whole lattice.
-
-    Only *value* clauses are dropped; the headcount band rides every child unchanged
-    (``_HEADCOUNT_FAMILIES``) — loosening a bound queries off-ICP. A set with one value
-    clause (or none) contributes no child: its only value-less descent is the bare band,
-    which matches everyone and is not a candidate. This is what makes a size-1 pre-screen
-    empty inert here, and — since a legacy band-bundled pre-screen empty has exactly one
-    value clause too — keeps it from resurrecting a pruned value. See the roadmap card
-    ``p2-e3-discovery-empty-set-backoff``.
-    """
-    children = []
-    for empty in empty_sets:
-        droppable = [c for c in empty if c[0] not in _HEADCOUNT_FAMILIES]
-        if len(droppable) <= 1:
-            continue
-        for clause in droppable:
-            children.append(sorted(empty - {clause}))
-    return children
-
-
-def _candidates(campaign, pool: dict[str, list[str]]) -> list[NextQuery]:
-    """Every fetchable candidate as a ``NextQuery``, minus exhausted and empty-pruned.
-
-    The candidate frontier is the pool's maximals **and** the one-clause-removed
-    generalizations of every recorded empty (``_generalizations`` — the backoff),
-    deduped by ``clause_key`` so a child shared by several empties is offered once. A
-    fetched, non-exhausted set yields its next page (deepen); an untried one yields
-    offset 0 (fresh). A set that is recorded empty, or a superset of a recorded-empty
-    set, is dropped. The frontier is re-derived every call rather than persisted: the GP
-    re-scores between calls so a stored queue would only be re-ranked anyway, and
-    ``EmptyClauseSet`` already holds the recursion state the backoff descends.
-    """
-    lines = _line_state(campaign)
-    empty_keys = set(EmptyClauseSet.objects.values_list("clause_key", flat=True))
-    empty_sets = _empty_sets()
-
-    # Dedup maximals against backoff children by clause_key — many maximals share the
-    # same n−1 child, and a child can be reached from several empties.
-    frontier: dict[str, list[tuple[str, str]]] = {}
-    for conjunction in itertools.chain(_maximals(pool), _generalizations(empty_sets)):
-        frontier.setdefault(clause_key(conjunction), conjunction)
-
-    candidates = []
-    for key, conjunction in frontier.items():
-        line = lines.get(key)
-        if line and line["exhausted"]:
-            continue
-        if key in empty_keys or any(empty <= frozenset(conjunction) for empty in empty_sets):
-            continue
-        offset = line["max_offset"] + DISCOVERY_PAGE_SIZE if line else 0
-        candidates.append(NextQuery(conjunction, offset))
-    return candidates
-
-
-# ── selection ────────────────────────────────────────────────────────
-
-def _prefilter(candidates: list[NextQuery], qualifier, strategy: str) -> list[NextQuery]:
-    """The top-K maximals to exact-embed, ranked by a cheap composed score.
-
-    Embeds only the pool's distinct clause phrases (dozens), never the Cartesian
-    product (thousands), then scores every candidate on the live acquisition axis:
-
-    - exploit — composed query embedding (mean of its clause embeddings) → P(f>0.5),
-    - explore — summed per-clause posterior variance, a cheap BALD proxy.
-
-    Returns the whole list unchanged when it already fits within K.
-    """
-    phrases = sorted({pair for q in candidates for pair in q.clauses})
-    idx = {pair: i for i, pair in enumerate(phrases)}
-    phrase_emb = embed_queries([[pair] for pair in phrases]).astype(np.float64)
-
-    if strategy == "exploit (p)":
-        composed = np.array([phrase_emb[[idx[p] for p in q.clauses]].mean(axis=0)
-                             for q in candidates])
-        scores = qualifier.predict_probs(composed)
-    else:
-        variance = qualifier.posterior_std(phrase_emb) ** 2
-        scores = np.array([variance[[idx[p] for p in q.clauses]].mean()
-                           for q in candidates])
-
-    K = PREFILTER_K[strategy]
-    if len(candidates) <= K:
-        return candidates
-    keep = np.argsort(-np.asarray(scores, dtype=np.float64))[:K]
-    return [candidates[i] for i in keep]
-
-
-def next_query(campaign, qualifier) -> NextQuery | None:
-    """The single maximal to fetch next, chosen by the GP, or ``None`` if saturated.
-
-    ``None`` means every maximal the pool spans is fetched, exhausted or empty — the
-    signal for ``discover`` to mint fresh clauses and recompose the product.
-    """
-    pool = _pool(campaign)
-    if not pool:
-        return None
-
-    candidates = _candidates(campaign, pool)
-
-    # Cold phase — no lead has qualified yet, so no vein has been shown to hold
-    # anything. Deepening one would be paging further into a region on the strength of
-    # a guess; the campaign's open question is *which region*, and only a fresh query
-    # answers it. Offset 0 only, and if nothing fresh remains the walk reports
-    # saturation so ``discover`` mints new clause values — widening the pool rather
-    # than drilling the part of it we already hold.
-    if not qualifier.has_real_positive:
-        candidates = [q for q in candidates if q.offset == 0]
-
+    candidates = frontier(campaign)
     if not candidates:
         return None
 
-    # Seed-first, fresh-before-deep — the deterministic order, and the cold-start
-    # choice when the GP has no signal.
-    ranker = _ranker(pool)
-    candidates.sort(key=lambda q: (q.offset, ranker(q.clauses)))
+    rng = np.random.default_rng() if rng is None else rng
+    cache: dict = {}
+    scored = []
+    for node in candidates:
+        alpha, beta = _beta_params(node, store, cache)
+        score = rng.beta(alpha, beta) if THOMPSON else alpha / (alpha + beta)
+        scored.append((score, node))
 
-    # The live acquisition axis, known before any exact-embed. None → cold start.
-    strategy = qualifier.acquisition_mode()
-    if strategy is None:
-        return candidates[0]  # cold start — seed-first, fresh-first
-
-    # Prefilter the whole pool cheaply, then exact-embed and score only the top-K.
-    subset = _prefilter(candidates, qualifier, strategy)
-    if len(candidates) > len(subset):
-        logger.debug("[%s] %s: exact-scoring %d of %d maximals (prefiltered)",
-                     campaign, strategy, len(subset), len(candidates))
-
-    embeddings = embed_queries([q.clauses for q in subset]).astype(np.float64)
-    _, scores = qualifier.acquisition_scores(embeddings)
-    best = subset[int(np.argmax(scores))]
-    logger.debug("[%s] query %s: %s", campaign, strategy, best.clauses)
+    score, best = max(scored, key=lambda pair: pair[0])
+    logger.debug("[%s] frontier %d node(s), picked %s at %.3f",
+                 campaign, len(candidates), best, score)
     return best
+
+
+# ── node lifecycle ───────────────────────────────────────────────────
+
+def _dead_sets(campaign) -> list[frozenset]:
+    """Keyword sets already proven to match nobody — the anti-monotone prune.
+
+    A superset of an empty conjunction is empty, so a dead node convicts every node that
+    contains it. Checking at *creation* rather than storing a separate blacklist is what
+    lets the prune reach supersets the walk would otherwise reach through a different
+    parent — dedup on ``token_key`` makes the lattice a DAG, not a tree, so following
+    parent links alone would miss them.
+    """
+    from openoutreach.core.models import QueryNode
+
+    return [
+        frozenset(node.pairs) for node in
+        QueryNode.objects.filter(campaign=campaign, state=QueryNode.State.DEAD)
+        .prefetch_related("keywords")
+    ]
+
+
+def seed_frontier(campaign, keywords) -> int:
+    """Open the walk with one depth-1 node per keyword. Returns nodes created.
+
+    There is no root. The empty query is never fired — it matches everyone, so its one
+    10k window is the provider's famous-company head and tells us nothing — and the level
+    a root would have supplied comes from ``LabelStore.base_rate`` instead.
+    """
+    created = 0
+    for pair in keywords:
+        if _upsert(campaign, [pair], parent=None) is not None:
+            created += 1
+    return created
+
+
+def _upsert(campaign, pairs, parent, store: LabelStore | None = None, cache: dict | None = None):
+    """Create a node, or re-point an existing one at a better parent. ``None`` if pruned.
+
+    A node reachable by several paths keeps the parent giving the **highest** estimate.
+    Optimism, and it matches how the level is used: the parent is a claim about the region
+    this node sits in, and the best-supported claim is the one worth carrying.
+    """
+    from openoutreach.core.models import Keyword, QueryNode
+
+    key = token_key(pairs)
+    node = QueryNode.objects.filter(campaign=campaign, token_key=key).first()
+    if node is not None:
+        if (parent is not None and node.parent_id != parent.pk
+                and node.state == QueryNode.State.FRONTIER and store is not None):
+            if estimate(parent, store, cache) > estimate(node.parent, store, cache):
+                node.parent = parent
+                node.save(update_fields=["parent"])
+        return None
+
+    node = QueryNode.objects.create(campaign=campaign, token_key=key, parent=parent)
+    node.keywords.set(Keyword.rows_for(pairs))
+    return node
+
+
+def expand(node, store: LabelStore, candidates) -> int:
+    """Grow the frontier with this node's children. Returns how many were created.
+
+    A child is this node plus one token that has shared a qualified profile with it
+    (``LabelStore.cooccurring``), and that no dead node is a subset of.
+    """
+    campaign = node.campaign
+    pairs = node.pairs
+    dead = _dead_sets(campaign)
+    cache: dict = {}
+
+    created = 0
+    for pair in store.cooccurring(pairs, candidates):
+        child_pairs = sorted([*pairs, pair])
+        child_set = frozenset(child_pairs)
+        if any(empty <= child_set for empty in dead):
+            continue
+        if _upsert(campaign, child_pairs, parent=node, store=store, cache=cache) is not None:
+            created += 1
+    return created
+
+
+def advance(node, leads_found: int | None = None) -> None:
+    """Record a productive page: move the offset on, keep the node fireable.
+
+    ``leads_found`` is the provider's corpus count, stored when offset 0 reported one.
+    Diagnostic only — the walk fires nodes rather than counting them first — but it is the
+    number that tells an operator whether a vein is 400 rows or 40 million.
+    """
+    from openoutreach.core.models import QueryNode
+
+    node.next_offset += DISCOVERY_PAGE_SIZE
+    node.state = QueryNode.State.FIRED
+    fields = ["next_offset", "state"]
+    if leads_found is not None:
+        node.leads_found = leads_found
+        fields.append("leads_found")
+    node.save(update_fields=fields)
+
+
+def retire(node, *, at_offset: int) -> str:
+    """Retire an empty node and prune what its emptiness convicts. Returns what happened.
+
+    Three cases, and they are not interchangeable — the provider reports ``0`` for all
+    three (§7):
+
+    - **offset 0** — the index matches nobody. The node is ``dead``, and so is every node
+      containing its tokens: a superset matches a subset of people.
+    - **past the end, below the reach cap** — the node drained completely, so every one of
+      its people is already a ``Lead`` here. Its supersets are drawn from that same
+      exhausted population, so they are pruned too; there is nothing new down there.
+    - **past the end, at the reach cap** — we hit Elasticsearch's 10,000-row window, not
+      the end of the population. The node retires but its **subtree stays**: adding a
+      token opens a fresh 10k window over the part we could not reach.
+    """
+    from openoutreach.core.models import QueryNode
+
+    if at_offset == 0:
+        node.state = QueryNode.State.DEAD
+        node.save(update_fields=["state"])
+        _prune_descendants(node)
+        return "dead"
+
+    node.state = QueryNode.State.DRAINED
+    node.save(update_fields=["state"])
+    if at_offset < REACH_CAP:
+        _prune_descendants(node)
+        return "drained"
+    return "capped"
+
+
+def _prune_descendants(node) -> int:
+    """Mark every node below this one dead. Returns how many.
+
+    Walks the ``parent`` links breadth-first. Supersets reached through a *different*
+    parent are handled at creation time instead (``_dead_sets``), which is the half of the
+    prune that survives the lattice being a DAG.
+    """
+    from openoutreach.core.models import QueryNode
+
+    pruned, generation = 0, [node.pk]
+    while generation:
+        children = list(
+            QueryNode.objects.filter(campaign=node.campaign, parent_id__in=generation)
+            .exclude(state=QueryNode.State.DEAD).values_list("pk", flat=True)
+        )
+        if not children:
+            break
+        QueryNode.objects.filter(pk__in=children).update(state=QueryNode.State.DEAD)
+        pruned += len(children)
+        generation = children
+    return pruned

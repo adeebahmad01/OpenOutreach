@@ -47,7 +47,7 @@ class TestSearch:
         with patch.object(discovery, "submit_and_poll", return_value={"leads": rows}) as call:
             result = discovery.search({"lead_seniority": {"include": ["owner"]}}, limit=10)
 
-        assert result == rows
+        assert result.leads == rows
         api_key, url, body = call.call_args.args
         assert api_key == "k"
         assert url == discovery.LEAD_FINDER_URL
@@ -56,7 +56,25 @@ class TestSearch:
     def test_no_leads_key_is_empty_list(self, db):
         _set_key("k")
         with patch.object(discovery, "submit_and_poll", return_value={"status": "terminated"}):
-            assert discovery.search({}) == []
+            assert discovery.search({}).leads == []
+
+    def test_surfaces_leads_found_at_offset_zero(self, db):
+        # The count separates a genuinely empty query from a transport artifact: a
+        # burst can answer a 71M-lead query with an empty page (card §4).
+        _set_key("k")
+        body = {"leads": [], "summary": {"leads_found": 71403396}}
+        with patch.object(discovery, "submit_and_poll", return_value=body):
+            page = discovery.search({}, offset=0)
+        assert page.leads == [] and page.leads_found == 71403396
+
+    def test_count_is_none_past_offset_zero(self, db):
+        # leads_found is only trustworthy at offset 0 — past the end of ANY result set
+        # the API reports 0 (card §7), so it must never read as "empty" there.
+        _set_key("k")
+        body = {"leads": [], "summary": {"leads_found": 0}}
+        with patch.object(discovery, "submit_and_poll", return_value=body):
+            page = discovery.search({}, offset=500)
+        assert page.leads_found is None
 
 
 class TestProfileTextFor:
@@ -107,16 +125,11 @@ class TestEmbedProfile:
         embed.assert_called_once_with("hi")
 
 
-class TestEmbedQuery:
-    def test_embeds_the_clause_keywords_alone(self):
-        # A candidate query is scored by its keywords alone — keyword-only, so a
-        # never-run query sits at the sparse edge of the labelled cloud (high GP
-        # variance → explore). The text must match the terms injected into leads.
-        clauses = [("lead_job_title", "CMO"), ("lead_seniority", "owner")]
-        with patch("openoutreach.core.ml.embeddings.embed_text", return_value=np.ones(384)) as embed:
-            discovery.embed_query(clauses)
-        embed.assert_called_once_with(discovery.clause_terms(clauses))
-        assert discovery.clause_terms(clauses) == "job_title cmo · seniority owner"
+class TestKeywordTerms:
+    def test_renders_the_tokens_as_plain_words(self):
+        # Folded into a discovered lead's embedding only, never into profile_text.
+        keywords = [("lead_job_title", "CMO"), ("lead_seniority", "owner")]
+        assert discovery.keyword_terms(keywords) == "cmo owner"
 
 
 class TestDescribeFilters:

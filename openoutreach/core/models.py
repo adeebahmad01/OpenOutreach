@@ -5,7 +5,7 @@ from django.contrib.auth.models import User
 from django.db import models
 from django.utils import timezone
 
-from openoutreach.discovery import FILTER_FAMILIES, describe_filters, filters_for
+from openoutreach.discovery import SEARCH_FIELDS, describe_node
 
 
 class SiteConfig(models.Model):
@@ -77,24 +77,16 @@ class Campaign(models.Model):
     # node. Set by ``icp.generate_seed`` from the LLM's ICP spec on the cold start.
     country_code = models.CharField(max_length=2, blank=True, default="")
 
-    # The clause pool — the axes discovery searches. ``icp.generate_seed`` fills it
-    # with a few values per family; ``mint.py`` grows it from the leads that qualify.
-    # The selector (``core/pipeline/select.py``) fires the Cartesian product of the
-    # pool — the maximal conjunctions, one value per family — and the GP ranks which
-    # to fetch. Breadth is more values, never a dropped clause.
+    # The ICP's company-size band. A fixed constraint riding every discovery query
+    # unchanged, never a search axis: loosening a size bound queries off-ICP rather
+    # than widening usefully, and the provider fills a half-open band with
+    # any-size companies rather than returning nothing. Set by ``icp.generate_seed``.
     #
-    # **The pool is per-campaign; the ``Clause`` rows are global.** Not a
-    # contradiction: a clause is the same fact whoever searches it
-    # (``lead_location = United States``), but *which* clauses are worth trying is
-    # this campaign's ICP talking. So the membership is the campaign's and the row
-    # is shared.
-    clauses = models.ManyToManyField("Clause", blank=True, related_name="campaigns")
-
-    # The qualified-lead count at the last clause mint — the throughput trigger's
-    # high-water mark. ``discover`` mints again once this many new leads qualify, so
-    # what the pool learned is folded in without re-minting every move. See
-    # ``core/pipeline/mint.py``.
-    discovery_minted_at_qualified = models.IntegerField(default=0)
+    # A column rather than a pair of keywords because it is a *number*, not a search
+    # term — the provider takes it as a bare scalar, and it is the one part of a query
+    # the walk never chooses.
+    headcount_min = models.IntegerField(default=1)
+    headcount_max = models.IntegerField(default=10000)
 
     # The cold-phase priors: synthetic ideal-lead profiles the LLM invented from
     # product_docs + campaign_target (``pipeline/icp.generate_anchors``), and their
@@ -210,201 +202,153 @@ class Task(models.Model):
         self.save(update_fields=["status"])
 
 
-class Clause(models.Model):
-    """One ``(family, value)`` pair — the unit a discovery query is built from.
+class Keyword(models.Model):
+    """One ``(field, token)`` pair — the unit a discovery query is built from.
 
-    First-class rather than a key in a JSON blob: a clause set has to be *grouped
-    over*, which is the walk's only fast query, and you cannot group over a key
-    inside a blob. Clauses are also the vocabulary the LLM supplies at cold start,
-    which the descent composes conjunctions from without asking the LLM again.
+    A **single word**, not a phrase. Multi-word values were the old model's silent
+    killer: every extra word is another AND (``Manager`` → ``Content Manager`` is a
+    ~300× narrowing), so the LLM-written four-token titles the pool used to hold —
+    ``Head of Content Strategy``, ``Chief Science Officer`` — were near-empty before
+    they were conjoined with anything. Joining tokens is still how the walk narrows,
+    but it happens at query time (``discovery.filters_for``), one token per move,
+    against measured feedback rather than an LLM's guess at a job title.
 
-    **Globally unique on ``(family, value)``, with no campaign of its own.** A clause
-    is not campaign-specific — ``lead_location = United States`` is the same clause
-    whoever searches it — and giving it a campaign would duplicate a fact
-    ``DiscoveryQuery`` already owns, letting a node point at a clause belonging to
-    another campaign. A campaign reaches its clauses through its queries.
+    **Globally unique on ``(field, token)``, with no campaign of its own** — a token
+    is not campaign-specific, ``lead_location = belgium`` is the same search term
+    whoever runs it. A campaign reaches its vocabulary through its query nodes.
 
-    ``family`` is constrained to ``discovery.FILTER_FAMILIES`` — the field names are
-    the provider contract, and an unknown one is silently *dropped* (you get the
-    unfiltered page, with rows, reading as success). ``value`` is deliberately
-    **not** constrained: except for ``lead_seniority`` these are free-text search
-    terms, and a value the index doesn't carry simply returns an empty page — a
-    normal, cheap answer.
+    ``field`` is constrained to ``discovery.SEARCH_FIELDS``: the field names are the
+    provider contract, and an unknown one is silently *dropped* (you get the
+    unfiltered page, with rows, reading as success). ``token`` is deliberately
+    **not** constrained — except for ``lead_seniority`` these are free-text search
+    terms, and a token the index doesn't carry simply returns an empty page.
     """
 
-    family = models.CharField(
-        max_length=32, choices=[(f, f) for f in FILTER_FAMILIES],
+    field = models.CharField(
+        max_length=32, choices=[(f, f) for f in SEARCH_FIELDS],
     )
-    value = models.CharField(max_length=200)
+    token = models.CharField(max_length=100)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         constraints = [
-            models.UniqueConstraint(fields=["family", "value"], name="uniq_clause"),
+            models.UniqueConstraint(fields=["field", "token"], name="uniq_keyword"),
         ]
 
     def __str__(self):
-        return describe_filters(filters_for([(self.family, self.value)]))
+        return f"{self.field.removeprefix('lead_')} {self.token}"
+
+    @property
+    def pair(self) -> tuple[str, str]:
+        return (self.field, self.token)
 
     @classmethod
-    def rows_for(cls, clauses) -> list["Clause"]:
-        """Get-or-create the rows for ``(family, value)`` pairs, in order.
-
-        Idempotent, and the one place clause rows are minted: the pool, a fetched
-        node and a blacklisted set all name the same clauses, and a clause is
-        global, so whichever of them reaches a ``(family, value)`` first creates the
-        row and the rest find it.
-        """
+    def rows_for(cls, keywords) -> list["Keyword"]:
+        """Get-or-create the rows for ``(field, token)`` pairs, in order. Idempotent."""
         return [
-            cls.objects.get_or_create(family=family, value=value)[0]
-            for family, value in clauses
+            cls.objects.get_or_create(field=field, token=token)[0]
+            for field, token in keywords
         ]
 
 
-class DiscoveryQuery(models.Model):
-    """One **fetched** node in a campaign's discovery walk — a Lead Finder query.
 
-    A node is a **set of clauses plus an offset**: at most one clause per family, all
-    ANDed, at a pagination depth that has already been pulled once. Discovery fires
-    only *maximal* conjunctions and the GP ranks which to fetch (see
-    ``core/pipeline/select.py``).
 
-    **Why a clause set and not a filter dict.** A filter dict can express an
-    include-list — an OR — and an OR is strictly dominated: it compresses several
-    ~10k-row sampling windows into one. A filter is not a narrowing of a result set;
-    it *moves a window* over a corpus ordered by provider preference, so the only way
-    to see different people is a different conjunction. One value per family is
-    therefore the whole expressive space worth having (~144 nodes for a 5/5/3 clause
-    pool, against ~8,200 with full OR), and ``discovery.filters_for`` enforces it.
+class QueryNode(models.Model):
+    """One node in a campaign's discovery walk — a keyword set, and where it has been paged to.
 
-    **Only fetched nodes are persisted** — the next query is computed lazily from
-    them, so there is no pending queue and no ``parent`` provenance to inherit rank
-    from. A node is fetched exactly once (dedup on the unique
-    ``(campaign, clause_key, offset)`` triple) and never re-fetched.
+    The walk is a **greedy add-only descent over keyword sets**, valued by counting and
+    sampled by Thompson. A node is a set of ``(field, token)`` keywords; its children
+    are itself plus one more token. There is no remove move — the frontier is global,
+    so a shallow node's untried siblings stay reachable without one.
 
-    ``exhausted`` marks a clause-set line whose deepen returned an empty page (the
-    reactive end-of-depth signal). All offsets of that line are flagged together and
-    excluded from selection. Emptiness is the **only** thing that retires a line: a
-    barren *yield* is a verdict about a view, not about the query.
+    **This model replaces a whole lattice.** The old walk stored clauses, fetched
+    ``DiscoveryQuery`` rows, and an ``EmptyClauseSet`` blacklist, and computed a
+    Cartesian product of *maximal* conjunctions on every call — 63,000 candidates for a
+    live pool, essentially all of them genuinely empty, because the clause model assumed
+    orthogonal facets over what is really a keyword index. See the roadmap card
+    ``p1-e3-leadfinder-index-semantics-and-query-model-rethink``.
 
-    **A node has no value column.** Which query to fetch next is scored by the GP on
-    the candidate maximal's *keywords* (``select.py``), not by any count stored here —
-    a discovered lead carries its retrieving query's terms in its embedding, so the GP
-    that ranks leads ranks queries too. The node exists to dedup fetches, track the
-    deepen offset, and stamp ``Lead.discovered_by`` (which carries those keywords).
-    Every saved lead advances through ``qualify → promote_to_ready → find_email`` on
-    its own P, over the global pool, regardless of which node discovered it.
+    **The node carries no value column.** Its estimate is derived from the label store
+    every time it is needed — ``a``/``b`` are the qualified/rejected leads whose profile
+    text contains all of this node's tokens — so there is no counter to drift, nothing to
+    migrate, and nothing to reconcile after a crash. It is also the *same* estimator
+    before and after the node is fired, which is what makes a bad page self-correcting:
+    a node that looks good from the store and returns nobody useful has its own misses
+    land in the counters that made it look good.
+
+    **``parent`` is the level, not provenance.** A child inherits its parent's measured
+    rate as the prior its own counts move off (``select.estimate``), because that
+    predicts a child's true precision better than the child's raw counts alone (0.661 vs
+    0.653, §13c). A node reachable by several paths — and with add-only over three
+    fields most are — is created once on its canonical key and keeps the parent giving
+    the **highest** estimate.
+
+    **State is a corpus fact, never a model fact.** A node is retired only for
+    emptiness: nothing is ever retired for scoring badly, because the qualifier refits
+    constantly and a barren yield is a verdict about a view. Which *kind* of emptiness
+    depends on the offset it appeared at, because the provider reports ``0`` both for a
+    query that matches nobody and for one paged past its end (§7).
     """
 
+    class State(models.TextChoices):
+        # Never fetched. Its estimate is its parent's, moved by its own store counts.
+        FRONTIER = "frontier", "frontier"
+        # Fetched at least once and still has pages left.
+        FIRED = "fired", "fired"
+        # Paged until a page came back empty. Retired; children pruned when this
+        # happened below the 10k reach cap, since every superset's population is
+        # then already in our DB.
+        DRAINED = "drained", "drained"
+        # Returned nothing at offset 0 — the index matches nobody. Retired, and its
+        # whole subtree with it: a superset of these tokens matches a subset of people.
+        DEAD = "dead", "dead"
+
     campaign = models.ForeignKey(
-        Campaign, on_delete=models.CASCADE, related_name="discovery_queries",
+        Campaign, on_delete=models.CASCADE, related_name="query_nodes",
     )
-    clauses = models.ManyToManyField(Clause, related_name="queries")
-    # sha256 of the canonicalized clause set — the node-identity key for dedup, so
-    # the same conjunction never enters the walk twice. A column because the set
-    # lives across an M2M, which no unique constraint can span.
-    clause_key = models.CharField(max_length=64)
-    offset = models.IntegerField(default=0)
-    # A clause-set line whose deepen hit an empty page (reactive end-of-depth).
-    # Set on every offset of that line at once; excluded from selection.
-    exhausted = models.BooleanField(default=False)
+    keywords = models.ManyToManyField(Keyword, related_name="nodes")
+    # sha256 of the canonicalized keyword set — the node-identity key, a column
+    # because the set lives across an M2M and no unique constraint can span one.
+    token_key = models.CharField(max_length=64)
+    parent = models.ForeignKey(
+        "self", null=True, blank=True, on_delete=models.SET_NULL, related_name="children",
+    )
+    # Where the next page starts. Advances by the page size on every fetch; the
+    # provider stops answering past 10,000 whatever the query counts.
+    next_offset = models.IntegerField(default=0)
+    state = models.CharField(max_length=16, choices=State.choices, default=State.FRONTIER)
+    # The provider's exact corpus count at offset 0, when we have asked for it. Free,
+    # in the same call, and read only as a diagnostic — the walk fires nodes rather
+    # than counting them first, since a dead node generates no children either way.
+    leads_found = models.IntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        verbose_name = "Discovery Query"
-        verbose_name_plural = "Discovery Queries"
+        verbose_name = "Query Node"
+        verbose_name_plural = "Query Nodes"
         constraints = [
             models.UniqueConstraint(
-                fields=["campaign", "clause_key", "offset"],
-                name="uniq_discovery_node",
+                fields=["campaign", "token_key"], name="uniq_query_node",
             ),
         ]
         indexes = [
-            models.Index(fields=["campaign", "exhausted"], name="discovery_camp_exhausted_idx"),
+            models.Index(fields=["campaign", "state"], name="query_node_state_idx"),
         ]
 
     @property
-    def clause_pairs(self) -> list[tuple[str, str]]:
-        """This node's clauses as sorted ``(family, value)`` pairs.
-
-        The same clauses as the ``clauses`` M2M, in the form a *proposed* query
-        carries — the walk picks a query before any row exists for it.
-        """
-        return sorted(self.clauses.values_list("family", "value"))
+    def pairs(self) -> list[tuple[str, str]]:
+        """This node's keywords as sorted ``(field, token)`` pairs."""
+        return sorted(self.keywords.values_list("field", "token"))
 
     def to_filters(self) -> dict:
         """This node as a Lead Finder filter dict — the only thing the provider sees."""
-        return filters_for(self.clause_pairs)
+        from openoutreach.discovery import filters_for
+
+        return filters_for(self.pairs, (self.campaign.headcount_min, self.campaign.headcount_max))
 
     def __str__(self):
-        """The query itself, not its row id.
-
-        A node *is* its clause set — "node 10" says nothing about what was searched,
-        and these render in logs and admin where the whole question is which region
-        the walk picked.
-        """
-        flag = " (exhausted)" if self.exhausted else ""
-        return f"{describe_filters(self.to_filters())} @{self.offset}{flag}"
-
-
-class EmptyClauseSet(models.Model):
-    """A conjunction Lead Finder matches nobody with, of any size down to one clause.
-
-    Written by ``discover`` when a fetch at offset 0 comes back empty, and read as a
-    pruning rule: **a candidate is dead iff some recorded set is a subset of it.**
-    That is anti-monotone — a superset of an empty conjunction is empty — so one dry
-    fetch retires a sublattice without another call.
-
-    **``k=1`` is the whole point, and it used to live elsewhere.** A singleton set is
-    exactly "this clause matches nobody alone", which was once a
-    ``Clause.is_live`` tri-state written by a dedicated ``limit=1`` probe sweep. It
-    was the same fact stored twice: excluding a dead clause from the pool and pruning
-    every candidate that contains it prune identically, since ``{c} ⊆ candidate`` iff
-    ``c ∈ candidate``. So the column is gone and the subset test does both jobs.
-
-    The selector fires only *maximal* conjunctions, which are all the same depth, so
-    the subset test is inert **within** one pool — until ``mint.py`` adds a family and
-    the maximals grow deeper. Then a maximal recorded empty before the mint is a subset
-    of the new, deeper maximals, and pruning their supersets keeps the selector from
-    re-fetching a region a shorter query already proved empty. One dry fetch, a
-    sublattice retired for free, across minting rounds.
-
-    **The unit is the whole set, and never a clause inside it.** An empty conjunction
-    convicts nothing smaller than itself: ``lead_department: Sales`` is honored and
-    returns rows on its own, yet sat in six 0-row conjunctions. Blaming its clauses
-    would delete ``Sales`` from every campaign's pool on evidence that says nothing
-    about it — the "department is poison" error, automated. A clause is retired here
-    only by its *own* singleton coming back empty, which is sound: alone, a clause has
-    nothing else to blame.
-
-    **Only emptiness lands here — never a barren yield.** A conjunction whose leads
-    all get rejected is a verdict about *the people in that window*, not about whether
-    the query matches anybody, and yield propagates in neither direction: a node whose
-    window is all-Meta can have a refinement whose window is gold. Nor does an empty
-    page at ``offset > 0`` belong here — that is a vein running out, not a query that
-    matches nobody. See the roadmap card ``p2-e3-discovery-query-graph-search``.
-
-    **Global, with no campaign FK** — the same argument as ``Clause``. Emptiness
-    is a fact about the provider's index, not about a campaign: a conjunction that
-    matches nobody matches nobody whoever asks. So one campaign's dry fetches prune
-    every campaign's lattice, free.
-    """
-
-    clauses = models.ManyToManyField(Clause, related_name="empty_sets")
-    # sha256 of the canonicalized clause set — the identity key, for the same
-    # reason ``DiscoveryQuery`` carries one: no unique constraint can span an M2M.
-    clause_key = models.CharField(max_length=64, unique=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        verbose_name = "Empty Clause Set"
-        verbose_name_plural = "Empty Clause Sets"
-
-    def __str__(self):
-        return f"{describe_filters(filters_for(self.clause_pairs))} → nothing"
-
-    @property
-    def clause_pairs(self) -> list[tuple[str, str]]:
-        """This set's clauses as sorted ``(family, value)`` pairs."""
-        return sorted(self.clauses.values_list("family", "value"))
+        """The query itself, not its row id — a node *is* its keyword set."""
+        suffix = "" if self.state == self.State.FRONTIER else f" [{self.state}]"
+        offset = f" @{self.next_offset}" if self.next_offset else ""
+        return f"{describe_node(self.pairs)}{offset}{suffix}"

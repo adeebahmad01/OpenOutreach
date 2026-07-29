@@ -23,6 +23,15 @@ class Lead(models.Model):
     # Firmographic text built from the Lead Finder row at discovery (same fields as
     # the embedding), fed to the LLM qualifier. No LinkedIn re-scrape.
     profile_text = models.TextField(blank=True, default="")
+    # The row's queryable fields, kept apart from the flattened ``profile_text`` so the
+    # vocabulary knows which *search field* a word belongs to — ``cto`` is alive in
+    # ``lead_job_title`` and dead in every other, ``belgium`` the reverse, and guessing
+    # would file ``united states`` as a job title. See
+    # ``discovery.KEYWORD_SOURCE_FIELDS`` and ``core/pipeline/vocabulary.py``.
+    #
+    # Empty for leads discovered before this existed. They still count toward every
+    # node's a/b (that reads ``profile_text``); they just cannot contribute vocabulary.
+    source_fields = models.JSONField(default=dict, blank=True)
     # Work email from the enrichment API (BetterContact); null = not found / not yet
     # resolved. Written by the find-email leg once the lead is rank-gated.
     email = models.EmailField(null=True, blank=True, default=None)
@@ -36,7 +45,7 @@ class Lead(models.Model):
     # Provenance + discovery-steering ONLY — never read by qualify/promote/enrich.
     # A lead advances on its own P over the global pool, independent of its node.
     discovered_by = models.ForeignKey(
-        "core.DiscoveryQuery", null=True, blank=True,
+        "core.QueryNode", null=True, blank=True,
         on_delete=models.SET_NULL, related_name="leads",
     )
     creation_date = models.DateTimeField(default=timezone.now)

@@ -3,7 +3,7 @@ from django.contrib import admin
 
 from openoutreach.core.conf import QUOTA_WINDOW_DAYS
 from openoutreach.core.models import (
-    Campaign, Clause, DiscoveryQuery, EmptyClauseSet, SiteConfig, Task,
+    Campaign, Keyword, QueryNode, SiteConfig, Task,
 )
 from openoutreach.core.quota import realized_share
 from openoutreach.discovery import describe_filters
@@ -47,60 +47,49 @@ class CampaignAdmin(admin.ModelAdmin):
         return f"{100 * realized_share(obj):.0f}%"
 
 
-@admin.register(DiscoveryQuery)
-class DiscoveryQueryAdmin(admin.ModelAdmin):
-    """Per-query discovery analytics — which maximals we ran, how deep, and what
-    each surfaced. ``leads`` is the first-touch count a query produced; the GP scores
-    which query to fetch next on keywords (``select.py``), so there is no per-node
-    value column here to steer on.
+@admin.register(QueryNode)
+class QueryNodeAdmin(admin.ModelAdmin):
+    """The discovery walk, node by node — what was searched, how deep, and what it found.
+
+    There is no value column to display: a node's estimate is counted from the label
+    store every time it is needed (``select.estimate``), so showing a stored number here
+    would only show one that had gone stale.
     """
 
     list_display = (
-        "id", "query", "campaign", "offset", "exhausted", "lead_yield", "updated_at",
+        "id", "query", "campaign", "state", "next_offset", "leads_found",
+        "lead_yield", "updated_at",
     )
-    list_filter = ("exhausted", "campaign")
+    list_filter = ("state", "campaign")
     readonly_fields = (
-        "campaign", "query", "clause_key", "offset", "exhausted",
-        "lead_yield", "created_at", "updated_at",
+        "campaign", "query", "token_key", "parent", "next_offset", "state",
+        "leads_found", "lead_yield", "created_at", "updated_at",
     )
     date_hierarchy = "created_at"
 
     @admin.display(description="query")
     def query(self, obj):
-        """The node's clause set, rendered as the region it searches."""
+        """The node's keyword set, rendered as the region it searches."""
         return describe_filters(obj.to_filters())
 
     @admin.display(description="leads")
     def lead_yield(self, obj):
-        """First-touch leads this query surfaced."""
+        """First-touch leads this node surfaced."""
         return obj.leads.count()
 
 
-@admin.register(Clause)
-class ClauseAdmin(admin.ModelAdmin):
-    """The clause vocabulary — every ``(family, value)`` any query has been built from."""
+@admin.register(Keyword)
+class KeywordAdmin(admin.ModelAdmin):
+    """The vocabulary — every ``(field, token)`` a query node can be built from."""
 
-    list_display = ("__str__", "family", "value", "query_count", "created_at")
-    list_filter = ("family",)
-    search_fields = ("value",)
+    list_display = ("__str__", "field", "token", "node_count", "created_at")
+    list_filter = ("field",)
+    search_fields = ("token",)
 
-    @admin.display(description="queries")
-    def query_count(self, obj):
-        """How many query nodes carry this clause."""
-        return obj.queries.count()
-
-
-@admin.register(EmptyClauseSet)
-class EmptyClauseSetAdmin(admin.ModelAdmin):
-    """Conjunctions the index matches nobody with — every one prunes its supersets."""
-
-    list_display = ("__str__", "depth", "created_at")
-    readonly_fields = ("clause_key",)
-
-    @admin.display(description="clauses")
-    def depth(self, obj):
-        """How many clauses the dead conjunction ANDed."""
-        return obj.clauses.count()
+    @admin.display(description="nodes")
+    def node_count(self, obj):
+        """How many query nodes carry this keyword."""
+        return obj.nodes.count()
 
 
 @admin.register(Task)

@@ -1,353 +1,298 @@
 # tests/test_select.py
-"""Query selection — the GP-scored maximal walk.
+"""Query selection — the counted, add-only frontier walk.
 
-Clauses are axes; the only queries are maximals (one value per family). The GP scores
-each candidate's keywords and argmax wins; an unfitted GP (acquisition → None) falls
-back to seed-first, fresh-before-deep. ``embed_query`` is stubbed so no ONNX model is
-touched; the fake GP returns scores directly, independent of the embeddings.
+A node is a keyword set; its value is arithmetic over the label store
+(``P̂ = (a + 2·P̂(parent)) / (a + b + 2)``) and nothing here touches a model. The GP used
+to score candidates by embedding their keywords; §13 of the roadmap card measured that
+against plain counting and the counts won, so these tests assert counting behaviour and
+the retirement rules — the two things the walk's correctness rests on.
 """
-from unittest.mock import patch
-
 import numpy as np
+import pytest
 
-from openoutreach.core.models import Clause, DiscoveryQuery, EmptyClauseSet
+from openoutreach.core.models import Campaign, Keyword, QueryNode
 from openoutreach.core.pipeline import select
-from openoutreach.core.pipeline.select import (
-    NextQuery, _maximals, _pool, clause_key, mark_exhausted, next_query,
-    persist_fetched, record_empty,
-)
+from openoutreach.core.pipeline.select import REACH_CAP, LabelStore, token_key
+from openoutreach.crm.models import Deal, DealState, Lead, Outcome
 
 
 def _campaign(**kw):
-    from openoutreach.core.models import Campaign
-
     defaults = dict(name="C", product_docs="p", campaign_target="t")
     defaults.update(kw)
     return Campaign.objects.create(**defaults)
 
 
-class _GP:
-    """A fitted GP returning fixed acquisition scores over the candidates.
-
-    The prefilter ranks by ``predict_probs`` (exploit) or ``posterior_std`` (explore);
-    both return per-candidate values so the top-K slice — and the final argmax over the
-    exact-embedded subset — land on the same fixed scores. Small test pools fit within K,
-    so the subset is the whole (seed-first) candidate list and index ``i`` still maps to
-    candidate ``i``.
-    """
-
-    def __init__(self, scores, mode="exploit (p)", has_real_positive=True):
-        self._scores = scores
-        self._mode = mode
-        self.has_real_positive = has_real_positive
-
-    def _slice(self, embeddings):
-        return np.array(self._scores[: len(embeddings)], dtype=np.float64)
-
-    def acquisition_mode(self):
-        return self._mode
-
-    def predict_probs(self, embeddings):
-        return self._slice(embeddings)
-
-    def posterior_std(self, embeddings):
-        return np.ones(len(embeddings), dtype=np.float64)
-
-    def acquisition_scores(self, embeddings):
-        return self._mode, self._slice(embeddings)
+def _node(campaign, pairs, parent=None, **kw):
+    node = QueryNode.objects.create(
+        campaign=campaign, token_key=token_key(pairs), parent=parent, **kw)
+    node.keywords.set(Keyword.rows_for(pairs))
+    return node
 
 
-class _UnfittedGP:
-    """A GP with no posterior — selection falls back to the deterministic order.
-
-    ``has_real_positive`` is a *separate* axis from fittedness now that anchors let a
-    cold campaign fit: it defaults True here so these cases exercise the fallback
-    ordering alone, and the cold-phase rule (offset 0 only) is tested explicitly.
-    """
-
-    def __init__(self, has_real_positive=True):
-        self.has_real_positive = has_real_positive
-
-    def acquisition_mode(self):
-        return None
-
-    def acquisition_scores(self, embeddings):
-        return None
+def _labelled(campaign, profile_text, qualified):
+    """A lead with a verdict — the only evidence the walk reads."""
+    lead = Lead.objects.create(
+        profile_url=f"https://x/{Lead.objects.count()}", profile_text=profile_text)
+    Deal.objects.create(
+        lead=lead, campaign=campaign,
+        state=DealState.QUALIFIED if qualified else DealState.FAILED,
+        outcome="" if qualified else Outcome.WRONG_FIT)
+    return lead
 
 
-def _stub_embed():
-    return patch("openoutreach.core.pipeline.select.embed_queries",
-                 side_effect=lambda sets: np.ones((len(list(sets)), 384), dtype=np.float64))
+class TestTokenKey:
+    def test_is_order_independent(self):
+        # Add-only over three fields means most nodes are reachable several ways, so
+        # identity has to be the set, not the path that reached it.
+        a = [("lead_job_title", "founder"), ("lead_job_title", "cto")]
+        assert token_key(a) == token_key(list(reversed(a)))
+
+    def test_distinguishes_the_field(self):
+        # `marketing` counts 3.9M in job_title and 5.5M in department — different sets.
+        assert token_key([("lead_job_title", "x")]) != token_key([("lead_location", "x")])
 
 
-# ── the maximals the pool spans ──────────────────────────────────────
+class TestLabelStore:
+    def test_counts_are_containment_over_all_tokens(self, db):
+        c = _campaign()
+        _labelled(c, "founder cto stealth ai startup", qualified=True)
+        _labelled(c, "founder cto fintech", qualified=True)
+        _labelled(c, "founder marketing agency", qualified=False)
+        store = LabelStore.load(c)
+
+        assert store.counts([("lead_job_title", "founder")]) == (2, 1)
+        assert store.counts([("lead_job_title", "founder"), ("lead_job_title", "cto")]) == (2, 0)
+        assert store.counts([("lead_job_title", "nobody")]) == (0, 0)
+
+    def test_base_rate_is_the_level_a_depth_one_node_inherits(self, db):
+        c = _campaign()
+        _labelled(c, "alpha", qualified=True)
+        _labelled(c, "beta", qualified=True)
+        _labelled(c, "gamma", qualified=False)
+        assert LabelStore.load(c).base_rate == pytest.approx(2 / 3)
+
+    def test_empty_store_is_an_even_prior(self, db):
+        assert LabelStore.load(_campaign()).base_rate == 0.5
+
+    def test_cooccurring_only_offers_tokens_seen_with_a_qualified_lead(self, db):
+        c = _campaign()
+        _labelled(c, "founder cto ai", qualified=True)
+        _labelled(c, "founder plumber", qualified=False)
+        store = LabelStore.load(c)
+        candidates = [("lead_job_title", t) for t in ("cto", "ai", "plumber", "unseen")]
+
+        offered = store.cooccurring([("lead_job_title", "founder")], candidates)
+
+        # `plumber` shares a profile with founder but not a *qualified* one; `unseen`
+        # shares none. Both would enter with a=b=0 and be indistinguishable noise.
+        assert sorted(offered) == [("lead_job_title", "ai"), ("lead_job_title", "cto")]
+
+    def test_cooccurring_never_offers_a_token_the_node_already_has(self, db):
+        c = _campaign()
+        _labelled(c, "founder cto", qualified=True)
+        store = LabelStore.load(c)
+        pairs = [("lead_job_title", "founder")]
+        assert ("lead_job_title", "founder") not in store.cooccurring(pairs, pairs)
 
 
-class TestMaximals:
-    def test_cartesian_product_one_value_per_family(self, db):
-        campaign = _campaign()
-        campaign.clauses.set(Clause.rows_for([
-            ("lead_job_title", "CMO"), ("lead_job_title", "CTO"),
-            ("lead_location", "Japan"),
-        ]))
-        maximals = _maximals(_pool(campaign))
-        assert maximals == [
-            [("lead_job_title", "CMO"), ("lead_location", "Japan")],
-            [("lead_job_title", "CTO"), ("lead_location", "Japan")],
-        ]
+class TestEstimate:
+    def test_an_unseen_node_sits_at_the_inherited_level(self, db):
+        c = _campaign()
+        _labelled(c, "alpha", qualified=True)
+        _labelled(c, "beta", qualified=False)
+        store = LabelStore.load(c)
+        node = _node(c, [("lead_job_title", "unseen")])
+        # a=b=0, level=0.5 → (0 + 1) / (0 + 0 + 2)
+        assert select.estimate(node, store) == pytest.approx(0.5)
 
-    def test_empty_pool_selects_nothing(self, db):
-        assert next_query(_campaign(), _UnfittedGP()) is None
+    def test_smoothing_points_at_the_parent_not_at_a_half(self, db):
+        # The measured design decision: the parent supplies the level, the child's own
+        # counts move it off. A thin-evidence child stays near its parent.
+        c = _campaign()
+        for _ in range(8):
+            _labelled(c, "founder ai", qualified=True)
+        _labelled(c, "founder ai rare", qualified=True)
+        store = LabelStore.load(c)
 
+        parent = _node(c, [("lead_job_title", "founder")])
+        child = _node(c, [("lead_job_title", "founder"), ("lead_job_title", "rare")],
+                      parent=parent)
 
-# ── selection ────────────────────────────────────────────────────────
+        parent_p = select.estimate(parent, store)      # 9 pos, 0 neg → high
+        child_p = select.estimate(child, store)        # 1 pos, 0 neg → thin
+        assert parent_p > 0.85
+        # One observation cannot drag the child far from its parent's level.
+        assert abs(child_p - parent_p) < 0.15
 
+    def test_negatives_pull_a_child_below_its_parent(self, db):
+        c = _campaign()
+        for _ in range(6):
+            _labelled(c, "founder ai", qualified=True)
+        for _ in range(6):
+            _labelled(c, "founder sales", qualified=False)
+        store = LabelStore.load(c)
 
-class TestNextQuery:
-    def test_cold_start_picks_seed_first_fresh_maximal(self, db):
-        campaign = _campaign()
-        campaign.clauses.set(Clause.rows_for([
-            ("lead_job_title", "CMO"), ("lead_job_title", "CTO"),
-            ("lead_location", "Japan"),
-        ]))
-        with _stub_embed():
-            q = next_query(campaign, _UnfittedGP())
-        # CMO was added first → lowest pool rank → the seed-closest maximal, offset 0
-        assert q == NextQuery([("lead_job_title", "CMO"), ("lead_location", "Japan")], 0)
-
-    def test_gp_argmax_wins(self, db):
-        campaign = _campaign()
-        campaign.clauses.set(Clause.rows_for([
-            ("lead_job_title", "CMO"), ("lead_job_title", "CTO"),
-            ("lead_location", "Japan"),
-        ]))
-        # Candidates in (offset, rank) order: [CMO·Japan, CTO·Japan]. Score the second higher.
-        with _stub_embed():
-            q = next_query(campaign, _GP([0.1, 0.9]))
-        assert q.clauses == [("lead_job_title", "CTO"), ("lead_location", "Japan")]
-
-    def test_explore_mode_argmax_wins(self, db):
-        campaign = _campaign()
-        campaign.clauses.set(Clause.rows_for([
-            ("lead_job_title", "CMO"), ("lead_job_title", "CTO"),
-            ("lead_location", "Japan"),
-        ]))
-        # Explore prefilter ranks by posterior_std; final argmax is over BALD scores.
-        with _stub_embed():
-            q = next_query(campaign, _GP([0.1, 0.9], mode="explore (BALD)"))
-        assert q.clauses == [("lead_job_title", "CTO"), ("lead_location", "Japan")]
-
-    def test_fetched_line_becomes_a_deepen_candidate(self, db):
-        campaign = _campaign()
-        seed = [("lead_location", "Japan")]
-        campaign.clauses.set(Clause.rows_for(seed))
-        persist_fetched(campaign, seed, offset=0)  # already fetched, not exhausted
-        with _stub_embed():
-            q = next_query(campaign, _UnfittedGP())
-        assert q == NextQuery(seed, 100)  # its next page
-
-    def test_cold_phase_never_deepens(self, db):
-        """Nothing has qualified, so no vein is known to hold anything — the fetched
-        line's next page is withheld and a fresh maximal is taken instead."""
-        campaign = _campaign()
-        campaign.clauses.set(Clause.rows_for([
-            ("lead_job_title", "CMO"), ("lead_job_title", "CTO"),
-            ("lead_location", "Japan"),
-        ]))
-        persist_fetched(campaign, [("lead_job_title", "CMO"), ("lead_location", "Japan")], 0)
-        with _stub_embed():
-            q = next_query(campaign, _UnfittedGP(has_real_positive=False))
-
-        assert q.offset == 0
-        assert q.clauses == [("lead_job_title", "CTO"), ("lead_location", "Japan")]
-
-    def test_cold_phase_saturates_rather_than_deepening(self, db):
-        """With every maximal fetched once, the only candidates left are deepens. The
-        walk reports saturation so ``discover`` mints new clause values — widening the
-        pool instead of drilling the part of it we already hold."""
-        campaign = _campaign()
-        seed = [("lead_location", "Japan")]
-        campaign.clauses.set(Clause.rows_for(seed))
-        persist_fetched(campaign, seed, offset=0)
-        with _stub_embed():
-            assert next_query(campaign, _UnfittedGP(has_real_positive=False)) is None
-        # ...and the same pool still deepens once something has qualified.
-        with _stub_embed():
-            assert next_query(campaign, _UnfittedGP()) == NextQuery(seed, 100)
-
-    def test_exhausted_line_is_not_a_candidate(self, db):
-        campaign = _campaign()
-        seed = [("lead_location", "Japan")]
-        campaign.clauses.set(Clause.rows_for(seed))
-        persist_fetched(campaign, seed, offset=0)
-        mark_exhausted(campaign, seed)
-        with _stub_embed():
-            assert next_query(campaign, _UnfittedGP()) is None  # nothing left → saturated
-
-    def test_a_recorded_empty_subset_prunes_the_maximal(self, db):
-        # Anti-monotone: a maximal whose subset is recorded empty is dead without a
-        # fetch — the prune that survives a mint adding a family.
-        campaign = _campaign()
-        campaign.clauses.set(Clause.rows_for([
-            ("lead_job_title", "CMO"), ("lead_location", "Japan"),
-        ]))
-        record_empty([("lead_job_title", "CMO")])
-        with _stub_embed():
-            assert next_query(campaign, _UnfittedGP()) is None
+        parent = _node(c, [("lead_job_title", "founder")])
+        bad = _node(c, [("lead_job_title", "founder"), ("lead_job_title", "sales")],
+                    parent=parent)
+        assert select.estimate(bad, store) < select.estimate(parent, store)
 
 
-# ── backoff ──────────────────────────────────────────────────────────
+class TestFrontier:
+    def test_holds_unfired_children_and_fired_veins_together(self, db):
+        # One pool: deepening a vein and opening a fresh node are two rows scored the
+        # same way, not two policies needing an alternation rule.
+        c = _campaign()
+        fresh = _node(c, [("lead_job_title", "a")])
+        vein = _node(c, [("lead_job_title", "b")], state=QueryNode.State.FIRED,
+                     next_offset=100)
+        _node(c, [("lead_job_title", "c")], state=QueryNode.State.DEAD)
+        _node(c, [("lead_job_title", "d")], state=QueryNode.State.DRAINED)
+
+        assert {n.pk for n in select.frontier(c)} == {fresh.pk, vein.pk}
+
+    def test_next_node_is_none_when_nothing_is_fireable(self, db):
+        c = _campaign()
+        _node(c, [("lead_job_title", "a")], state=QueryNode.State.DEAD)
+        assert select.next_node(c, LabelStore.load(c)) is None
+
+    def test_greedy_picks_the_best_estimate(self, db, monkeypatch):
+        monkeypatch.setattr(select, "THOMPSON", False)
+        c = _campaign()
+        for _ in range(5):
+            _labelled(c, "good", qualified=True)
+        for _ in range(5):
+            _labelled(c, "bad", qualified=False)
+        store = LabelStore.load(c)
+        _node(c, [("lead_job_title", "bad")])
+        good = _node(c, [("lead_job_title", "good")])
+
+        assert select.next_node(c, store).pk == good.pk
+
+    def test_thompson_still_favours_the_better_node_on_average(self, db):
+        # A draw, not a shuffle: width tracks evidence, so a well-measured good node
+        # wins most of the time without ever locking the frontier.
+        c = _campaign()
+        for _ in range(20):
+            _labelled(c, "good", qualified=True)
+        for _ in range(20):
+            _labelled(c, "bad", qualified=False)
+        store = LabelStore.load(c)
+        _node(c, [("lead_job_title", "bad")])
+        good = _node(c, [("lead_job_title", "good")])
+
+        rng = np.random.default_rng(0)
+        wins = sum(select.next_node(c, store, rng).pk == good.pk for _ in range(50))
+        assert wins > 45
 
 
-class TestBackoff:
-    def test_empty_maximal_offers_its_one_clause_looser_generalizations(self, db):
-        # The maximal matched nobody; its n−1 children become candidates so the walk
-        # descends toward the non-empty frontier instead of stopping.
-        campaign = _campaign()
-        campaign.clauses.set(Clause.rows_for([
-            ("lead_job_title", "CMO"), ("lead_location", "Japan"),
-        ]))
-        record_empty([("lead_job_title", "CMO"), ("lead_location", "Japan")])  # the maximal
-        cands = select._candidates(campaign, _pool(campaign))
-        assert sorted(c.clauses for c in cands) == [
-            [("lead_job_title", "CMO")],
-            [("lead_location", "Japan")],
-        ]
+class TestExpansion:
+    def test_children_are_the_node_plus_one_co_occurring_token(self, db):
+        c = _campaign()
+        _labelled(c, "founder cto ai", qualified=True)
+        store = LabelStore.load(c)
+        parent = _node(c, [("lead_job_title", "founder")])
+        candidates = [("lead_job_title", t) for t in ("cto", "ai")]
 
-    def test_generalizations_are_deduped_across_empties(self, db):
-        # Both maximals empty → children {CMO},{CTO},{Japan}; the shared Japan child is
-        # offered once, not per parent.
-        campaign = _campaign()
-        campaign.clauses.set(Clause.rows_for([
-            ("lead_job_title", "CMO"), ("lead_job_title", "CTO"),
-            ("lead_location", "Japan"),
-        ]))
-        record_empty([("lead_job_title", "CMO"), ("lead_location", "Japan")])
-        record_empty([("lead_job_title", "CTO"), ("lead_location", "Japan")])
-        cands = select._candidates(campaign, _pool(campaign))
-        assert sorted(c.clauses for c in cands) == [
-            [("lead_job_title", "CMO")],
-            [("lead_job_title", "CTO")],
-            [("lead_location", "Japan")],
-        ]
+        assert select.expand(parent, store, candidates) == 2
+        children = QueryNode.objects.filter(parent=parent)
+        assert {len(n.pairs) for n in children} == {2}
 
-    def test_a_child_that_is_a_recorded_empty_superset_is_pruned(self, db):
-        # Backoff never re-offers a set already known dead: if {Japan} is recorded empty,
-        # the {CMO,Japan} maximal's child {Japan} is dropped, leaving only {CMO}.
-        campaign = _campaign()
-        campaign.clauses.set(Clause.rows_for([
-            ("lead_job_title", "CMO"), ("lead_location", "Japan"),
-        ]))
-        record_empty([("lead_job_title", "CMO"), ("lead_location", "Japan")])
-        record_empty([("lead_location", "Japan")])
-        cands = select._candidates(campaign, _pool(campaign))
-        assert sorted(c.clauses for c in cands) == [[("lead_job_title", "CMO")]]
+    def test_expansion_is_idempotent(self, db):
+        c = _campaign()
+        _labelled(c, "founder cto", qualified=True)
+        store = LabelStore.load(c)
+        parent = _node(c, [("lead_job_title", "founder")])
+        candidates = [("lead_job_title", "cto")]
 
-    def test_backoff_never_drops_the_headcount_band(self, db):
-        # The band is the fixed ICP, not a search axis: every backoff child keeps both
-        # bounds. Loosening one queries off-ICP (the provider fills a half-open band with
-        # any-size companies), so only value clauses are dropped.
-        band = [("company_headcount_min", "1"), ("company_headcount_max", "50")]
-        campaign = _campaign()
-        campaign.clauses.set(Clause.rows_for(
-            band + [("lead_job_title", "CMO"), ("lead_location", "Japan")]))
-        record_empty(band + [("lead_job_title", "CMO"), ("lead_location", "Japan")])
-        cands = select._candidates(campaign, _pool(campaign))
-        # the empty maximal is pruned; its children are the two n−1 value-loosenings,
-        # each still carrying the full band.
-        assert sorted(c.clauses for c in cands) == [
-            sorted(band + [("lead_job_title", "CMO")]),
-            sorted(band + [("lead_location", "Japan")]),
-        ]
+        select.expand(parent, store, candidates)
+        assert select.expand(parent, store, candidates) == 0
 
-    def test_band_bundled_empty_does_not_resurrect_a_pruned_family(self, db):
-        # Regression for KeyError('lead_department'). A pre-screen empty that still
-        # carries the band (legacy data, pre-migration) has one value clause; backoff
-        # drops only value clauses, so it yields no child and the pruned family — absent
-        # from the pool — is never handed to the ranker.
-        campaign = _campaign()
-        campaign.clauses.set(Clause.rows_for([
-            ("lead_job_title", "CMO"), ("lead_location", "Japan"),
-        ]))
-        record_empty([
-            ("company_headcount_min", "1"), ("company_headcount_max", "50"),
-            ("lead_department", "Technology"),  # family absent from the pool
-        ])
-        with _stub_embed():
-            q = next_query(campaign, _UnfittedGP())  # must not raise KeyError
-        assert q is not None
-        assert all(family != "lead_department" for family, _ in q.clauses)
+    def test_a_dead_subset_prunes_the_child_before_it_is_created(self, db):
+        # The anti-monotone half that survives the lattice being a DAG: a superset of an
+        # empty conjunction is empty, whichever parent reaches it.
+        c = _campaign()
+        _labelled(c, "founder oman", qualified=True)
+        store = LabelStore.load(c)
+        _node(c, [("lead_location", "oman")], state=QueryNode.State.DEAD)
+        parent = _node(c, [("lead_job_title", "founder")])
 
-    def test_singleton_prescreen_empty_generates_no_child(self, db):
-        # A dead value recorded as a size-1 set (the current pre-screen shape) is inert
-        # in backoff — no n−1 child — so it prunes but never resurrects.
-        campaign = _campaign()
-        campaign.clauses.set(Clause.rows_for([
-            ("lead_job_title", "CMO"), ("lead_location", "Japan"),
-        ]))
-        record_empty([("lead_department", "Technology")])
-        cands = select._candidates(campaign, _pool(campaign))
-        assert sorted(c.clauses for c in cands) == [
-            [("lead_job_title", "CMO"), ("lead_location", "Japan")],  # the sole maximal
-        ]
+        assert select.expand(parent, store, [("lead_location", "oman")]) == 0
+
+    def test_a_node_reached_twice_keeps_the_better_parent(self, db):
+        c = _campaign()
+        for _ in range(10):
+            _labelled(c, "founder cto ai", qualified=True)
+        for _ in range(10):
+            _labelled(c, "cto agency", qualified=False)
+        store = LabelStore.load(c)
+
+        strong = _node(c, [("lead_job_title", "founder")])   # all positive
+        weak = _node(c, [("lead_job_title", "cto")])         # mixed
+        select.expand(weak, store, [("lead_job_title", "founder")])
+        child = QueryNode.objects.get(
+            token_key=token_key([("lead_job_title", "founder"), ("lead_job_title", "cto")]))
+        assert child.parent_id == weak.pk
+
+        select.expand(strong, store, [("lead_job_title", "cto")])
+        child.refresh_from_db()
+        assert child.parent_id == strong.pk
 
 
-# ── prefilter ────────────────────────────────────────────────────────
+class TestRetirement:
+    def test_offset_zero_kills_the_node_and_its_subtree(self, db):
+        c = _campaign()
+        parent = _node(c, [("lead_job_title", "a")])
+        child = _node(c, [("lead_job_title", "a"), ("lead_job_title", "b")], parent=parent)
+        grandchild = _node(c, [("lead_job_title", "a"), ("lead_job_title", "c")], parent=child)
+
+        assert select.retire(parent, at_offset=0) == "dead"
+        for node in (parent, child, grandchild):
+            node.refresh_from_db()
+            assert node.state == QueryNode.State.DEAD
+
+    def test_draining_below_the_cap_also_prunes_the_subtree(self, db):
+        # Every match is already a Lead here, so a superset is drawn from an exhausted
+        # population — there is nothing new below it.
+        c = _campaign()
+        parent = _node(c, [("lead_job_title", "a")], next_offset=400)
+        child = _node(c, [("lead_job_title", "a"), ("lead_job_title", "b")], parent=parent)
+
+        assert select.retire(parent, at_offset=400) == "drained"
+        parent.refresh_from_db()
+        child.refresh_from_db()
+        assert parent.state == QueryNode.State.DRAINED
+        assert child.state == QueryNode.State.DEAD
+
+    def test_hitting_the_reach_cap_keeps_the_subtree_alive(self, db):
+        # 10k is Elasticsearch's window, not the end of the population: adding a token
+        # opens a fresh window over the part we could not reach.
+        c = _campaign()
+        parent = _node(c, [("lead_job_title", "a")], next_offset=REACH_CAP)
+        child = _node(c, [("lead_job_title", "a"), ("lead_job_title", "b")], parent=parent)
+
+        assert select.retire(parent, at_offset=REACH_CAP) == "capped"
+        parent.refresh_from_db()
+        child.refresh_from_db()
+        assert parent.state == QueryNode.State.DRAINED
+        assert child.state == QueryNode.State.FRONTIER
+
+    def test_advance_moves_the_offset_and_keeps_the_node_fireable(self, db):
+        c = _campaign()
+        node = _node(c, [("lead_job_title", "a")])
+        select.advance(node, leads_found=9027)
+        node.refresh_from_db()
+        assert node.next_offset == select.DISCOVERY_PAGE_SIZE
+        assert node.state == QueryNode.State.FIRED
+        assert node.leads_found == 9027
 
 
-class TestPrefilter:
-    def test_keeps_only_top_k_on_the_live_axis(self, db, monkeypatch):
-        campaign = _campaign()
-        campaign.clauses.set(Clause.rows_for([
-            ("lead_job_title", "CMO"), ("lead_job_title", "CTO"),
-            ("lead_job_title", "CFO"), ("lead_location", "Japan"),
-        ]))
-        candidates = select._candidates(campaign, _pool(campaign))  # 3 maximals
-        assert len(candidates) == 3
-        monkeypatch.setitem(select.PREFILTER_K, "exploit (p)", 2)
-        # Scores align to _candidates order [CMO, CTO, CFO]·Japan — CMO is lowest.
-        with _stub_embed():
-            kept = select._prefilter(candidates, _GP([0.2, 0.9, 0.5]), "exploit (p)")
-        assert len(kept) == 2
-        assert candidates[0] not in kept  # the lowest-scored maximal is dropped
-
-    def test_returns_all_when_pool_fits_within_k(self, db):
-        campaign = _campaign()
-        campaign.clauses.set(Clause.rows_for([
-            ("lead_job_title", "CMO"), ("lead_job_title", "CTO"),
-            ("lead_location", "Japan"),
-        ]))
-        candidates = select._candidates(campaign, _pool(campaign))
-        with _stub_embed():
-            kept = select._prefilter(candidates, _GP([0.1, 0.9]), "exploit (p)")
-        assert kept == candidates  # 2 ≤ K → unchanged, order preserved
-
-
-# ── persistence primitives ───────────────────────────────────────────
-
-
-class TestPersistence:
-    def test_persist_fetched_dedups_and_sets_clauses(self, db):
-        campaign = _campaign()
-        seed = [("lead_location", "Japan")]
-        a = persist_fetched(campaign, seed, 0)
-        b = persist_fetched(campaign, seed, 0)
-        assert a.pk == b.pk  # deduped on (campaign, clause_key, offset)
-        assert a.clause_pairs == seed
-
-    def test_mark_exhausted_flags_every_offset_of_a_line(self, db):
-        campaign = _campaign()
-        seed = [("lead_location", "Japan")]
-        persist_fetched(campaign, seed, 0)
-        persist_fetched(campaign, seed, 100)
-        mark_exhausted(campaign, seed)
-        assert DiscoveryQuery.objects.filter(
-            campaign=campaign, clause_key=clause_key(seed), exhausted=True,
-        ).count() == 2
-
-    def test_record_empty_is_global_and_idempotent(self, db):
-        seed = [("lead_location", "Europe")]
-        record_empty(seed)
-        record_empty(seed)
-        assert EmptyClauseSet.objects.count() == 1
-        assert EmptyClauseSet.objects.get().clause_pairs == seed
+class TestSeedFrontier:
+    def test_opens_one_depth_one_node_per_keyword(self, db):
+        # No root: the empty query matches everyone and its 10k window is the provider's
+        # famous-company head, so the level comes from the label store instead.
+        c = _campaign()
+        keywords = [("lead_job_title", "founder"), ("lead_seniority", "founder")]
+        assert select.seed_frontier(c, keywords) == 2
+        assert QueryNode.objects.filter(campaign=c, parent__isnull=True).count() == 2
+        assert select.seed_frontier(c, keywords) == 0

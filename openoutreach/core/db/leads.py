@@ -50,7 +50,7 @@ def create_lead(row: dict, country_code: str = "", discovered_by=None,
     one already existed (idempotent re-discovery).
     """
     from openoutreach.crm.models import Lead
-    from openoutreach.discovery import embed_profile, profile_text_for
+    from openoutreach.discovery import embed_profile, profile_text_for, source_fields_for
 
     profile_url = row.get("contact_linkedin_profile_url")
     if not profile_url:
@@ -63,6 +63,7 @@ def create_lead(row: dict, country_code: str = "", discovered_by=None,
             "embedding": np.asarray(
                 embed_profile(profile_text, query_terms), dtype=np.float32).tobytes(),
             "profile_text": profile_text,
+            "source_fields": source_fields_for(row),
             "country_code": country_code,
             "discovered_by": discovered_by,
         },

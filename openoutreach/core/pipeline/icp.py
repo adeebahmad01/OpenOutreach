@@ -40,8 +40,7 @@ from pydantic import BaseModel, Field
 from termcolor import colored
 
 from openoutreach.core.conf import PROMPTS_DIR
-from openoutreach.core.models import Clause
-from openoutreach.discovery import LEAD_SENIORITIES, Seniority, describe_clauses
+from openoutreach.discovery import LEAD_SENIORITIES, Seniority
 
 logger = logging.getLogger(__name__)
 
@@ -69,46 +68,53 @@ class ICPSpec(BaseModel):
     country_code: str = ""
 
 
-# The ICP's free-value families, paired with the ``ICPSpec`` attr each reads. The
-# headcount bounds are absent: each is a single number riding every maximal, not a
-# value the seed reads from a scalar field.
-_CLAUSE_FAMILIES = (
+# The ICP's free-text axes, paired with the ``ICPSpec`` attr each reads. Headcount is
+# absent: it is a pair of numbers riding every query, not a search term.
+_SEED_FIELDS = (
     ("lead_job_title", "job_title"),
     ("lead_seniority", "seniority"),
     ("lead_location", "location"),
 )
 
 
-def _seed_conjunction(spec: ICPSpec) -> list[tuple[str, str]]:
-    """Compose the seed clause set — one clause per family the ICP named.
+def _seed_keywords(spec: ICPSpec) -> list[tuple[str, str]]:
+    """The ICP as ``(field, token)`` keywords — the vocabulary the walk opens with.
 
-    Both the seed query and the whole starting pool: with one value per family the
-    initial maximal set is this single conjunction. A family the model left empty
-    contributes no clause. The headcount bounds are always present and appear in every
-    maximal unchanged — a size band is this campaign's ICP, not a knob to search.
+    **Split into words**, because a keyword is one word: the LLM writes ``"Head of
+    Growth"`` and Lead Finder reads that as three ANDed tokens, which is a query narrow
+    enough to be empty before the walk has learned anything. Splitting hands the frontier
+    three separate one-token nodes instead, and lets *measurement* decide which pair is
+    worth conjoining — which is how ``"founder cto"`` (9,027 rows, near-perfect precision)
+    gets found and ``"head of growth"`` does not get fired.
+
+    Stopwords go with them, so ``of`` never becomes a search term.
     """
-    clauses = [
-        ("company_headcount_min", str(spec.headcount_min)),
-        ("company_headcount_max", str(spec.headcount_max)),
-    ]
-    for family, attr in _CLAUSE_FAMILIES:
+    from openoutreach.core.pipeline.vocabulary import tokenize
+
+    keywords = set()
+    for field, attr in _SEED_FIELDS:
         value = getattr(spec, attr)
         if value:
-            clauses.append((family, value))
-    return sorted(clauses)
+            keywords |= {(field, token) for token in tokenize(str(value))}
+    return sorted(keywords)
 
 
 def generate_seed(campaign) -> list[tuple[str, str]]:
-    """LLM-generate the campaign's seed query and fold its country onto it.
+    """LLM-generate the campaign's opening vocabulary and size band.
 
-    The cold start: with no clauses there is nothing to fetch, so this is where the
-    pool comes from. Also folds ``country_code`` onto the campaign, which geo-stamps
-    every discovered Lead. Returns the seed's clause set, or ``[]`` when the ICP is
-    empty.
+    The cold start, and the **only** LLM call discovery makes about queries: with no
+    qualified leads there are no profiles to count words from, so the ICP text is the one
+    available source. Everything after this is counting (``vocabulary.refresh``). Also
+    folds ``country_code`` and the headcount band onto the campaign — the band rides every
+    query unchanged and is never searched.
+
+    Returns the seed keywords, or ``[]`` when the ICP is empty.
     """
     from pydantic_ai import Agent
 
     from openoutreach.core.llm import get_llm_model, run_agent_sync
+    from openoutreach.core.models import Keyword
+    from openoutreach.discovery import describe_node
 
     env = jinja2.Environment(loader=jinja2.FileSystemLoader(str(PROMPTS_DIR)))
     prompt = env.get_template("icp_filters.j2").render(
@@ -124,20 +130,29 @@ def generate_seed(campaign) -> list[tuple[str, str]]:
     )
     spec = run_agent_sync(agent.run(prompt)).output
 
-    clauses = _seed_conjunction(spec)
-    if not clauses:
+    keywords = _seed_keywords(spec)
+    if not keywords:
         return []
 
-    campaign.clauses.set(Clause.rows_for(clauses))
+    Keyword.rows_for(keywords)
 
+    updates = []
     country_code = spec.country_code.lower()
     if country_code and campaign.country_code != country_code:
         campaign.country_code = country_code
-        campaign.save(update_fields=["country_code"])
-    logger.info("[%s] %s: %s", campaign,
+        updates.append("country_code")
+    if (campaign.headcount_min, campaign.headcount_max) != (spec.headcount_min, spec.headcount_max):
+        campaign.headcount_min = spec.headcount_min
+        campaign.headcount_max = spec.headcount_max
+        updates += ["headcount_min", "headcount_max"]
+    if updates:
+        campaign.save(update_fields=updates)
+
+    logger.info("[%s] %s: %s · headcount %d–%d", campaign,
                 colored("discovery seed", "cyan", attrs=["bold"]),
-                colored(describe_clauses(clauses), "cyan"))
-    return clauses
+                colored(describe_node(keywords), "cyan"),
+                spec.headcount_min, spec.headcount_max)
+    return keywords
 
 
 # ── anchors: the ICP as synthetic profiles ───────────────────────────
