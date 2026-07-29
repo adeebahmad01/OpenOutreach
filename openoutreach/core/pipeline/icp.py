@@ -16,8 +16,8 @@ before any lead has been judged, and the engine needs them expressed two ways:
   what lets the model fit at all on a campaign whose every real verdict so far is a
   rejection — a single-class label set never produces a posterior, so without them BALD,
   P(f>0.5), and every piece of steering that reads them stay unavailable for the whole
-  cold phase. They are dropped the moment a real lead qualifies (see
-  ``ensure_anchors``).
+  cold phase. They are retired one per real acceptance (see
+  ``BayesianQualifier.anchor_budget``).
 
 Profiles rather than the product text itself because the space they have to land in is
 one of *lead* embeddings: marketing prose about the product embeds nowhere near a row of
@@ -243,38 +243,36 @@ def stored_anchors(campaign) -> np.ndarray | None:
     return stored.reshape(len(campaign.anchor_profiles), -1).copy()
 
 
-def ensure_anchors(campaign, minimum: int = ANCHOR_COUNT) -> np.ndarray | None:
-    """The campaign's anchor embeddings as ``(N, dim)``, topped up to ``minimum``.
+def ensure_anchors(campaign) -> np.ndarray | None:
+    """The campaign's anchor embeddings as ``(N, dim)``, filled up to ``ANCHOR_COUNT``.
 
-    Generates on first use and **adds** on later calls, so the synthetic positive class
-    can be grown to track the rejections piling up against it (see
-    ``pools._rebalance_anchors``). Already-written profiles are shown to the model so a
-    top-up widens the ideal region rather than restating it, and the whole accumulated
-    set is persisted — the daemon must not re-invent anchors (and re-anchor the GP
-    somewhere slightly different) on every restart.
+    Generates on first use and fills the remainder on a later call if an earlier one came
+    back short. Already-written profiles are shown to the model so the second round widens
+    the ideal region rather than restating it, and the set is persisted — the daemon must
+    not re-invent anchors (and re-anchor the GP somewhere slightly different) on every
+    restart.
 
     ``None`` when the campaign has no ICP text to work from, or the LLM call failed and
     nothing is stored — callers treat that as "no anchors", never as an error. A failed
-    *top-up* keeps whatever is already there.
+    fill-up keeps whatever is already there.
 
-    Never called to *invent* anchors once a real lead has qualified: from that point the
-    set only shrinks, one profile per acceptance (``BayesianQualifier._retire_anchors``,
-    which truncates the same two fields), and the daemon restores the survivors with
-    ``stored_anchors`` instead. A value returned from here therefore always means the
-    campaign's positive class is still short of the rejections it faces.
+    Never called once a real lead has qualified: from that point the set only shrinks, one
+    profile per acceptance (``BayesianQualifier._retire_anchors``, which truncates the same
+    two fields), and the daemon restores the survivors with ``stored_anchors`` instead.
     """
     from openoutreach.discovery import embed_profile
 
     profiles = list(campaign.anchor_profiles or [])
     stored = stored_anchors(campaign)
-    if len(profiles) >= minimum:
+    if len(profiles) >= ANCHOR_COUNT:
         return stored
 
     if not (campaign.product_docs or campaign.campaign_target):
         return stored
 
     fresh = [
-        p for p in generate_anchors(campaign, count=minimum - len(profiles), existing=profiles)
+        p for p in generate_anchors(campaign, count=ANCHOR_COUNT - len(profiles),
+                                    existing=profiles)
         if p not in profiles
     ]
     if not fresh:

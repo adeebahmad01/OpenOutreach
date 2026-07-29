@@ -255,22 +255,22 @@ class TestAnchors:
         qualifier.update(np.ones(384, dtype=np.float32), 1)
 
         assert qualifier.has_real_positive is True
-        assert qualifier.is_cold is True          # budget 10 - 1 still covers all three
-        assert qualifier.class_counts == (10, 4)  # one real positive + three anchors
+        assert qualifier.is_cold is True          # 3 - 1 real positive, two still standing
+        assert qualifier.class_counts == (10, 3)  # one real positive + two anchors
 
-    def test_the_anchors_are_gone_once_positives_reach_the_rejections(self):
+    def test_the_anchors_are_gone_once_positives_reach_anchor_count(self):
         qualifier = BayesianQualifier(seed=42)
         rng = np.random.RandomState(1)
         for _ in range(2):
             qualifier.update(rng.randn(384).astype(np.float32) - 1.0, 0)
         qualifier.set_anchors(self._anchors())
 
-        for _ in range(2):
+        for _ in range(3):
             qualifier.update(np.ones(384, dtype=np.float32), 1)
 
         assert qualifier.is_cold is False
-        assert qualifier.class_counts == (2, 2)  # no padding left, and none needed
-        assert qualifier.n_obs == 4
+        assert qualifier.class_counts == (2, 3)  # the guess fully replaced by ground truth
+        assert qualifier.n_obs == 5
 
     def test_a_rejection_keeps_the_anchors(self):
         """Only a positive ends the cold phase — rejections are what it is made of."""
@@ -282,17 +282,17 @@ class TestAnchors:
         assert qualifier.class_counts == (1, 3)
         assert qualifier.has_real_positive is False
 
-    def test_anchoring_is_trimmed_to_the_budget_on_every_call(self):
-        """Safe to call on every daemon boot — a campaign whose real positives already
-        cover the rejections must not be re-padded."""
+    def test_anchoring_is_trimmed_to_the_countdown_on_every_call(self):
+        """Safe to call on every daemon boot — a campaign whose real positives have
+        already retired padding must not be re-padded to the full set."""
         qualifier = BayesianQualifier(seed=42)
         qualifier.update(np.ones(384, dtype=np.float32), 1)
         qualifier.update(np.zeros(384, dtype=np.float32), 0)
 
         qualifier.set_anchors(self._anchors())
 
-        assert qualifier.class_counts == (1, 1)
-        assert qualifier.is_cold is False
+        assert qualifier.class_counts == (1, 3)  # one real positive + two anchors
+        assert qualifier.is_cold is True
 
     def test_anchoring_twice_does_not_stack(self):
         qualifier = BayesianQualifier(seed=42)
@@ -339,7 +339,7 @@ class TestColdPhaseAcquisition:
         return q
 
     def test_cold_phase_exploits_however_the_classes_balance(self):
-        # The live bug: _rebalance_anchors keeps anchors >= rejections, so `n_neg > n_pos`
+        # The live bug: while the anchors were held at the rejection count, `n_neg > n_pos`
         # was never true and the axis was pinned to BALD for the whole cold phase.
         for rejections, anchors in ((6, 7), (9, 11), (50, 3)):
             q = self._cold(rejections, anchors)
@@ -358,7 +358,7 @@ class TestColdPhaseAcquisition:
             q.update(np.random.RandomState(2).rand(8), 1)
 
         assert q.is_cold is False
-        assert q.class_counts == (3, 3)
+        assert q.class_counts == (3, 3)  # three real positives, no padding left
         assert q.acquisition_mode() == "explore (BALD)"  # real positives caught up
 
     def test_unfitted_model_still_reports_no_axis(self):

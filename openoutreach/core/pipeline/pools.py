@@ -13,7 +13,7 @@ one. It loops over three moves, cheapest first:
 split (``acquisition_mode``, driven by class balance):
 
 - **cold phase** (``is_cold`` — invented positives are still padding the positive class,
-  which lasts until real acceptances reach the rejection count, not until the first one)
+  which lasts until real acceptances have retired them all, not until the first one)
   — do **both** moves every pass: one query in, one label out. Ranking here still leans
   on the anchors' *guess* at the ICP (``icp.generate_anchors``), so there is no
   observed signal saying a label is worth more than a page or the reverse, and a rule
@@ -81,43 +81,6 @@ def consumable_candidates(qualifier: BayesianQualifier, candidates: list) -> lis
     return [c for c, p in zip(candidates, probs) if p >= threshold]
 
 
-def _rebalance_anchors(session, qualifier: BayesianQualifier) -> None:
-    """Top the invented positives up to the shortfall the real ones leave.
-
-    The anchors start at ``ANCHOR_COUNT`` and the rejections do not stop, so a cold phase
-    left alone slides into a class balance of 3-against-hundreds, and the fit sees a
-    positive class so outnumbered that the posterior flattens toward "no" everywhere —
-    the same blindness the anchors were introduced to remove.
-
-    *(This used to carry a second argument: that the imbalance would flip
-    ``acquisition_mode`` to exploit and chase conversions on invented evidence. That is
-    now the intended cold-phase behaviour — the fastest route to the next real positive
-    is the lead most like the ideal profile — so only the flattening argument remains.
-    Keeping the classes level still matters for it.)*
-
-    This is the growing half of one invariant; ``BayesianQualifier._retire_anchors`` is
-    the shrinking half. Invented positives fill the gap real ones have not closed
-    (``anchor_budget`` — ``n_neg - n_real_pos``): a rejection widens it and is topped up
-    here, an acceptance narrows it and retires an anchor there. The set therefore never
-    exceeds the shortfall, and the last anchor goes exactly when real positives reach the
-    rejection count — where dropping the padding still leaves the positive class the
-    larger of the two, so nothing about the fit lurches when it happens.
-
-    Rationed: top up only once the gap is a full ``ANCHOR_COUNT`` wide, so this costs one
-    LLM call per ``ANCHOR_COUNT`` rejections rather than one per rejection. Best-effort —
-    a failed top-up leaves the existing anchors in place.
-    """
-    from openoutreach.core.pipeline.icp import ANCHOR_COUNT, ensure_anchors
-
-    budget = qualifier.anchor_budget
-    if budget - qualifier.n_anchors < ANCHOR_COUNT:
-        return
-
-    anchors = ensure_anchors(session.campaign, minimum=budget)
-    if anchors is not None:
-        qualifier.set_anchors(anchors)
-
-
 def _advance(session, qualifier: BayesianQualifier) -> bool:
     """Spend one unit of work — label a lead, discover leads, or (cold) both. Returns
     whether it did.
@@ -134,11 +97,10 @@ def _advance(session, qualifier: BayesianQualifier) -> bool:
     # the label can then be picked across, so breadth accumulates for exactly as long as
     # the campaign is part-guessing — which is the point of retiring the anchors one
     # acceptance at a time rather than all at once: the search for more like the first
-    # good lead lasts until real evidence actually outweighs the guess. Discovery's return
+    # good lead lasts until real positives have replaced the guess. Discovery's return
     # is deliberately ignored: a saturated pool or a provider outage still leaves leads to
     # label, and only an empty pool stalls.
     if qualifier.is_cold:
-        _rebalance_anchors(session, qualifier)
         discover(session, qualifier)
         candidates = fetch_qualification_candidates(session)
         if not candidates:

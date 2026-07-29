@@ -200,10 +200,9 @@ class BayesianQualifier:
     def class_counts(self) -> tuple[int, int]:
         """Return (n_negatives, n_positives) — anchors counted as positives.
 
-        Read by ``_rebalance_anchors``, which is asking "is the positive class keeping
-        pace with the rejections?" — the anchors are the padding that answers it, so they
-        belong in the count. Also what ``acquisition_mode`` reads past the cold phase, by
-        which point the invariant in ``_retire_anchors`` has emptied the padding and both
+        The anchors are what the model actually fits on while the cold phase lasts, so
+        anything reading the balance has to see them. What ``acquisition_mode`` reads past
+        the cold phase, by which point ``_retire_anchors`` has emptied the padding and both
         sides of this count are real.
         """
         n_pos = sum(self._y) + len(self._anchor_X)
@@ -231,6 +230,11 @@ class BayesianQualifier:
     @property
     def is_cold(self) -> bool:
         """Whether any invented positive is still standing — the engine's phase test.
+
+        Equivalently ``n_real_positives < ANCHOR_COUNT``, since the countdown in
+        ``anchor_budget`` reads nothing but the real positives. That independence is what
+        keeps an empty anchor set from being absorbing: no rule governing the anchors
+        depends on how many anchors are left.
 
         The cold phase ends when the last anchor retires, not at the first real positive.
         A model-fitting test ("is it fitted?") cannot stand in for it: with anchors the GP
@@ -275,12 +279,11 @@ class BayesianQualifier:
         whole cold phase. One imagined positive region restores every one of them.
 
         **Replaces** the anchor set rather than adding to it — the caller owns the whole
-        set (``icp.ensure_anchors`` returns every profile written so far, grown as the
-        rejections mount), so passing a superset is how a top-up lands and passing the
+        set (``icp.ensure_anchors`` returns every profile written so far), so passing the
         stored set again on a daemon boot is a no-op.
 
-        The retirement invariant is re-applied afterwards, so a top-up can never restore
-        an anchor a real positive has already displaced.
+        The retirement countdown is re-applied afterwards, so a boot can never restore an
+        anchor a real positive has already displaced.
         """
         self._anchor_X = [np.asarray(e, dtype=np.float64).ravel() for e in embeddings]
         self._fitted = False
@@ -288,29 +291,29 @@ class BayesianQualifier:
 
     @property
     def anchor_budget(self) -> int:
-        """How many invented positives the positive class is still short of the negatives.
+        """How many invented positives are still justified — one countdown, no ratios.
 
-        The whole anchor rule, and it is one subtraction: the anchors exist to keep the
-        positive class level with the rejections it faces, so the number still justified
-        is the shortfall ``n_neg - n_real_pos``. A rejection widens the gap and
-        ``pools._rebalance_anchors`` fills it; an acceptance narrows it and
-        ``_retire_anchors`` drops one. The last anchor goes when real positives reach the
-        negative count — the point at which dropping the padding still leaves the positive
-        class the larger one, so nothing about the fit lurches when it goes.
+        The anchors are a guess at the ICP and the campaign's own accepted leads are what
+        replace it, one for one: each real positive retires one anchor, so the padding is
+        gone once ground truth has produced as many positives as the guess did.
+
+        Counting *rejections* here — the previous rule, ``n_neg - n_real_pos``, "keep the
+        positive class level with the negatives" — collapsed to 0 on a campaign that
+        accepted a lead before it rejected one. The first acceptance then dropped every
+        anchor at once and left a positive class of exactly one, which ``_balance`` pinned
+        the whole training set to (9 observations fitted on 3, the same P for every lead).
+        A ratio against the rejections is also a bet on the accept rate: it only empties
+        if the campaign accepts more leads than it rejects, which no funnel does.
         """
-        n_pos = self.n_real_positives
-        return max(0, (len(self._y) - n_pos) - n_pos)
+        from openoutreach.core.pipeline.icp import ANCHOR_COUNT
+
+        return max(0, ANCHOR_COUNT - self.n_real_positives)
 
     def _retire_anchors(self):
         """Trim the anchors down to the budget, in memory and on the campaign.
 
-        No-op before the first real acceptance: a campaign with nothing but rejections
-        has a budget of ``n_neg``, which is what ``pools._rebalance_anchors`` is filling,
-        and a campaign with no labels at all must keep the anchors it was just given.
-
-        Retires **newest first**. The later anchors are top-up padding invented to keep
-        pace with the rejections; the first ``ANCHOR_COUNT`` are the campaign's original
-        statement of its ICP, so they are the last to go.
+        Retires **newest first**, so the profiles written first — the campaign's original
+        statement of its ICP — are the last to go.
 
         The abrupt version of this — drop every anchor on the first acceptance — could
         not converge: it took a positive class of dozens down to one against hundreds of
@@ -318,7 +321,7 @@ class BayesianQualifier:
         undoing exactly what the anchors were introduced to fix, one lead into the
         campaign's real evidence.
         """
-        if not (self._anchor_X and self.has_real_positive):
+        if not self._anchor_X:
             return
         keep = min(len(self._anchor_X), self.anchor_budget)
         if keep == len(self._anchor_X):
@@ -384,12 +387,10 @@ class BayesianQualifier:
         from sklearn.pipeline import Pipeline
         from sklearn.preprocessing import StandardScaler
 
-        # Balancing guards against one *observed* class swamping the other. While anchors
-        # are padding the positive class it has nothing to do: the padding is held at the
-        # shortfall (``_anchor_budget``), so the classes are already level by
-        # construction, and subsampling would only throw away real rejections. It takes
-        # over when the last anchor retires — which is exactly when the two classes are
-        # both real and can start diverging again.
+        # Balancing guards against one *observed* class swamping the other, and is skipped
+        # while the anchors stand: subsampling would throw away real rejections to match a
+        # positive class that is still partly invented. It takes over when the last anchor
+        # retires — which is exactly when both classes are real.
         X_fit, y_fit = (X_arr, y_arr) if self.is_cold else self._balance(X_arr, y_arr)
         n = X_fit.shape[0]
 

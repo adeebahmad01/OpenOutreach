@@ -23,18 +23,15 @@ PROFILE_URL = "https://www.linkedin.com/in/alice/"
 CANDIDATE = {"lead_id": 1, "profile_url": PROFILE_URL, "meta": {}}
 
 
-def _qualifier(mode, probs=None, is_cold=False, anchor_budget=0, n_anchors=0):
+def _qualifier(mode, probs=None, is_cold=False):
     """A qualifier in ``mode`` ("exploit (p)" / "explore (BALD)" / None) scoring the
     pool at ``probs`` (None is an unfitted GP).
 
     ``is_cold`` is the engine's phase test and is independent of ``mode``: a campaign
     still carrying anchors is fitted and ranks fine, its positive class is just part
-    invented. Defaults False so the explore/exploit cases skip the cold branch;
-    ``anchor_budget``/``n_anchors`` feed the cold branch's top-up and default to no gap."""
+    invented. Defaults False so the explore/exploit cases skip the cold branch."""
     qualifier = Mock()
     qualifier.is_cold = is_cold
-    qualifier.anchor_budget = anchor_budget
-    qualifier.n_anchors = n_anchors
     qualifier.acquisition_mode.return_value = mode
     qualifier.predict_probs.return_value = (
         None if probs is None else np.asarray(probs, dtype=float)
@@ -48,7 +45,6 @@ def _engine(candidates, *, qualify=PROFILE_URL, discovered=0):
     with (
         patch("openoutreach.core.pipeline.pools.fetch_qualification_candidates",
               return_value=candidates),
-        patch("openoutreach.core.pipeline.pools._rebalance_anchors"),
         patch("openoutreach.core.pipeline.pools.run_qualification",
               return_value=qualify) as mock_qualify,
         patch("openoutreach.core.pipeline.pools.discover",
