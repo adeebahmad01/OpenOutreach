@@ -31,16 +31,21 @@ FASTEMBED_CACHE_DIR = ROOT_DIR / ".cache" / "fastembed"
 # 5→9→15→24→38 in under a week. It only applies when the window is clean; a
 # failed send holds capacity at what was already demonstrated.
 #
-# The floor lets a box with no history start somewhere; the ceiling is the top of
-# the evidenced safe band (sources converge on 30–50/day per warmed Google
-# Workspace box), and it is a rail, not a target — measurement decides where in
-# the band a box sits, but nothing measured can argue it past the band. Scale
-# beyond it by adding mailboxes, never by raising this.
+# The floor lets a box with no history start somewhere. The ceiling is not a
+# number of its own at all — it is *derived* from the send pacing below
+# (``WARM_CEILING_SENDS``, defined there because it cannot be stated before the
+# interval it divides). It used to be a declared 50, the top of the 30–50/day
+# band cold-email practice converges on for a warmed Google Workspace box; that
+# figure was folklore this repo never measured, and pinning volume an order below
+# the rate made the two guards redundant rather than complementary. What still
+# bounds a *young* box is the ramp, not the rail: the ×1.5 step off a measured
+# p75 needs weeks of clean sending to reach the rail, and a receiver verdict
+# freezes it anywhere along the way.
 # ----------------------------------------------------------------------
 WARM_HISTORY_DAYS = 30      # trailing window of Sent history to measure
 WARM_GROWTH_FACTOR = 1.5    # step above demonstrated volume, when the window is clean
 WARM_FLOOR_SENDS = 5        # a box with no history still sends this much
-WARM_CEILING_SENDS = 50     # hard rail: the top of the evidenced safe band
+# WARM_CEILING_SENDS — derived from the pacing constants; see below.
 
 # ----------------------------------------------------------------------
 # Proportional send quota (core/quota.py) — the trailing window the freemium
@@ -65,13 +70,30 @@ QUOTA_WINDOW_DAYS = 30
 # converges on; the jitter spans the rest of it. Jitter is not decoration: a
 # send exactly every 180s is as machine-shaped as no spacing at all.
 #
-# This bounds the *rate*, not the day: 24h at a 3-minute floor still permits far
-# more than any box should send, so the measured warm capacity above remains the
-# only thing bounding daily volume. The two guard different failure modes — this
-# one burst throttling, that one volume-based spam classification.
+# This bounds the *rate*, and the rate sets the day: a daemon that never stops
+# and never sends twice inside one interval cannot exceed a day divided by the
+# mean interval, whatever any ceiling says. So the warm rail is *computed* from
+# these two rather than declared beside them — one number, one place to change
+# it. Widen the pacing and the daily rail widens with it; tighten it and the rail
+# follows, with no second constant left behind stating the old arithmetic.
+#
+# The daily measurement still decides where a box sits on its way up — a young
+# box is held at its demonstrated volume however much time the clock leaves — but
+# it no longer holds a warmed box an order of magnitude below what the pacing
+# permits. Burst throttling is the failure mode the interval guards; the ramp
+# guards the other one.
 # ----------------------------------------------------------------------
 MIN_SEND_INTERVAL_SECONDS = 180      # 3 minutes, the hard floor between sends
 SEND_INTERVAL_JITTER_SECONDS = 300   # + U[0, 300) → a 3–8 minute spread
+
+SECONDS_PER_DAY = 24 * 60 * 60
+
+# Mean realized gap: the floor plus the expected value of U[0, jitter).
+MEAN_SEND_INTERVAL_SECONDS = MIN_SEND_INTERVAL_SECONDS + SEND_INTERVAL_JITTER_SECONDS / 2
+
+# The rail: sends a single box could emit in a day at that mean gap (~261 today).
+# Floored, so the rail never claims a send the pacing has no room for.
+WARM_CEILING_SENDS = int(SECONDS_PER_DAY / MEAN_SEND_INTERVAL_SECONDS)
 
 # ----------------------------------------------------------------------
 # collect_email poll backoff — the bound leg that polls an in-flight paid
