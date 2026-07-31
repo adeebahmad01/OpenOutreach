@@ -45,13 +45,13 @@ class DealState(models.TextChoices):
     fit positive, so the ML labeler keeps it as label=1 — only reachability failed,
     not fit. A *couldn't-run*
     (no key / API down at submit) leaves the deal at READY_TO_FIND_EMAIL to
-    retry, and a job that never terminates within the poll deadline reverts
-    FINDING_EMAIL → READY_TO_FIND_EMAIL for a fresh submit — but only while this
-    deal is under ``COLLECT_MAX_SUBMITS`` jobs, counted off its own collect task
-    rows; past it the deal parks at NO_EMAIL_BETTERCONTACT, so a provider whose
-    jobs never terminate costs a bounded number of submits per deal instead of
-    spinning forever. The LinkedIn connect leg
-    (READY_TO_CONNECT/PENDING/CONNECTED) was removed with the channel.
+    retry. A job that has not terminated is *never* abandoned: the collect leg
+    doubles its poll interval on the same request_id and the deal simply waits
+    here, because a timeout is evidence about the provider, not about whether this
+    person has a findable address. (The deadline that used to revert
+    FINDING_EMAIL → READY_TO_FIND_EMAIL made an outage worse — the deal returned
+    to the pool and bought a *second* job for the same lead.) The LinkedIn connect
+    leg (READY_TO_CONNECT/PENDING/CONNECTED) was removed with the channel.
 
     NOTE: when adding a state, also add it to ``_STATE_LOG_STYLE`` in
     ``core/db/deals.py`` — an unmapped state logs as a red "ERROR" label.

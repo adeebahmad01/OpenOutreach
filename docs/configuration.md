@@ -60,7 +60,8 @@ Not user-configurable per campaign; edit the source to change.
 | `ENABLE_ACTIVE_HOURS` | `True` | `False` → run 24/7. |
 | `ACTIVE_START_HOUR` / `ACTIVE_END_HOUR` | `9` / `19` | Single contiguous active-hours window (the *worker loop's* hours — no weekend handling here; follow-up **due dates** are weekend-free on their own, see below). |
 | `ACTIVE_TIMEZONE` | `None` | `None` → resolved at runtime from the operator's country; set an IANA name to pin it. |
-| `COLLECT_BACKOFF_BASE_S` / `COLLECT_BACKOFF_MAX_S` / `COLLECT_DEADLINE_S` | `5` / `60` / `600` | The `collect_email` poll doubles its delay each still-running attempt (capped at MAX), giving up past DEADLINE. |
+| `COLLECT_BACKOFF_BASE_S` / `COLLECT_BACKOFF_MAX_S` | `5` / `30d` | The `collect_email` poll doubles its delay on every still-running attempt and **never gives up** — an unterminated job is queued, not lost, so the leg keeps the same `request_id` rather than abandoning the deal and paying for a second job. MAX rails the interval only, so the schedule stays representable. |
+| `COLLECT_TODAY_HORIZON_S` | `1d` | An in-flight lookup whose next poll is further out than this stops counting against *today's* send headroom in `flush_find_email_queue` — otherwise a few stalled lookups wedge the submit drain shut. |
 | `DEFAULT_EMAIL_DAILY_LIMIT` | `40` | Per-mailbox warm-safe send ceiling stored on each `Mailbox`. |
 | `CAMPAIGN_CONFIG.min_gp_confidence` | `0.9` | GP probability threshold for promoting `QUALIFIED → READY_TO_FIND_EMAIL` (rations the paid lookup). |
 | `CAMPAIGN_CONFIG.qualification_n_mc_samples` | `100` | Monte Carlo samples for BALD. |

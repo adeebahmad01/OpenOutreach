@@ -104,23 +104,41 @@ WARM_CEILING_SENDS = int(SECONDS_PER_DAY / MEAN_SEND_INTERVAL_SECONDS)
 # connect-accept poll, which backed off in hours). A future provider (Apollo, …)
 # would carry its own triple.
 #
-# MAX_SUBMITS bounds the *outer* loop the deadline opens: a deal reverted to
-# READY_TO_FIND_EMAIL is re-selected and re-submitted, so a provider whose jobs
-# never terminate spins one deal forever. Measured on a live install: 418 submits
-# and 4,512 polls in a week for ~40 leads, none of which ever terminated. Past
-# this many submits the deal parks at NO_EMAIL_BETTERCONTACT — the same terminal
-# a genuine miss takes, because the outcome is the same (no address in hand, fit
-# unchanged) and it is the state downstream retry work already hooks.
 #
-# The count is *derived*, not stored: a deal's collect task rows already carry its
-# ``deal_id`` and the ``request_id`` of every job fired for it, so the number of
-# submits is a distinct-count over those rows — no column to migrate and nothing
-# to drift after a crash (the same bargain ``core/quota.py`` takes on its ledger).
+# **The backoff is uncapped and there is no deadline.** Both used to exist, and
+# together they made the failure worse than the outage: past the deadline the leg
+# abandoned the job and reverted the deal to READY_TO_FIND_EMAIL, where the submit
+# leg picked it up and paid for a *new* job — a hot resubmit loop against a
+# provider already struggling. Measured on a live install during what the provider
+# later confirmed was a multi-day infrastructure incident: 418 submits and 4,512
+# polls in a week for ~40 leads, none of which ever terminated.
+#
+# Doubling without a rail fixes both halves. An unterminated job is *queued*, not
+# lost, so the right move is to keep the same request_id and ask later — no second
+# submit, and the deal stays at FINDING_EMAIL where nothing re-selects it. And
+# doubling reaches long waits cheaply: 5s → a week in 17 polls, ~30 for a month.
+# A capped backoff would poll a week-long outage 10,000 times to learn the same
+# thing. Nothing is ever written off either, which matters because a timeout is
+# evidence about the provider, not about the lead — when the queue drains, the
+# next poll simply lands and the deal proceeds with no intervention.
 # ----------------------------------------------------------------------
 COLLECT_BACKOFF_BASE_S = 5
-COLLECT_BACKOFF_MAX_S = 60
-COLLECT_DEADLINE_S = 600  # 10 min
-COLLECT_MAX_SUBMITS = 3   # paid jobs fired per deal before it is given up on
+
+# The rail is on the *interval*, not on the number of attempts: polling stretches
+# to a month and then stays there forever. That is not a give-up in disguise —
+# nothing is abandoned or relabelled, the job is simply checked monthly instead of
+# ever more rarely. It exists because unbounded doubling stops being representable:
+# 5s·2^41 is ~348,000 years, `datetime` raises OverflowError, the handler dies
+# before minting its successor, and the deal is stranded at FINDING_EMAIL with no
+# pending task — the one outcome the whole design is meant to prevent. Past a
+# month the difference between "later" and "much later" has no practical meaning
+# anyway, while the difference between "later" and "never polled again" is total.
+COLLECT_BACKOFF_MAX_S = 30 * 24 * 3600
+
+# A lookup whose next poll is further out than this cannot produce a send today,
+# so ``flush_find_email_queue`` stops counting it against today's send headroom —
+# otherwise deals parked in a long backoff would slowly wedge the submit drain.
+COLLECT_TODAY_HORIZON_S = 24 * 3600
 
 # ----------------------------------------------------------------------
 # Opener floor — the share of today's send headroom follow-ups may not take.

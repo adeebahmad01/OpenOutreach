@@ -4,8 +4,7 @@
 Submit resolves free-hub-first, else fires a provider job and parks the deal at
 FINDING_EMAIL with a bound collect task carrying the request_id. Collect polls
 that job once and routes hit → READY_TO_EMAIL, miss → NO_EMAIL_BETTERCONTACT,
-still-running → chained backoff (or, past the deadline, revert for a fresh submit
-until the deal's job budget is spent).
+still-running → chained backoff, doubling without deadline or attempt limit.
 """
 from datetime import timedelta
 from unittest.mock import patch
@@ -13,13 +12,13 @@ from unittest.mock import patch
 import pytest
 from django.utils import timezone
 
-from openoutreach.core.conf import COLLECT_DEADLINE_S, COLLECT_MAX_SUBMITS
+from openoutreach.core.conf import COLLECT_BACKOFF_BASE_S, COLLECT_BACKOFF_MAX_S
 from openoutreach.core.models import Task
 from openoutreach.crm.models import DealState
 from openoutreach.emails.bettercontact import BetterContactUnavailable, PollOutcome
 from openoutreach.core.scheduler import flush_find_email_queue
 from openoutreach.emails.models import Mailbox
-from openoutreach.emails.tasks.collect_email import handle_collect_email, submits_for
+from openoutreach.emails.tasks.collect_email import handle_collect_email
 from openoutreach.emails.tasks.find_email import handle_find_email
 from tests.factories import DealFactory, LeadFactory
 
@@ -188,14 +187,42 @@ class TestCollectLeg:
         nxt = _collect_tasks(attempt=1).get()
         assert nxt.scheduled_at > timezone.now()  # backed off into the future
 
-    def test_running_past_deadline_reverts(self, fake_session):
+    def test_a_long_running_job_keeps_its_deal_and_keeps_polling(self, fake_session):
+        """No deadline: an unterminated job is queued, not lost. Abandoning it sent
+        the deal back to the pool, where the submit leg bought a *second* job for
+        the same lead — a hot resubmit loop against an already-struggling provider."""
         deal = _deal(fake_session.campaign, DealState.FINDING_EMAIL)
-        task = self._task(fake_session, deal, attempt=0, age_s=COLLECT_DEADLINE_S + 1)
+        task = self._task(fake_session, deal, attempt=40, age_s=14 * 86400)
         self._run(fake_session, task, outcome=PollOutcome(running=True))
 
         deal.refresh_from_db()
-        assert deal.state == DealState.READY_TO_FIND_EMAIL
-        assert not _collect_tasks(attempt=1).exists()
+        assert deal.state == DealState.FINDING_EMAIL  # never re-selected, never written off
+        assert _collect_tasks(attempt=41).count() == 1
+
+    def test_backoff_doubles_into_days(self, fake_session):
+        """Doubling is what makes waiting cheap — a week of outage costs ~17 polls,
+        where a minute-capped backoff would cost ten thousand."""
+        deal = _deal(fake_session.campaign, DealState.FINDING_EMAIL)
+        task = self._task(fake_session, deal, attempt=16)
+        before = timezone.now()
+        self._run(fake_session, task, outcome=PollOutcome(running=True))
+
+        nxt = _collect_tasks(attempt=17).get()
+        assert (nxt.scheduled_at - before).total_seconds() == pytest.approx(
+            COLLECT_BACKOFF_BASE_S * 2 ** 17, rel=0.01)  # ~7.6 days
+
+    def test_an_extreme_attempt_count_still_mints_its_successor(self, fake_session):
+        """The rail is there so the schedule stays representable: uncapped, the
+        delay overflows ``datetime``, the handler dies before chaining, and the
+        deal is stranded at FINDING_EMAIL with no pending task at all."""
+        deal = _deal(fake_session.campaign, DealState.FINDING_EMAIL)
+        task = self._task(fake_session, deal, attempt=400)
+        before = timezone.now()
+        self._run(fake_session, task, outcome=PollOutcome(running=True))
+
+        nxt = _collect_tasks(attempt=401).get()
+        assert (nxt.scheduled_at - before).total_seconds() == pytest.approx(
+            COLLECT_BACKOFF_MAX_S, rel=0.01)
 
     def test_unavailable_retries_same_attempt(self, fake_session):
         deal = _deal(fake_session.campaign, DealState.FINDING_EMAIL)
@@ -205,35 +232,6 @@ class TestCollectLeg:
         deal.refresh_from_db()
         assert deal.state == DealState.FINDING_EMAIL
         assert _collect_tasks(attempt=2).count() == 2  # original + retry, attempt not advanced
-
-    def test_give_up_once_the_submit_budget_is_spent(self, fake_session):
-        """The revert is a loop — the deal returns to the pool and submits again.
-        A provider whose jobs never terminate would spin it forever, so past
-        ``COLLECT_MAX_SUBMITS`` distinct jobs the deal parks terminally."""
-        deal = _deal(fake_session.campaign, DealState.FINDING_EMAIL)
-        for i in range(COLLECT_MAX_SUBMITS - 1):  # earlier jobs, already given up on
-            task = self._task(fake_session, deal)
-            task.payload["request_id"] = f"older-{i}"
-            task.save(update_fields=["payload"])
-        task = self._task(fake_session, deal, age_s=COLLECT_DEADLINE_S + 1)
-        self._run(fake_session, task, outcome=PollOutcome(running=True))
-
-        deal.refresh_from_db()
-        assert deal.state == DealState.NO_EMAIL_BETTERCONTACT
-
-    def test_budget_counts_jobs_not_polls(self, fake_session):
-        """One job is polled many times; counting rows would exhaust the budget on
-        the backoff of a single lookup."""
-        deal = _deal(fake_session.campaign, DealState.FINDING_EMAIL)
-        for attempt in range(COLLECT_MAX_SUBMITS + 3):  # same request_id throughout
-            self._task(fake_session, deal, attempt=attempt)
-        assert submits_for(deal.pk) == 1
-
-        task = self._task(fake_session, deal, age_s=COLLECT_DEADLINE_S + 1)
-        self._run(fake_session, task, outcome=PollOutcome(running=True))
-
-        deal.refresh_from_db()
-        assert deal.state == DealState.READY_TO_FIND_EMAIL
 
     def test_stale_deal_drops_poll(self, fake_session):
         deal = _deal(fake_session.campaign, DealState.READY_TO_EMAIL)  # no longer FINDING_EMAIL
@@ -269,16 +267,40 @@ class TestFindEmailDrain:
         assert self._flush(fake_session) == 1
         assert self._find_email_tasks(fake_session.campaign).count() == 1
 
+    def _polling_in(self, session, deal, seconds):
+        """An in-flight lookup whose next poll is *seconds* away."""
+        return Task.objects.create(
+            task_type=Task.TaskType.COLLECT_EMAIL,
+            scheduled_at=timezone.now() + timedelta(seconds=seconds),
+            payload={
+                "campaign_id": session.campaign.pk, "deal_id": deal.pk,
+                "provider": "bettercontact", "request_id": f"req-{deal.pk}",
+                "submitted_at": timezone.now().isoformat(), "attempt": 0,
+            },
+        )
+
     def test_no_op_when_pipeline_fills_headroom(self, fake_session):
         _box(daily_limit=2)
         _deal(fake_session.campaign, DealState.READY_TO_EMAIL)
-        _deal(fake_session.campaign, DealState.FINDING_EMAIL)  # in_pipeline=2 == headroom
+        deal = _deal(fake_session.campaign, DealState.FINDING_EMAIL)
+        self._polling_in(fake_session, deal, 60)  # in_pipeline=2 == headroom
         assert self._flush(fake_session) == 0
 
-    def test_finding_email_counts_toward_pipeline(self, fake_session):
+    def test_a_lookup_landing_today_counts_toward_pipeline(self, fake_session):
         _box(daily_limit=1)
-        _deal(fake_session.campaign, DealState.FINDING_EMAIL)  # already fills the 1 slot
+        deal = _deal(fake_session.campaign, DealState.FINDING_EMAIL)
+        self._polling_in(fake_session, deal, 60)  # already fills the 1 slot
         assert self._flush(fake_session) == 0
+
+    def test_a_stalled_lookup_does_not_wedge_the_drain(self, fake_session):
+        """The poll backoff is uncapped, so a deal can sit at FINDING_EMAIL for
+        days. It holds no claim on *today's* headroom — counting it would let a
+        few stalled lookups shut the submit drain for as long as they stay
+        stalled, which is exactly when new ones matter most."""
+        _box(daily_limit=1)
+        deal = _deal(fake_session.campaign, DealState.FINDING_EMAIL)
+        self._polling_in(fake_session, deal, 3 * 86400)  # next poll is days out
+        assert self._flush(fake_session) == 1
 
     def test_no_op_when_find_email_already_pending(self, fake_session):
         _box(daily_limit=10)

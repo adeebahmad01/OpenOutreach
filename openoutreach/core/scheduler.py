@@ -46,6 +46,7 @@ from django.utils import timezone
 from openoutreach.crm.models import DealState
 from openoutreach.core import quota
 from openoutreach.core.conf import (
+    COLLECT_TODAY_HORIZON_S,
     MIN_SEND_INTERVAL_SECONDS,
     OPENER_FLOOR_FRACTION,
     SEND_INTERVAL_JITTER_SECONDS,
@@ -153,9 +154,10 @@ def flush_find_email_queue(session, campaign, allowance: int) -> int:
     email we couldn't send today. The GP confidence gate (``ready_pool``) rations
     *which* leads reach READY_TO_FIND_EMAIL; this gate bounds *how many* lookups
     ride the send pipeline — capped at ``remaining_today()`` minus everything
-    already heading for a send (READY_TO_EMAIL + FINDING_EMAIL), and by this
-    campaign's opener *allowance* (``core/quota.py``). A free miss drops out of the
-    pipeline and re-opens the gate at no send-budget cost.
+    already heading for a send (READY_TO_EMAIL, plus the in-flight lookups that
+    could still land today — ``_lookups_landing_today``), and by this campaign's
+    opener *allowance* (``core/quota.py``). A free miss drops out of the pipeline
+    and re-opens the gate at no send-budget cost.
 
     The allowance belongs here as well as on the opener drain for the same reason
     the send-headroom check does: a campaign that may not send today must not buy
@@ -181,9 +183,9 @@ def flush_find_email_queue(session, campaign, allowance: int) -> int:
     remaining = min(Mailbox.objects.remaining_today(), allowance)
     in_pipeline = Deal.objects.filter(
         campaign_id=campaign.pk,
-        state__in=(DealState.READY_TO_EMAIL, DealState.FINDING_EMAIL),
+        state=DealState.READY_TO_EMAIL,
         lead__disqualified=False,
-    ).count()
+    ).count() + _lookups_landing_today(campaign)
     if in_pipeline >= remaining:
         return 0
 
@@ -193,6 +195,30 @@ def flush_find_email_queue(session, campaign, allowance: int) -> int:
         campaign, remaining, in_pipeline,
     )
     return 1
+
+
+def _lookups_landing_today(campaign) -> int:
+    """In-flight lookups for *campaign* that could still resolve today.
+
+    A FINDING_EMAIL deal holds a claim on today's send headroom — its address may
+    arrive in time to mail. That stops being true once the poll backoff, which is
+    uncapped, pushes the next check past today: such a deal cannot produce a send
+    today, and counting it would let a handful of stalled lookups wedge the submit
+    drain shut for as long as they stay stalled.
+    """
+    horizon = timezone.now() + timedelta(seconds=COLLECT_TODAY_HORIZON_S)
+    return (
+        Task.objects
+        .filter(
+            task_type=Task.TaskType.COLLECT_EMAIL,
+            status=Task.Status.PENDING,
+            scheduled_at__lte=horizon,
+            payload__campaign_id=campaign.pk,
+        )
+        .values_list("payload__deal_id", flat=True)
+        .distinct()
+        .count()
+    )
 
 
 def flush_email_queue(session, campaign, allowance: int) -> int:
