@@ -4,7 +4,8 @@
 Submit resolves free-hub-first, else fires a provider job and parks the deal at
 FINDING_EMAIL with a bound collect task carrying the request_id. Collect polls
 that job once and routes hit → READY_TO_EMAIL, miss → NO_EMAIL_BETTERCONTACT,
-still-running → chained backoff (or revert past the deadline).
+still-running → chained backoff (or, past the deadline, revert for a fresh submit
+until the deal's job budget is spent).
 """
 from datetime import timedelta
 from unittest.mock import patch
@@ -12,13 +13,13 @@ from unittest.mock import patch
 import pytest
 from django.utils import timezone
 
-from openoutreach.core.conf import COLLECT_DEADLINE_S
+from openoutreach.core.conf import COLLECT_DEADLINE_S, COLLECT_MAX_SUBMITS
 from openoutreach.core.models import Task
 from openoutreach.crm.models import DealState
 from openoutreach.emails.bettercontact import BetterContactUnavailable, PollOutcome
 from openoutreach.core.scheduler import flush_find_email_queue
 from openoutreach.emails.models import Mailbox
-from openoutreach.emails.tasks.collect_email import handle_collect_email
+from openoutreach.emails.tasks.collect_email import handle_collect_email, submits_for
 from openoutreach.emails.tasks.find_email import handle_find_email
 from tests.factories import DealFactory, LeadFactory
 
@@ -204,6 +205,35 @@ class TestCollectLeg:
         deal.refresh_from_db()
         assert deal.state == DealState.FINDING_EMAIL
         assert _collect_tasks(attempt=2).count() == 2  # original + retry, attempt not advanced
+
+    def test_give_up_once_the_submit_budget_is_spent(self, fake_session):
+        """The revert is a loop — the deal returns to the pool and submits again.
+        A provider whose jobs never terminate would spin it forever, so past
+        ``COLLECT_MAX_SUBMITS`` distinct jobs the deal parks terminally."""
+        deal = _deal(fake_session.campaign, DealState.FINDING_EMAIL)
+        for i in range(COLLECT_MAX_SUBMITS - 1):  # earlier jobs, already given up on
+            task = self._task(fake_session, deal)
+            task.payload["request_id"] = f"older-{i}"
+            task.save(update_fields=["payload"])
+        task = self._task(fake_session, deal, age_s=COLLECT_DEADLINE_S + 1)
+        self._run(fake_session, task, outcome=PollOutcome(running=True))
+
+        deal.refresh_from_db()
+        assert deal.state == DealState.NO_EMAIL_BETTERCONTACT
+
+    def test_budget_counts_jobs_not_polls(self, fake_session):
+        """One job is polled many times; counting rows would exhaust the budget on
+        the backoff of a single lookup."""
+        deal = _deal(fake_session.campaign, DealState.FINDING_EMAIL)
+        for attempt in range(COLLECT_MAX_SUBMITS + 3):  # same request_id throughout
+            self._task(fake_session, deal, attempt=attempt)
+        assert submits_for(deal.pk) == 1
+
+        task = self._task(fake_session, deal, age_s=COLLECT_DEADLINE_S + 1)
+        self._run(fake_session, task, outcome=PollOutcome(running=True))
+
+        deal.refresh_from_db()
+        assert deal.state == DealState.READY_TO_FIND_EMAIL
 
     def test_stale_deal_drops_poll(self, fake_session):
         deal = _deal(fake_session.campaign, DealState.READY_TO_EMAIL)  # no longer FINDING_EMAIL

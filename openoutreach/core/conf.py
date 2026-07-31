@@ -103,10 +103,42 @@ WARM_CEILING_SENDS = int(SECONDS_PER_DAY / MEAN_SEND_INTERVAL_SECONDS)
 # seconds-to-minutes, so these are short (unlike the retired LinkedIn
 # connect-accept poll, which backed off in hours). A future provider (Apollo, …)
 # would carry its own triple.
+#
+# MAX_SUBMITS bounds the *outer* loop the deadline opens: a deal reverted to
+# READY_TO_FIND_EMAIL is re-selected and re-submitted, so a provider whose jobs
+# never terminate spins one deal forever. Measured on a live install: 418 submits
+# and 4,512 polls in a week for ~40 leads, none of which ever terminated. Past
+# this many submits the deal parks at NO_EMAIL_BETTERCONTACT — the same terminal
+# a genuine miss takes, because the outcome is the same (no address in hand, fit
+# unchanged) and it is the state downstream retry work already hooks.
+#
+# The count is *derived*, not stored: a deal's collect task rows already carry its
+# ``deal_id`` and the ``request_id`` of every job fired for it, so the number of
+# submits is a distinct-count over those rows — no column to migrate and nothing
+# to drift after a crash (the same bargain ``core/quota.py`` takes on its ledger).
 # ----------------------------------------------------------------------
 COLLECT_BACKOFF_BASE_S = 5
 COLLECT_BACKOFF_MAX_S = 60
 COLLECT_DEADLINE_S = 600  # 10 min
+COLLECT_MAX_SUBMITS = 3   # paid jobs fired per deal before it is given up on
+
+# ----------------------------------------------------------------------
+# Opener floor — the share of today's send headroom follow-ups may not take.
+#
+# Follow-ups sit outside the quota and outrank openers on claim, and ``reconcile``
+# reserves every due one off the top of the opener budget. That is right in the
+# small (a reply owed to a human beats a cold open) and wrong in the large: a
+# campaign accumulates open threads faster than it closes them, so the due count
+# grows without bound and eventually consumes every send. Measured on a live
+# install: 106 open threads produced 102 follow-ups and 1 opener in a week, and
+# because the same budget also gates ``flush_find_email_queue``, the starvation
+# compounds — no address is bought today, so there is no opener to send tomorrow.
+#
+# The floor is *work-conserving*: it is only held back when openers actually exist
+# to use it (``_opener_reserve``), so an install with nothing ready still spends
+# its whole box on replies.
+# ----------------------------------------------------------------------
+OPENER_FLOOR_FRACTION = 0.25
 
 # ----------------------------------------------------------------------
 # Campaign config (timing + ML defaults — hardcoded, no YAML)

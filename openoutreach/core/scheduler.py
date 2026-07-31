@@ -26,20 +26,30 @@ splits it by ``core/quota.py`` first, so the freemium promo's
 ``action_fraction`` binds instead of being decided by whichever pipeline
 produces candidates faster. Each drain receives its campaign's *allowance* and
 caps itself by that as well as by the pool. Follow-ups are outside the quota
-(see ``core/quota.py``) and are reserved off the top.
+(see ``core/quota.py``) and are reserved off the top — but only down to
+``OPENER_FLOOR_FRACTION`` of the day, and only while openers are actually ready
+to use what is held back. Without that floor the reservation is unbounded and
+first contact stops: open threads accumulate faster than they close, so the owed
+count outgrows the box, and because the same allowance gates ``find_email`` the
+starvation compounds into the next day.
 """
 from __future__ import annotations
 
 import logging
+import math
 import random
 from datetime import timedelta
 
-from django.db.models import Min
+from django.db.models import Count, Min
 from django.utils import timezone
 
 from openoutreach.crm.models import DealState
 from openoutreach.core import quota
-from openoutreach.core.conf import MIN_SEND_INTERVAL_SECONDS, SEND_INTERVAL_JITTER_SECONDS
+from openoutreach.core.conf import (
+    MIN_SEND_INTERVAL_SECONDS,
+    OPENER_FLOOR_FRACTION,
+    SEND_INTERVAL_JITTER_SECONDS,
+)
 from openoutreach.core.models import Task
 
 logger = logging.getLogger(__name__)
@@ -233,29 +243,36 @@ def flush_email_queue(session, campaign, allowance: int) -> int:
     return 1
 
 
-def flush_follow_up_queue(campaign) -> int:
+def flush_follow_up_queue(campaign, reserve: int = 0) -> int:
     """Mint **one** paced follow-up slot for *campaign*. Returns 0 or 1.
 
     Single-slot for the same reason as the opener drain, and minted *before* it in
     ``reconcile`` so a reply owed to a human takes the earlier slot in the shared
     rhythm — the time-domain counterpart of ``Task.pending()`` claiming
-    ``follow_up`` first and of ``reconcile`` reserving due follow-ups off the top
-    of the opener budget. Follow-ups ride outside the quota (a reply owed to a
-    human is not new reach), so there is no allowance here, only the pool-wide
-    per-box headroom (re-checked at send time).
+    ``follow_up`` first. Follow-ups ride outside the quota (a reply owed to a human
+    is not new reach), so there is no allowance here, only the pool-wide per-box
+    headroom (re-checked at send time).
+
+    *reserve* is the one thing they must yield to: sends held back for openers
+    (``_opener_reserve``). Priority is not the same claim as unbounded priority —
+    a campaign accumulates open threads faster than it closes them, so an
+    unreserved follow-up drain eventually owns every send in the box and first
+    contact stops entirely. The reserve is only ever non-zero when openers are
+    actually ready to use it, so this never idles a box to protect work that
+    doesn't exist.
 
     Reading the thread happens inside the handler at that slot, so the pacing
     delay is also fresher thread state.
 
-    No-op when a PENDING follow-up task already exists for this campaign, no box
-    has headroom, or nothing is due.
+    No-op when a PENDING follow-up task already exists for this campaign, headroom
+    is down to the opener reserve, or nothing is due.
     """
     from openoutreach.crm.models import Deal
     from openoutreach.emails.models import Mailbox
 
     if _has_pending(Task.TaskType.FOLLOW_UP, campaign.pk):
         return 0
-    if Mailbox.objects.remaining_today() <= 0:
+    if Mailbox.objects.remaining_today() <= reserve:
         return 0
 
     due = Deal.objects.filter(
@@ -352,19 +369,65 @@ def opener_allowances(campaigns) -> dict[int, int]:
     quota governs first contacts only, and follow-ups outrank them on claim, so
     they are reserved rather than competed with. Every caller that mints opener
     slots reads its allowance from here, so the split is computed one way.
+
+    That reservation is **floored**, not unbounded: follow-ups may take at most
+    ``1 - OPENER_FLOOR_FRACTION`` of the day. Reserving every owed follow-up was
+    right in the small and ruinous in the large — open threads accumulate faster
+    than they close, so the owed count outgrows the box and drives the opener
+    budget to zero. That is not just a delayed opener: the same allowance gates
+    ``flush_find_email_queue``, so a zero budget stops address buying too, and
+    tomorrow has nothing ready to send either. Measured on a live install: 102
+    follow-ups and 1 opener in a week.
     """
     from openoutreach.emails.models import Mailbox
 
-    budget = max(0, Mailbox.objects.remaining_today() - _due_follow_ups(campaigns))
+    headroom = Mailbox.objects.remaining_today()
+    reserved = min(_due_follow_ups(campaigns), headroom - _opener_floor(headroom))
+    budget = max(0, headroom - reserved)
     return quota.allocate(campaigns, budget, quota.opener_counts(campaigns))
 
 
-def _next_follow_up_slot(campaigns) -> int:
+def _opener_floor(headroom: int) -> int:
+    """Sends of *headroom* that follow-ups may never reserve away from openers.
+
+    Rounded up, so a box small enough that the fraction lands under one send still
+    keeps one for first contact rather than none.
+    """
+    return math.ceil(headroom * OPENER_FLOOR_FRACTION)
+
+
+def _opener_reserve(campaigns, allowances: dict[int, int]) -> int:
+    """Sends to actually hold back from the follow-up drain right now.
+
+    The floor is a *ceiling on the reservation*, not a promise to idle: holding
+    back capacity for openers that do not exist would leave a box half-used while
+    replies wait. So the reserve is the floor capped by the openers a campaign
+    could genuinely send this moment — a READY_TO_EMAIL deal, within that
+    campaign's allowance.
+    """
+    from openoutreach.crm.models import Deal
+    from openoutreach.emails.models import Mailbox
+
+    ready = dict(
+        Deal.objects.filter(
+            campaign__in=campaigns,
+            state=DealState.READY_TO_EMAIL,
+            lead__disqualified=False,
+        )
+        .values_list("campaign_id")
+        .annotate(n=Count("pk"))
+    )
+    sendable = sum(min(allowances[c.pk], ready.get(c.pk, 0)) for c in campaigns)
+    return min(_opener_floor(Mailbox.objects.remaining_today()), sendable)
+
+
+def _next_follow_up_slot(campaigns, reserve: int = 0) -> int:
     """Mint one follow-up slot for the campaign owed the oldest reply. Returns 0 or 1.
 
     Ordered by oldest due rather than by campaign order so a busy campaign cannot
     starve a quiet one's replies — with a single slot per pass, whoever iterates
-    first would otherwise win every time.
+    first would otherwise win every time. *reserve* is the opener floor, passed
+    through to the drain.
     """
     from openoutreach.crm.models import Deal
 
@@ -382,7 +445,7 @@ def _next_follow_up_slot(campaigns) -> int:
     for campaign in sorted(
         (c for c in campaigns if c.pk in oldest), key=lambda c: oldest[c.pk],
     ):
-        if flush_follow_up_queue(campaign):
+        if flush_follow_up_queue(campaign, reserve):
             return 1
     return 0
 
@@ -416,7 +479,10 @@ def reconcile(session) -> None:
     Today's opener budget is still split across campaigns by ``core/quota.py``
     (``opener_allowances`` bounds what each may buy and send today);
     ``quota.by_hunger`` then decides who is owed the *next* slot, so
-    ``Campaign.action_fraction`` holds per-send rather than per-day."""
+    ``Campaign.action_fraction`` holds per-send rather than per-day. The follow-up
+    drain runs first but not unconditionally: ``_opener_reserve`` holds back up to
+    ``OPENER_FLOOR_FRACTION`` of the box for openers that are ready to send, so
+    priority-on-claim can't harden into owning the whole day."""
     _recover_stale_running_tasks()
     _refresh_capacities()
     campaigns = session.campaigns
@@ -424,7 +490,7 @@ def reconcile(session) -> None:
     allowances = opener_allowances(campaigns)
     for campaign in campaigns:
         flush_find_email_queue(session, campaign, allowances[campaign.pk])
-    _next_follow_up_slot(campaigns)
+    _next_follow_up_slot(campaigns, _opener_reserve(campaigns, allowances))
     _next_opener_slot(session, campaigns, allowances)
 
     quota.log_shares(campaigns)

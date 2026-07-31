@@ -46,8 +46,12 @@ class DealState(models.TextChoices):
     not fit. A *couldn't-run*
     (no key / API down at submit) leaves the deal at READY_TO_FIND_EMAIL to
     retry, and a job that never terminates within the poll deadline reverts
-    FINDING_EMAIL → READY_TO_FIND_EMAIL for a fresh submit. The LinkedIn connect
-    leg (READY_TO_CONNECT/PENDING/CONNECTED) was removed with the channel.
+    FINDING_EMAIL → READY_TO_FIND_EMAIL for a fresh submit — but only while this
+    deal is under ``COLLECT_MAX_SUBMITS`` jobs, counted off its own collect task
+    rows; past it the deal parks at NO_EMAIL_BETTERCONTACT, so a provider whose
+    jobs never terminate costs a bounded number of submits per deal instead of
+    spinning forever. The LinkedIn connect leg
+    (READY_TO_CONNECT/PENDING/CONNECTED) was removed with the channel.
 
     NOTE: when adding a state, also add it to ``_STATE_LOG_STYLE`` in
     ``core/db/deals.py`` — an unmapped state logs as a red "ERROR" label.

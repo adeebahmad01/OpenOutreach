@@ -251,3 +251,61 @@ class TestReconcileSplitsOpeners:
         assert self._follow_up_slots(own) == 1
         assert self._email_slots(own) == 1
         assert opener_allowances([own])[own.pk] == 4  # 5 headroom − 1 owed follow-up
+
+    def test_owed_follow_ups_cannot_reserve_past_the_opener_floor(self, fake_session):
+        """The reservation is bounded. Open threads accumulate faster than they
+        close, so an unbounded one drives the opener budget to zero — and with it
+        ``find_email``, which starves tomorrow's openers too."""
+        own = fake_session.campaign
+        Mailbox.objects.create(
+            username="a@b.com", password="pw", from_address="a@b.com", daily_limit=8,
+        )
+        for i in range(20):  # far more owed than the box can send
+            DealFactory(
+                campaign=own, lead=LeadFactory(email=f"thread-{i}@corp.com"),
+                state=DealState.EMAILED, email_sent_at=timezone.now(),
+                next_follow_up_at=timezone.now() - timedelta(hours=1),
+            )
+        self._ready(own, 5)
+
+        # 8 headroom, floor = ceil(8 × 0.25) = 2 — kept for openers, not reserved away.
+        assert opener_allowances([own])[own.pk] == 2
+
+    def test_follow_ups_yield_the_floor_to_a_ready_opener(self, fake_session):
+        """Claim priority is not a claim on the whole day: with the box down to the
+        floor and an opener ready, the follow-up drain stops minting."""
+        own = fake_session.campaign
+        box = Mailbox.objects.create(
+            username="a@b.com", password="pw", from_address="a@b.com", daily_limit=4,
+        )
+        DealFactory(
+            campaign=own, lead=LeadFactory(email="thread@corp.com"),
+            state=DealState.EMAILED, email_sent_at=timezone.now(),
+            next_follow_up_at=timezone.now() - timedelta(hours=1),
+        )
+        self._ready(own, 1)
+        box.daily_limit = 1  # headroom is now exactly the floor
+        box.save(update_fields=["daily_limit"])
+
+        reconcile(fake_session)
+
+        assert self._follow_up_slots(own) == 0
+        assert self._email_slots(own) == 1
+
+    def test_the_floor_is_not_held_back_when_no_opener_is_ready(self, fake_session):
+        """Work-conserving: reserving capacity for openers that don't exist would
+        idle the box while replies wait."""
+        own = fake_session.campaign
+        Mailbox.objects.create(
+            username="a@b.com", password="pw", from_address="a@b.com", daily_limit=1,
+        )
+        DealFactory(
+            campaign=own, lead=LeadFactory(email="thread@corp.com"),
+            state=DealState.EMAILED, email_sent_at=timezone.now(),
+            next_follow_up_at=timezone.now() - timedelta(hours=1),
+        )
+        # No READY_TO_EMAIL deal anywhere.
+
+        reconcile(fake_session)
+
+        assert self._follow_up_slots(own) == 1
