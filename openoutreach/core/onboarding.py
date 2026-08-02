@@ -281,7 +281,7 @@ _SIGNATURE_PROMPT = """Email signature for {address} — appended to every email
 
     Eracle
     Founder, OpenOutreach
-    https://www.linkedin.com/in/eracle
+    linkedin.com/in/eracle/
 
   Your signature"""
 

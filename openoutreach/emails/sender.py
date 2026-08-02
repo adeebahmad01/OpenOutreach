@@ -93,16 +93,18 @@ def _sign(body: str, signature: str | None) -> str:
     return f"{body.rstrip()}\n\n{signature}\n"
 
 
-ATTRIBUTION = "Sent with OpenOutreach https://openoutreach.app"
+ATTRIBUTION = "Sent with OpenOutreach"
 
 
 def _attribute(body: str) -> str:
-    """Append the product attribution line, separated by a blank line.
+    """Append the product attribution line, separated by two blank lines.
 
     Always on, last in the message (after the signature): every recipient of an
-    outbound email is a plausible future operator.
+    outbound email is a plausible future operator. It names the product without
+    linking it — a bare name reads as a footer, a URL reads as an ad, and anyone
+    curious enough to act on it can search.
     """
-    return f"{body.rstrip()}\n\n{ATTRIBUTION}\n"
+    return f"{body.rstrip()}\n\n\n{ATTRIBUTION}\n"
 
 
 def _mint_message_id(from_address: str) -> str:

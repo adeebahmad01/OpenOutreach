@@ -209,17 +209,17 @@ class TestSendEmailSignature:
         return deliver.call_args.args[1].get_content()
 
     def test_signature_appended_after_blank_line(self):
-        body = self._sent_body("Eracle\nhttps://www.linkedin.com/in/eracle")
+        body = self._sent_body("Eracle\nlinkedin.com/in/eracle/")
         assert body == (
-            f"Body\n\nEracle\nhttps://www.linkedin.com/in/eracle\n\n{ATTRIBUTION}\n"
+            f"Body\n\nEracle\nlinkedin.com/in/eracle/\n\n\n{ATTRIBUTION}\n"
         )
 
     def test_body_carries_only_attribution_when_signature_blank(self):
-        assert self._sent_body("") == f"Body\n\n{ATTRIBUTION}\n"
+        assert self._sent_body("") == f"Body\n\n\n{ATTRIBUTION}\n"
 
     def test_body_carries_only_attribution_when_signature_unset(self):
         """A never-asked box (NULL) sends unsigned rather than crashing on None."""
-        assert self._sent_body(None) == f"Body\n\n{ATTRIBUTION}\n"
+        assert self._sent_body(None) == f"Body\n\n\n{ATTRIBUTION}\n"
 
 
 class TestSendEmailAttribution:
