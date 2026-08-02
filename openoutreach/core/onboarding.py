@@ -254,7 +254,8 @@ _MAILBOX_GUIDANCE = """
   unless the login succeeds.
 
   No good sending box yet? IceMail sets up a warmed, ready-to-send Google
-  Workspace inbox in minutes (~$2.50/mo): {icemail_link}
+  Workspace inbox in minutes (~$2.50/mo). Affiliate link — supports
+  OpenOutreach, no markup to you: {icemail_link}
 
   The SMTP/IMAP host + port fields below default to Gmail / Google Workspace
   (smtp.gmail.com:587, imap.gmail.com:993). If you're on Gmail, Workspace, or

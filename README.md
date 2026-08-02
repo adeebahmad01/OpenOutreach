@@ -68,6 +68,8 @@ Both kinds send from your mailbox under your identity, and both are your respons
 
 That's it. No social-network account, no spreadsheets, no lead databases, no scraping setup. The BetterContact key and a connected mailbox are both required — the key drives discovery *and* enrichment, and the mailbox is where outreach is sent from.
 
+The BetterContact and IceMail links above are **affiliate links** — signing up through them supports OpenOutreach, at no markup to you. You can sign up for either service directly instead; IceMail in particular is only a suggestion, since any SMTP mailbox you own works.
+
 ---
 
 ## ⚡ Quick Start (Docker — Recommended)
