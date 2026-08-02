@@ -27,11 +27,11 @@ OpenOutreach is a **self-hosted, open-source, email-first AI sales agent** for B
 
 1. **You provide** a product description and a campaign objective (e.g. "SaaS analytics platform" targeting "VP of Engineering at Series B startups")
 2. **An LLM turns that into an ICP filter** and pages matching firmographic profiles from a **licensed discovery source** (BetterContact **Lead Finder**) — no emails yet, billed nothing
-3. **A Bayesian ML model** (Gaussian Process Regressor on profile embeddings) learns which profiles match your ideal customer — an explore/exploit strategy balancing finding the best leads now vs. learning what makes a good lead
-4. **An LLM classifies** each candidate the model selects; the GP learns from every decision to pick better candidates over time
+3. **A model scores the profiles** (Gaussian Process Regressor on profile embeddings) so the expensive steps go to the most promising candidates first — explore/exploit over the pool
+4. **An LLM classifies** each candidate the model selects, and each decision is fed back into the model
 5. **Only the best-fit leads get a paid email lookup.** A confidence gate rations a work-email resolution (one credit per verified hit); a hit routes the lead into **agentic email** — an AI agent sends a personalized opener from your mailbox, then reads replies and runs multi-turn follow-up
 
-The system gets smarter with every decision: it explores broadly, then progressively focuses on the highest-value profiles as it learns your ideal customer profile from its own classification history.
+The point of the scoring layer is cost: searching the licensed source is free, so the system can afford to look at a lot and spend paid lookups only on the best fits. *(The learning loop is an active experiment — it is not yet shown to beat picking at random, and no claim is made that it does.)*
 
 **Why choose OpenOutreach?**
 
@@ -130,7 +130,7 @@ Then open:
 | Feature                            | Description                                                                                                          |
 |------------------------------------|----------------------------------------------------------------------------------------------------------------------|
 | 🧠 **Autonomous Lead Discovery**   | No contact lists needed — an LLM turns your product + objective into an ICP filter and pages matching profiles from a licensed discovery source. |
-| 🎯 **Bayesian Active Learning**    | Gaussian Process model on profile embeddings learns your ideal customer via explore/exploit, selecting the most informative candidates for LLM qualification. |
+| 🎯 **Pay Only For What Resolves**  | Search against the licensed source is free; a confidence gate rations the paid lookups, billed only on a verified hit. Cost scales with qualified leads, not with how much you searched. |
 | 🔒 **Licensed Discovery**          | Firmographic profiles come from a paid, licensed provider (BetterContact Lead Finder) — no scraping, no browser, no account. |
 | 📧 **Agentic Email Outreach**      | Resolves a work email per best-fit lead (one credit per hit), sends an AI-written opener from your own mailbox over SMTP, then reads replies (IMAP) and runs multi-turn follow-up. |
 | 🔄 **Stateful Pipeline**          | Tracks deal states (`QUALIFIED` → `READY_TO_FIND_EMAIL` → `FINDING_EMAIL` → `READY_TO_EMAIL` → `EMAILED` → `COMPLETED`/`FAILED`) in a local DB — fully resumable. |
