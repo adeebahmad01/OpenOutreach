@@ -68,6 +68,8 @@ def handle_follow_up(task, session, qualifiers):
         _send_reply(session, deal, decision)
     elif decision.action == "mark_completed":
         _complete(session, deal, decision)
+    elif decision.action == "suppress":
+        _suppress(session, deal)
     elif decision.action == "wait":
         _rearm(deal, decision)
 
@@ -78,7 +80,12 @@ def handle_follow_up(task, session, qualifiers):
 def _send_reply(session, deal, decision) -> None:
     """Send a threaded reply, record it as an outgoing ChatMessage, re-arm the clock."""
     from openoutreach.chat.models import ChatMessage
-    from openoutreach.emails.sender import operator_bcc, send_email
+    from openoutreach.emails.sender import operator_bcc, send_email, suppressed
+
+    if suppressed(deal.lead):
+        logger.warning("[%s] follow_up: %s was suppressed mid-run — not replying",
+                       deal.campaign, deal.lead.profile_url)
+        return
 
     subject = _reply_subject(deal.email_subject)
     logger.info("[%s] follow_up reply to %s: %s", deal.campaign, deal.lead.profile_url, decision.message)
@@ -111,6 +118,26 @@ def _complete(session, deal, decision) -> None:
     set_profile_state(session, deal.lead.profile_url, DealState.COMPLETED.value, outcome=decision.outcome)
     logger.info("[%s] follow_up completed for %s: outcome=%s",
                 deal.campaign, deal.lead.profile_url, decision.outcome)
+
+
+def _suppress(session, deal) -> None:
+    """Honour a worded unsubscribe: suppress the person, close the deal, send nothing.
+
+    The enforcement is account-level (``Lead.disqualified``), so this reaches every
+    campaign holding the address, not just this thread's. No reply goes out —
+    someone who asked to stop hearing from us is not owed one more email.
+
+    The deal is closed **here** as well as inside ``suppress_email``, because that
+    call is keyed on the address and this one is keyed on the deal: a lead whose
+    ``email`` is blank matches nothing, and without this the deal would neither
+    close nor re-arm its countdown — leaving it permanently due, and the agent
+    re-deciding the same suppression on every reconcile.
+    """
+    from openoutreach.core.db.deals import set_profile_state
+    from openoutreach.core.db.leads import suppress_email
+
+    suppress_email(deal.lead.email)
+    set_profile_state(session, deal.lead.profile_url, DealState.UNSUBSCRIBED.value)
 
 
 def _rearm(deal, decision) -> None:

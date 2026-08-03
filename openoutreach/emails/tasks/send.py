@@ -30,7 +30,7 @@ def handle_email(task, session, qualifiers):
     from openoutreach.core.db.deals import get_emailable_deals
     from openoutreach.core.db.summaries import materialize_profile_summary_if_missing
     from openoutreach.emails.models import Mailbox
-    from openoutreach.emails.sender import operator_bcc, send_email
+    from openoutreach.emails.sender import operator_bcc, send_email, suppressed
 
     campaign = session.campaign
 
@@ -46,6 +46,10 @@ def handle_email(task, session, qualifiers):
 
     materialize_profile_summary_if_missing(deal, session)
     opener = run_outreach_agent(session, deal)
+
+    if suppressed(deal.lead):
+        logger.warning("[%s] email: %s was suppressed mid-run — not sending", campaign, public_id)
+        return
 
     message_id = send_email(
         mailbox, deal.lead.email, opener.subject, opener.message,

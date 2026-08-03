@@ -362,6 +362,38 @@ def _refresh_capacities() -> None:
     mark_measured()
 
 
+# How often the unsubscribe scan runs, held in the process like warmth's daily
+# stamp and for the same reason: ``reconcile`` fires whenever the queue drains to
+# a future task — every few minutes under send pacing — and an IMAP login on each
+# would be hundreds a day per box. Hourly rather than daily because the quantity
+# is not a daily one: a day's lag would let a full day of sends go out after
+# someone asked us to stop, where an hour bounds it to the couple of messages the
+# pacing allows in that window.
+UNSUB_SCAN_INTERVAL_S = 3600
+
+_unsub_scanned_at = None
+
+
+def _scan_unsubscribes() -> None:
+    """Read every mailbox's ``+unsub`` alias and suppress the senders, hourly.
+
+    Best-effort per box, like the capacity refresh it sits beside: one unreachable
+    mailbox keeps its scan cursor and must not stop the others being scanned. The
+    stamp is taken whatever the outcome, so a dead box costs one IMAP timeout an
+    hour rather than one per reconcile.
+    """
+    from openoutreach.emails.inbox import scan_unsubscribes
+    from openoutreach.emails.models import Mailbox
+
+    global _unsub_scanned_at
+    now = timezone.now()
+    if _unsub_scanned_at and (now - _unsub_scanned_at).total_seconds() < UNSUB_SCAN_INTERVAL_S:
+        return
+    for box in Mailbox.objects.all():
+        scan_unsubscribes(box)
+    _unsub_scanned_at = now
+
+
 def _recover_stale_running_tasks() -> int:
     """Reset RUNNING tasks to PENDING. RUNNING rows can only linger if the
     daemon crashed mid-task, so they are always stale at reconcile time."""
@@ -489,7 +521,8 @@ def _next_opener_slot(session, campaigns, allowances: dict[int, int]) -> int:
 
 
 def reconcile(session) -> None:
-    """Recover stale RUNNING tasks, re-measure warm capacity, then top up the drains:
+    """Recover stale RUNNING tasks, re-measure warm capacity, honour opt-outs, then
+    top up the drains:
     one ``find_email`` submit slot per campaign (if there's send headroom and
     allowance), **one** due follow-up, and **one** ready opener. Bound
     ``collect_email`` polls are self-chaining and are not reconciled here. Runs on
@@ -511,6 +544,7 @@ def reconcile(session) -> None:
     priority-on-claim can't harden into owning the whole day."""
     _recover_stale_running_tasks()
     _refresh_capacities()
+    _scan_unsubscribes()
     campaigns = session.campaigns
 
     allowances = opener_allowances(campaigns)

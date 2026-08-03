@@ -9,8 +9,14 @@ that actually differs: whether a thread exists yet.
 - **first touch** (no thread): the agent must ``send_message`` and must supply a
   ``subject``. ``emails/tasks/send.py`` sends it and records the thread root.
 - **in thread**: replies are read from the mailbox first, then the agent picks
-  ``send_message`` / ``wait`` / ``mark_completed``. ``emails/tasks/follow_up.py``
-  executes the choice.
+  ``send_message`` / ``wait`` / ``mark_completed`` / ``suppress``.
+  ``emails/tasks/follow_up.py`` executes the choice.
+
+``suppress`` is the *worded* unsubscribe — "take me off your list", "stop
+emailing me". It threads like any other reply, so the box-wide alias scan in
+``emails/inbox.py`` can never see it, and the agent reading every reply already
+can. It is a stronger statement than ``not_interested``: it ends the thread and
+suppresses the person account-wide, across every campaign.
 
 Single LLM call with structured output — no tool-calling loop.
 """
@@ -34,8 +40,11 @@ logger = logging.getLogger(__name__)
 class OutreachDecision(BaseModel):
     """Structured output from the outreach agent, at either end of the thread."""
 
-    action: Literal["send_message", "mark_completed", "wait"] = Field(
-        description="What to do next for this lead. The first email in a thread is always send_message.",
+    action: Literal["send_message", "mark_completed", "wait", "suppress"] = Field(
+        description=(
+            "What to do next for this lead. The first email in a thread is always send_message. "
+            "Use suppress when the lead asked to stop being contacted."
+        ),
     )
     subject: str | None = Field(
         default=None,

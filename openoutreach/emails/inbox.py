@@ -11,6 +11,14 @@ thread root; a reply carries it in ``References``/``In-Reply-To``, so a single
 IMAP header search over the deal's own box finds this thread's replies. Dedup is
 by the reply's own Message-ID (``ChatMessage.external_id``), idempotent without
 trusting IMAP ``\\Seen`` flags.
+
+The second reader here, ``scan_unsubscribes``, is deliberately *not* threaded and
+*not* per-deal. A mail client's unsubscribe button mints a fresh message with no
+``References`` and no ``In-Reply-To``, so the thread search above can never see
+it — it has to be found box-wide, by the ``+unsub`` alias it was addressed to.
+The two readers cover each other: this one is robust because the mail comes from
+the address we mailed, and a *worded* unsubscribe threads normally and reaches
+the follow-up agent as a ``suppress`` decision instead.
 """
 from __future__ import annotations
 
@@ -43,6 +51,127 @@ def sync_inbox(session, deal) -> None:
     from openoutreach.core.db.summaries import seller_name_from, update_chat_summary
 
     update_chat_summary(deal, new_messages, seller_name=seller_name_from(session))
+
+
+# ── Unsubscribe scan ──────────────────────────────────────────────
+
+
+def scan_unsubscribes(mailbox) -> int:
+    """Suppress the sender of every new INBOX message addressed to the ``+unsub`` alias.
+
+    Box-wide and resumable: the scan reads only UIDs above ``unsub_scan_uid``, so
+    a mailbox with years of history is walked once and every later pass looks at
+    the handful of messages that arrived since. The cursor is advanced to the
+    box's current ``UIDNEXT - 1`` rather than to the last *matching* UID — the
+    matches are rare, and anchoring on them would re-search the whole tail on
+    every pass.
+
+    Returns the number of leads suppressed. Best-effort: an unreachable box logs
+    and yields 0 with the cursor untouched, so nothing is skipped when the network
+    is at fault rather than the mail.
+    """
+    from openoutreach.core.db.leads import suppress_email
+    from openoutreach.emails.sender import unsubscribe_address
+
+    alias = unsubscribe_address(mailbox.from_address)
+    imap = imaplib.IMAP4_SSL(mailbox.imap_host, mailbox.imap_port, timeout=IMAP_TIMEOUT_SECONDS)
+    try:
+        imap.login(mailbox.username, mailbox.password)
+        uidvalidity, uidnext = _uid_state(imap)
+        if uidvalidity is None:
+            logger.warning("unsub scan: %s did not report UIDVALIDITY", mailbox.from_address)
+            return 0
+        start = _resume_from(mailbox, uidvalidity)
+        status, _ = imap.select("INBOX", readonly=True)
+        if status != "OK":
+            logger.warning("unsub scan: cannot select INBOX on %s", mailbox.from_address)
+            return 0
+        senders = _unsubscribe_senders(imap, alias, start)
+    except (imaplib.IMAP4.error, OSError) as exc:
+        logger.warning("unsub scan: could not read %s (%s)", mailbox.from_address, exc)
+        return 0
+    finally:
+        _logout(imap)
+
+    suppressed = sum(suppress_email(sender) for sender in senders)
+    _advance_scan_cursor(mailbox, uidnext, uidvalidity)
+    logger.info("unsub scan: %s examined UIDs >%d, %d opt-out(s), %d lead(s) suppressed",
+                mailbox.from_address, start, len(senders), suppressed)
+    return suppressed
+
+
+def _resume_from(mailbox, uidvalidity: int) -> int:
+    """The UID to resume above — 0 when the server has reissued its UIDs.
+
+    A changed ``UIDVALIDITY`` means the stored cursor now points at unrelated
+    mail. Restarting the scan costs one full pass over a box; trusting the stale
+    cursor would silently skip every opt-out below it, forever.
+    """
+    if uidvalidity == mailbox.unsub_scan_uidvalidity:
+        return mailbox.unsub_scan_uid
+    if mailbox.unsub_scan_uidvalidity:
+        logger.info("unsub scan: %s UIDVALIDITY %d → %d, rescanning from the start",
+                    mailbox.from_address, mailbox.unsub_scan_uidvalidity, uidvalidity)
+    return 0
+
+
+def _advance_scan_cursor(mailbox, uidnext: int, uidvalidity: int) -> None:
+    """Persist the scan's new resume point — everything below ``UIDNEXT`` is read."""
+    mailbox.unsub_scan_uid = max(mailbox.unsub_scan_uid, uidnext - 1)
+    mailbox.unsub_scan_uidvalidity = uidvalidity
+    mailbox.save(update_fields=["unsub_scan_uid", "unsub_scan_uidvalidity"])
+
+
+def _uid_state(imap) -> tuple[int | None, int]:
+    """``(UIDVALIDITY, UIDNEXT)`` for INBOX, or ``(None, 0)`` if the server won't say.
+
+    Read with STATUS before SELECT so both numbers are in hand before any message
+    is looked at: the scan's resume point and its new cursor are decided from the
+    same snapshot of the box. The response is an unordered attribute list, so each
+    number is picked out by name rather than by position.
+    """
+    status, data = imap.status("INBOX", "(UIDVALIDITY UIDNEXT)")
+    if status != "OK" or not data or not data[0]:
+        return None, 0
+    raw = data[0]
+    text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+    validity, uidnext = _status_int(text, "UIDVALIDITY"), _status_int(text, "UIDNEXT")
+    if validity is None or uidnext is None:
+        return None, 0
+    return validity, uidnext
+
+
+def _status_int(text: str, attribute: str) -> int | None:
+    """One named integer out of an IMAP STATUS response, or None if absent."""
+    match = re.search(rf"{attribute}\s+(\d+)", text)
+    return int(match.group(1)) if match else None
+
+
+def _unsubscribe_senders(imap, alias: str, start_uid: int) -> list[str]:
+    """Sender addresses of messages above *start_uid* addressed to the unsub *alias*.
+
+    ``HEADER To <alias>`` substring-matches the alias wherever it sits in the To
+    header, which is what makes this work across clients that rewrite the display
+    name. A server answering ``start:*`` when nothing is above ``start`` returns
+    the newest message instead of an empty set — harmless, since re-examining it
+    only ever re-suppresses an address already suppressed.
+    """
+    status, data = imap.uid("SEARCH", None, "UID", f"{start_uid + 1}:*", "HEADER", "To", alias)
+    if status != "OK" or not data or not data[0]:
+        return []
+    return [addr for uid in data[0].split() if (addr := _sender_of(imap, uid))]
+
+
+def _sender_of(imap, uid) -> str:
+    """The lowercased From address of one message, headers only; "" if unreadable."""
+    status, data = imap.uid("FETCH", uid, "(BODY.PEEK[HEADER.FIELDS (FROM)])")
+    if status != "OK":
+        return ""
+    for item in data:
+        if isinstance(item, tuple):
+            raw = email.message_from_bytes(item[1]).get("From", "")
+            return parseaddr(raw)[1].lower()
+    return ""
 
 
 # ── IMAP transport ────────────────────────────────────────────────

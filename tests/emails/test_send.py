@@ -12,7 +12,13 @@ from openoutreach.core.models import Task
 from openoutreach.core.scheduler import flush_email_queue
 from openoutreach.crm.models import DealState
 from openoutreach.emails.models import Mailbox
-from openoutreach.emails.sender import ATTRIBUTION, operator_bcc, send_email
+from openoutreach.emails.sender import (
+    ATTRIBUTION,
+    OPT_OUT_LINE,
+    operator_bcc,
+    send_email,
+    unsubscribe_address,
+)
 from openoutreach.emails.tasks.send import handle_email
 from tests.factories import DealFactory, LeadFactory
 
@@ -211,15 +217,15 @@ class TestSendEmailSignature:
     def test_signature_appended_after_blank_line(self):
         body = self._sent_body("Eracle\nlinkedin.com/in/eracle/")
         assert body == (
-            f"Body\n\nEracle\nlinkedin.com/in/eracle/\n\n\n{ATTRIBUTION}\n"
+            f"Body\n\nEracle\nlinkedin.com/in/eracle/\n\n{OPT_OUT_LINE}\n\n\n{ATTRIBUTION}\n"
         )
 
-    def test_body_carries_only_attribution_when_signature_blank(self):
-        assert self._sent_body("") == f"Body\n\n\n{ATTRIBUTION}\n"
+    def test_body_carries_only_opt_out_and_attribution_when_signature_blank(self):
+        assert self._sent_body("") == f"Body\n\n{OPT_OUT_LINE}\n\n\n{ATTRIBUTION}\n"
 
-    def test_body_carries_only_attribution_when_signature_unset(self):
+    def test_body_carries_only_opt_out_and_attribution_when_signature_unset(self):
         """A never-asked box (NULL) sends unsigned rather than crashing on None."""
-        assert self._sent_body(None) == f"Body\n\n\n{ATTRIBUTION}\n"
+        assert self._sent_body(None) == f"Body\n\n{OPT_OUT_LINE}\n\n\n{ATTRIBUTION}\n"
 
 
 class TestSendEmailAttribution:

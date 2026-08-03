@@ -99,20 +99,22 @@ addresses), so the funnel first *finds* the email and then *talks*:
 
 ```
 QUALIFIED ─(GP rank gate)─▶ READY_TO_FIND_EMAIL ─(find_email/submit)─▶ FINDING_EMAIL ─(collect_email/poll)─▶ hit:  READY_TO_EMAIL
- discovered + qualified      ranked, awaiting the      provider job in flight;         miss: FAILED (reason="no email")
+ discovered + qualified      ranked, awaiting the      provider job in flight;         miss: NO_EMAIL_BETTERCONTACT
  (no email yet)              paid lookup               request_id in task payload              │
                             (free hub hit → READY_TO_EMAIL directly, no job)                   ▼
                           READY_TO_EMAIL ──(email opener)──▶ EMAILED ⟲ (agentic follow-up) ──▶ COMPLETED / FAILED
-                                                             read replies (IMAP) → agent: send / wait / complete
+                                                             read replies (IMAP) → agent:      └▶ UNSUBSCRIBED
+                                                               send / wait / complete / suppress
                                                              send: threaded SMTP reply, re-arm next_follow_up_at
 ```
 
 - **`READY_TO_FIND_EMAIL`** — passed the **GP confidence gate** (`ready_pool.promote_to_ready` above `min_gp_confidence`); queued for the *paid* lookup (one credit per verified hit). The gate rations spend to leads the model is confident about; the submit leg additionally fires only when there's mailbox send-headroom for the result today.
 - **`FINDING_EMAIL`** — a provider job is in flight; the deal is excluded from the candidate pool (so the next submit slot can't re-select it and double-charge) while `collect_email` polls to termination. The job handle + poll backoff live in the **collect task's payload**, never on the deal, so an in-flight lookup rides on the persisted task row and survives a restart.
 - **`READY_TO_EMAIL`** — an address exists; queued for the opener. A cheap, **ungated** FIFO send-queue paced by the pool-wide send interval and the per-box measured capacity (no ranking step).
-- **`EMAILED`** — the opener has been sent; the agentic follow-up loop reads IMAP replies and decides send/wait/complete, paced by the agent's own `follow_up_hours` — **business** hours, stamped onto `Deal.next_follow_up_at` via `core/business_time.add_business_hours`, so weekends don't count down and no follow-up comes due on a Sat/Sun — until a terminal `COMPLETED`/`FAILED`.
+- **`EMAILED`** — the opener has been sent; the agentic follow-up loop reads IMAP replies and decides send/wait/complete/suppress, paced by the agent's own `follow_up_hours` — **business** hours, stamped onto `Deal.next_follow_up_at` via `core/business_time.add_business_hours`, so weekends don't count down and no follow-up comes due on a Sat/Sun — until a terminal `COMPLETED`/`FAILED`/`UNSUBSCRIBED`.
+- **`UNSUBSCRIBED`** — the recipient asked to be left alone, by a mail client's unsubscribe button (found box-wide by `emails/inbox.py:scan_unsubscribes`) or in words the follow-up agent read. The **sibling of `NO_EMAIL_BETTERCONTACT` on the far side of the send**: a fit positive whose *reachability* ended, not a verdict on the offer — so `outcome` stays blank exactly as it does on an enrichment miss and the ML labeler keeps the lead at label=1. The *enforcement* is not this state (which would bind one campaign) but `Lead.disqualified`; see **Opt-out and suppression** below.
 
-**The paid lookup is a two-leg async handshake** (mirroring the retired connect→check_pending). `find_email` (submit) resolves free-hub-first (hit → `READY_TO_EMAIL` with no job/credit), else fires a provider job and parks at `FINDING_EMAIL`; a couldn't-submit (no key / API down) stays `READY_TO_FIND_EMAIL`. `collect_email` (poll) is then **tri-state**: hit → `READY_TO_EMAIL` (address given back to the hub); **miss** (job terminated, no address) → `FAILED`, `reason="no email"`, **outcome blank** — critically not `wrong_fit`, because the ML labeler reads `FAILED+wrong_fit` as a negative and *skips* every other `FAILED` deal, so a lead we simply couldn't find is ML-skipped, never scored a bad fit; **still running** → chains the next poll with doubled backoff, or past the deadline reverts `FINDING_EMAIL → READY_TO_FIND_EMAIL` for a fresh submit (no credit spent).
+**The paid lookup is a two-leg async handshake** (mirroring the retired connect→check_pending). `find_email` (submit) resolves free-hub-first (hit → `READY_TO_EMAIL` with no job/credit), else fires a provider job and parks at `FINDING_EMAIL`; a couldn't-submit (no key / API down) stays `READY_TO_FIND_EMAIL`. `collect_email` (poll) is then **tri-state**: hit → `READY_TO_EMAIL` (address given back to the hub); **miss** (job terminated, no address) → `NO_EMAIL_BETTERCONTACT` — its own terminal, with **no reason and blank outcome**, critically not `FAILED+wrong_fit`, which the ML labeler reads as a negative: a lead we simply couldn't reach was still an LLM fit positive and stays label=1; **still running** → chains the next poll with doubled backoff on the same `request_id`, with no deadline and no attempt limit (see `handle_collect_email` below for why the deadline was removed).
 
 `crm/models/deal.py:Outcome` (TextChoices): converted, not_interested, wrong_fit, no_budget,
 has_solution, bad_timing, unresponsive, unknown — on `Deal.outcome`. `Lead.disqualified=True` =
@@ -164,9 +166,88 @@ The ledger is derived, never stored (no counter to migrate, nothing to drift aft
 **Handlers** (in `emails/tasks/`, signature `handle_*(task, session, qualifiers)`):
 
 1. **`handle_find_email`** (`tasks/find_email.py`) — the **submit** leg. Drives the discovery→qualify→rank chain to one top-ranked `READY_TO_FIND_EMAIL` candidate (freemium campaigns draw from the kit-ranked pool and mint the Deal on the fly), tries the free hub cache (`contacts.resolve`) → hit routes straight to `READY_TO_EMAIL` and queues the opener; hub miss → `bettercontact.submit` fires a job, parks the deal at `FINDING_EMAIL`, and schedules the first `collect_email` poll. No-op with no mailbox; couldn't-submit stays `READY_TO_FIND_EMAIL`.
-2. **`handle_collect_email`** (`tasks/collect_email.py`) — the **poll** leg. Polls the payload's `request_id` once (`bettercontact.poll_once`): hit → `READY_TO_EMAIL` + hub give-back + queue the opener; miss → `FAILED reason="no email"`; still-running → chain the next poll with doubled backoff (`COLLECT_BACKOFF_BASE_S·2^attempt`). **The only terminal outcomes are the provider's own** — there is no deadline and no attempt limit. There used to be both: past the deadline the leg abandoned the job and reverted the deal to `READY_TO_FIND_EMAIL`, where the submit leg bought a *second* job for the same lead, so a provider outage became a hot resubmit loop (measured on a live install during a multi-day incident their support later confirmed: 418 submits and 4,512 polls in a week for ~40 leads, none terminating). An unterminated job is queued, not lost, so the leg keeps the same `request_id` and asks later, and the deal waits at `FINDING_EMAIL` where nothing re-selects it. Doubling makes that nearly free — a week costs 17 polls — and it never mislabels, since a timeout is evidence about the provider, not about whether the lead has a findable address. The interval rails at `COLLECT_BACKOFF_MAX_S` (a month) only so the schedule stays representable: uncapped, `5s·2^41` overflows `datetime`, the handler dies before minting its successor, and the deal is stranded with no pending task — the one outcome the design exists to prevent. A stale deal (no longer `FINDING_EMAIL`) drops the poll.
+2. **`handle_collect_email`** (`tasks/collect_email.py`) — the **poll** leg. Polls the payload's `request_id` once (`bettercontact.poll_once`): hit → `READY_TO_EMAIL` + hub give-back + queue the opener; miss → `NO_EMAIL_BETTERCONTACT` (no reason, blank outcome); still-running → chain the next poll with doubled backoff (`COLLECT_BACKOFF_BASE_S·2^attempt`). **The only terminal outcomes are the provider's own** — there is no deadline and no attempt limit. There used to be both: past the deadline the leg abandoned the job and reverted the deal to `READY_TO_FIND_EMAIL`, where the submit leg bought a *second* job for the same lead, so a provider outage became a hot resubmit loop (measured on a live install during a multi-day incident their support later confirmed: 418 submits and 4,512 polls in a week for ~40 leads, none terminating). An unterminated job is queued, not lost, so the leg keeps the same `request_id` and asks later, and the deal waits at `FINDING_EMAIL` where nothing re-selects it. Doubling makes that nearly free — a week costs 17 polls — and it never mislabels, since a timeout is evidence about the provider, not about whether the lead has a findable address. The interval rails at `COLLECT_BACKOFF_MAX_S` (a month) only so the schedule stays representable: uncapped, `5s·2^41` overflows `datetime`, the handler dies before minting its successor, and the deal is stranded with no pending task — the one outcome the design exists to prevent. A stale deal (no longer `FINDING_EMAIL`) drops the poll.
 3. **`handle_email`** (`tasks/send.py`) — picks the `Mailbox` with the most headroom + the oldest `READY_TO_EMAIL` deal (`core.db.deals.get_emailable_deals`), materializes the profile summary, composes the opener (`core/agents/outreach.py`, first-touch branch), sends over SMTP (`emails/sender.py`; BCC = `operator_bcc(user, campaign)` — the operator's own address on their own campaigns, `None` on freemium), then `_record_sent_email` writes the email fields, the outgoing opener `ChatMessage`, and `state=EMAILED` — send record + state on one row, so no double-send window. `next_follow_up_at` is seeded from the agent's own `follow_up_hours`, counted in business hours (`core/business_time.add_business_hours`).
-4. **`handle_follow_up`** (`tasks/follow_up.py`) — picks the oldest due `EMAILED` deal whose bound box has headroom, runs `run_outreach_agent` (reads IMAP replies via `emails/inbox.py`, decides), then executes: `send_message` → threaded SMTP reply (`In-Reply-To` = latest message, `References` = thread root) + re-arm the clock; `mark_completed` → `COMPLETED` with the agent's outcome; `wait` → push `next_follow_up_at` out.
+4. **`handle_follow_up`** (`tasks/follow_up.py`) — picks the oldest due `EMAILED` deal whose bound box has headroom, runs `run_outreach_agent` (reads IMAP replies via `emails/inbox.py`, decides), then executes: `send_message` → threaded SMTP reply (`In-Reply-To` = latest message, `References` = thread root) + re-arm the clock; `mark_completed` → `COMPLETED` with the agent's outcome; `suppress` → the **worded unsubscribe** (`core.db.leads.suppress_email`: disqualify the person account-wide, close the deal at `UNSUBSCRIBED`, send nothing — someone who asked to stop hearing from us is not owed one more email); `wait` → push `next_follow_up_at` out. Both send paths re-check `sender.suppressed(lead)` immediately before building the message.
+
+## Opt-out and suppression
+
+Every outbound message advertises a working way to leave, and every opt-out is honoured
+permanently. Three legs — advertised, detected, enforced — and each is split in two for a
+reason.
+
+**Advertised, two ways on the same message.** `emails/sender.py` puts a
+`List-Unsubscribe: <mailto:{local}+unsub@{domain}?subject=unsubscribe>` header on every send
+*and* a plain-text "reply unsubscribe" line in the body, between the signature and the
+attribution. Each reaches recipients the other misses: the header is what receiving filters
+read and what Gmail renders its own unsubscribe button from, the line is what a client showing
+no button leaves the recipient with. Both work by the same mechanism — put an exit in front of
+someone who wants one, so they take it instead of the spam button. Complaint rate is the
+dominant reputation input, which is why this is a **deliverability** feature and not a
+paperwork one. Header and body line are built in the same function, so it is not possible to
+ship one without the other.
+
+**No postal address.** CAN-SPAM requires a valid physical address in the body of every
+commercial message, and this deliberately does not carry one: no major filter documents a rule
+that reads it, so it buys nothing against the junking this exists to fix, and the scope was cut
+to what moves deliverability. That is a knowing compliance gap for US recipients, recorded here
+rather than left to be rediscovered — see the history card
+`2026-08-03-p1-e2-list-unsubscribe-and-opt-out` in `openoutreach-docs`.
+
+**The alias assumes Gmail-style plus-addressing.** `s@infra.com` advertises
+`s+unsub@infra.com`, which delivers to the same INBOX the daemon already reads — no second
+mailbox, no DNS, no web surface. Gmail and Google Workspace route `+` tags to the base
+mailbox, and they are both the documented default (`smtp.gmail.com` / `imap.gmail.com`) and
+what IceMail provisions, so the assumption holds for the boxes this runs on. It is a real
+assumption, not a universal truth: a provider that *rejects* plus-addressing would bounce the
+opt-out, and the recipient — believing they unsubscribed — would get the next follow-up and
+reasonably hit "spam", which is strictly worse than never advertising the header. Nothing
+verifies the alias round-trips at onboarding, so **connecting a non-Gmail box is the case to
+check by hand**.
+
+The URI is a **`mailto:`, never an `https:`**. RFC 8058 one-click needs an HTTPS endpoint
+accepting POST; the self-hosted daemon has no web surface, and routing unsubscribes through
+the hub would make every install call home — against the no-telemetry promise. A `mailto:` is
+RFC 2369-compliant, needs no infrastructure, and the daemon already speaks IMAP.
+`List-Unsubscribe-Post` is therefore **deliberately absent**: it is only valid alongside an
+`https:` URI, and one-click binds bulk senders at 5,000+ messages/day to Gmail — we send ~29.
+
+**Detected, two ways, because there are two kinds of event.** A *client-generated* unsubscribe
+(Gmail's own button) mints a fresh message with no `References` and no `In-Reply-To`, so
+`sync_inbox`'s thread search can never see it: `emails/inbox.py:scan_unsubscribes` finds it
+**box-wide** by the `+unsub` alias in the To header. A *worded* unsubscribe ("take me off your
+list") threads normally and reaches the outreach agent, which has a `suppress` action beside
+send/wait/mark_completed. The two cover each other — the first is robust because the mail comes
+from the address we mailed, the second because it matches on **thread**, not address.
+
+The scan is resumable: it reads only UIDs above `Mailbox.unsub_scan_uid` and advances the
+cursor to the box's `UIDNEXT - 1`, not to the last *matching* UID (matches are rare, and
+anchoring on them would re-search the whole tail every pass). A changed `UIDVALIDITY` means the
+server reissued its UIDs, so the cursor now points at unrelated mail and the scan restarts from
+0 — trusting it would skip every opt-out below it, forever. It runs **hourly** off `reconcile`
+(a process-held timestamp, like warmth's daily stamp): reconcile fires every few minutes under
+send pacing, so a login per pass would be hundreds a day per box, while a *daily* cadence would
+let a full day of sends go out after someone asked us to stop. An unreachable box keeps its
+cursor — a network fault is not evidence that there was no mail to read.
+
+**Enforced on `Lead.disqualified`,** not on the deal state. It already means "permanent,
+account-level, cross-campaign" and is filtered by eleven candidate queries, so reusing it
+inherits eleven correct guards instead of adding eleven that could be missed;
+`DealState.UNSUBSCRIBED` is only the record of what happened to *this* deal.
+`core.db.leads.suppress_email` suppresses **every** lead holding the address (`Lead.email` has
+no unique constraint, matched case-insensitively because a client echoes back whatever casing
+it was given) and moves their deals to `UNSUBSCRIBED`, leaving already-closed ones alone so an
+opt-out weeks after a thread ended cannot erase how it ended. It is idempotent, which is what
+makes a rescanned mailbox free. Belt-and-braces, `sender.suppressed(lead)` re-reads the row
+immediately before each send at both call sites: the upstream filters are convention, not
+DB-enforced (`core/pipeline/qualify.py`), and the agent runs for seconds with the inbox read on
+its way past, so the pool query that selected the deal is already out of date.
+
+A **hard bounce must not** set `disqualified` — that binds to the address, not the person, and
+would block a replacement address found later. Suppression is also **per-install**: two
+instances hold separate SQLite CRMs, so an unsubscribe in one is invisible to the other.
+Defensible (different identities, different mailboxes) but recorded here as a decision rather
+than discovered later.
 
 ## Qualification ML Pipeline
 
@@ -251,7 +332,7 @@ rather than pinned to a single hallucination.
 ## Django Apps
 
 - **`core`** — Engine: `SiteConfig`, `Campaign`, `Task` models; daemon, scheduler, LLM factory, onboarding, the ML/discovery/qualify pipeline, the two agents, session, geo, vendored mem0.
-- **`emails`** — The email channel. `bettercontact.py` (paid finder: the two-leg `submit(query)→request_id` + `poll_once(request_id)→PollOutcome`, the shared blocking `submit_and_poll` transport used by discovery, `is_configured`, `BetterContactQuery`/`Result`/`PollOutcome`/`Unavailable`); `models.py` (`Mailbox` + `SendVerdict` + the per-box capacity pacing manager + `has_mailbox()`); `icemail.py` (`parse_mailboxes` — the App-Passwords sheet), `smtp.py` (`verify_auth`), `mailbox_setup.py` (`import_mailboxes` → parse → auth-check → store); `sender.py` (`send_email` over SMTP+STARTTLS, threading headers, `operator_bcc` — the BCC-the-operator policy, own campaigns only, mailbox signature then the `ATTRIBUTION` line appended to the body; a failed send is recorded as a `SendVerdict` on the way past and re-raised unchanged); `delivery_policy.py` (what the receiver's answer means — `classify(exc)` → `Response`, the `POLICIES` table, `record_failure`); `warmth.py` (`refresh_capacity` / `read_sent_history` / `capacity_from` — the measured per-box daily ceiling); `inbox.py` (`sync_inbox` — IMAP reply-reader); `newsletter.py` (`subscribe_to_newsletter`, Brevo); `tasks/` (the four handlers: find_email, collect_email, send, follow_up).
+- **`emails`** — The email channel. `bettercontact.py` (paid finder: the two-leg `submit(query)→request_id` + `poll_once(request_id)→PollOutcome`, the shared blocking `submit_and_poll` transport used by discovery, `is_configured`, `BetterContactQuery`/`Result`/`PollOutcome`/`Unavailable`); `models.py` (`Mailbox` + `SendVerdict` + the per-box capacity pacing manager + `has_mailbox()`); `icemail.py` (`parse_mailboxes` — the App-Passwords sheet), `smtp.py` (`verify_auth`), `mailbox_setup.py` (`import_mailboxes` → parse → auth-check → store); `sender.py` (`send_email` over SMTP+STARTTLS, threading headers, the `List-Unsubscribe` header + `unsubscribe_address`, `suppressed` — the last send-time gate, `operator_bcc` — the BCC-the-operator policy, own campaigns only, mailbox signature then the opt-out block then the `ATTRIBUTION` line appended to the body; a failed send is recorded as a `SendVerdict` on the way past and re-raised unchanged); `delivery_policy.py` (what the receiver's answer means — `classify(exc)` → `Response`, the `POLICIES` table, `record_failure`); `warmth.py` (`refresh_capacity` / `read_sent_history` / `capacity_from` — the measured per-box daily ceiling); `inbox.py` (`sync_inbox` — IMAP reply-reader; `scan_unsubscribes` — the box-wide `+unsub` alias scan); `newsletter.py` (`subscribe_to_newsletter`, Brevo); `tasks/` (the four handlers: find_email, collect_email, send, follow_up).
 - **`crm`** — `Lead` (identity + embedding + email) and `Deal` (`crm/models/lead.py`, `crm/models/deal.py`); also defines `DealState` and `Outcome`.
 - **`chat`** — `ChatMessage`, FK to the owning `Deal` (the per-(lead, campaign) conversation; the opener + every reply are rows here).
 - **`legacy`** — model-less; migration-history anchor only (see Project Layout).
@@ -271,7 +352,7 @@ to models and renamed `legacy`.
 - **Deal** (`crm/models/deal.py`) — campaign-scoped (`unique(lead, campaign)`). `state` (`DealState`), `outcome` (`Outcome`), `reason` (free text). **Email fields:** `mailbox` (FK to the sending `Mailbox` — the per-box-cap counting key, reply anchor, sticky thread box), `email_subject` (the opener's subject, reused as "Re: …"), `email_sent_at` (opener audit timestamp), `email_message_id` (the immutable thread root the IMAP reader matches replies on), `next_follow_up_at` (the agentic-loop cursor — seeded by the opener, re-armed each turn, always a working-day moment). `profile_summary` / `chat_summary` (lazy mem0-style JSON fact lists, campaign-scoped). `creation_date`, `update_date`.
 - **Task** (`core/models.py`) — `task_type` (find_email/collect_email/follow_up/email), `status` (pending/running/completed/failed), `scheduled_at`, `payload`, timestamps. `TaskQuerySet.pending()` orders by **opportunity-cost priority** (`follow_up > collect_email > email > find_email`) then oldest `scheduled_at`; `claim_next()` takes the highest-priority *due* task, while `seconds_to_next()` sleeps by earliest `scheduled_at` **alone** (never priority). Composite index on `(status, scheduled_at)`.
 - **ChatMessage** (`chat/models.py`) — FK to the owning **Deal** (`related_name="messages"`). `content`, `is_outgoing`, `owner`, `external_id` (message identity for per-deal dedup — the email Message-ID; legacy LinkedIn rows hold a Voyager entityUrn), `answer_to`/`topic` (self FKs), `creation_date`. Dedup: `unique(deal, external_id)`. The opener + every reply are rows here; `Mailbox.sent_today()` counts the outgoing ones for the per-box cap.
-- **Mailbox** (`emails/models.py`) — one SMTP inbox: `host`/`port` (default `smtp.gmail.com:587`), `imap_host`/`imap_port` (default `imap.gmail.com:993` — the read side for the reply loop, same app password), `username`, `password`, `from_address`, `signature` (the sign-off appended to every send from this box — per box because it is part of the sending identity; **NULL = never asked** and the onboarding `signature` step will ask, `""` = declined and sticks), `daily_limit` (the **measured** warm capacity — see `emails/warmth.py`; re-derived daily from the box's own Sent folder rather than configured, and persisted only because reading it costs an IMAP round trip. Defaults to the floor: it applies to a box that has never been measured, and an unmeasured box is one we know nothing about). A row exists only once its credentials pass the import auth-check (no health API). Manager: `remaining_today()` (Σ per-box headroom), `least_loaded_under_cap()` (most headroom, so a paused box is excluded from the picker exactly as from the budget); instance `sent_today()` (outgoing ChatMessages on this box's deals since local midnight), `headroom_today()`, `paused_today()`. `has_mailbox()` is the "email is a viable channel" gate.
+- **Mailbox** (`emails/models.py`) — one SMTP inbox: `host`/`port` (default `smtp.gmail.com:587`), `imap_host`/`imap_port` (default `imap.gmail.com:993` — the read side for the reply loop, same app password), `username`, `password`, `from_address`, `signature` (the sign-off appended to every send from this box — per box because it is part of the sending identity; **NULL = never asked** and the onboarding `signature` step will ask, `""` = declined and sticks), `daily_limit` (the **measured** warm capacity — see `emails/warmth.py`; re-derived daily from the box's own Sent folder rather than configured, and persisted only because reading it costs an IMAP round trip. Defaults to the floor: it applies to a box that has never been measured, and an unmeasured box is one we know nothing about), `unsub_scan_uid`/`unsub_scan_uidvalidity` (the unsubscribe scan's IMAP resume cursor — a UID, not a date, so the resume point is exact; a changed UIDVALIDITY means the server reissued UIDs and restarts the scan rather than silently skipping mail. Both are a cache like `daily_limit`, safe to reset to 0). A row exists only once its credentials pass the import auth-check (no health API). Manager: `remaining_today()` (Σ per-box headroom), `least_loaded_under_cap()` (most headroom, so a paused box is excluded from the picker exactly as from the budget); instance `sent_today()` (outgoing ChatMessages on this box's deals since local midnight), `headroom_today()`, `paused_today()`. `has_mailbox()` is the "email is a viable channel" gate.
 
 - **SendVerdict** (`emails/models.py`) — one receiving server's answer to one failed send: `mailbox`, `response` (`delivery_policy.Response`), `smtp_code` (NULL when no SMTP response was ever received — itself the signal that the failure says nothing about reputation), `detail`, `created_at`. Written only on failure, so every row means something. Stored because the SMTP response is evidence that exists nowhere else and does not survive the exception; everything derived from it (`paused_today`, the growth gate) is computed at read time.
 

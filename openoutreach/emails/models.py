@@ -121,6 +121,17 @@ class Mailbox(models.Model):
     # working volume: it applies only to a box that has never been measured, and
     # an unmeasured box is one we know nothing about.
     daily_limit = models.PositiveIntegerField(default=WARM_FLOOR_SENDS)
+    # Resume point for the box-wide unsubscribe scan (``emails/inbox.py``): the
+    # highest INBOX UID already examined. A UID, not a date — dates are coarse and
+    # a resume from "yesterday" either re-reads a day of mail or skips the seam.
+    # ``unsub_scan_uidvalidity`` is the server's declared UID epoch: when it
+    # changes the server has reissued UIDs, so the stored cursor now points at
+    # unrelated mail and the scan restarts from 0 rather than silently skipping
+    # everything before it. Both are a cache like ``daily_limit``, not state to
+    # protect — resetting them to 0 costs one full rescan, and the scan is
+    # idempotent, so nothing is lost.
+    unsub_scan_uid = models.PositiveBigIntegerField(default=0)
+    unsub_scan_uidvalidity = models.PositiveBigIntegerField(default=0)
 
     objects = MailboxManager()
 

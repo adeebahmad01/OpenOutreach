@@ -29,9 +29,12 @@ def send_email(
 ) -> str:
     """Send ``body`` from ``mailbox`` to ``to_address``; return the Message-ID.
 
-    The mailbox's signature and the product attribution line are appended to
-    ``body`` here rather than at the call sites, so every send — opener and
-    follow-up — carries both, in the order body → signature → attribution.
+    The mailbox's signature, the opt-out block and the product attribution line
+    are appended to ``body`` here rather than at the call sites, so every send —
+    opener and follow-up — carries all three, in the order body → signature →
+    opt-out → attribution. The matching ``List-Unsubscribe`` header goes on the
+    same message: header and body line are two halves of one opt-out, and only
+    building them together makes it impossible to ship one without the other.
 
     ``bcc`` (when set) blind-copies the operator's own address so they keep a
     private record of every send; ``send_message`` strips the Bcc header before
@@ -47,6 +50,40 @@ def send_email(
     logger.info("email sent from %s to %s: %s [%s]",
                 mailbox.from_address, to_address, subject, message["Message-ID"])
     return message["Message-ID"]
+
+
+def suppressed(lead) -> bool:
+    """True when *lead* may not be emailed — re-read from the DB at send time.
+
+    The eleven candidate queries that filter ``disqualified`` are convention, not
+    a DB constraint (``core/pipeline/qualify.py``), and an unsubscribe can land
+    between the pool query and the send: the outreach agent runs for seconds and
+    reads the inbox on its way past. This is the last gate before a message is
+    built, so the answer has to come from the row, not the in-memory copy the
+    caller selected earlier.
+    """
+    from openoutreach.crm.models import Lead
+
+    return Lead.objects.filter(pk=lead.pk, disqualified=True).exists()
+
+
+def unsubscribe_address(from_address: str) -> str:
+    """The plus-addressed alias a client-generated unsubscribe is sent to.
+
+    Plus-addressing means no second mailbox, no DNS and no web surface: the alias
+    delivers to the same INBOX the daemon already reads over IMAP, so the opt-out
+    path is the box's own mail. ``scan_unsubscribes`` matches on this exact string.
+
+    **This assumes the provider routes ``+`` tags to the base mailbox.** Gmail and
+    Google Workspace do, and they are both the documented default (``smtp.gmail.com``
+    / ``imap.gmail.com``) and what IceMail provisions, so it holds for the boxes
+    this actually runs on. A provider that *rejects* plus-addressing would bounce
+    the opt-out, and the recipient — believing they unsubscribed — would get the
+    next follow-up and reasonably hit "spam". Nothing verifies the alias round-trips
+    at onboarding; connecting a non-Gmail box is the case to check by hand.
+    """
+    local, _, domain = from_address.partition("@")
+    return f"{local}+unsub@{domain}"
 
 
 def operator_bcc(user, campaign) -> str | None:
@@ -75,11 +112,25 @@ def _build_message(mailbox, to_address, subject, body, bcc, in_reply_to, referen
     if bcc:
         message["Bcc"] = bcc
     message["Subject"] = subject
+    message["List-Unsubscribe"] = _list_unsubscribe(mailbox.from_address)
     if in_reply_to:
         message["In-Reply-To"] = in_reply_to
         message["References"] = references or in_reply_to
-    message.set_content(_attribute(_sign(body, mailbox.signature)))
+    message.set_content(_attribute(_opt_out(_sign(body, mailbox.signature))))
     return message
+
+
+def _list_unsubscribe(from_address: str) -> str:
+    """The RFC 2369 ``List-Unsubscribe`` value — a ``mailto:``, never an ``https:``.
+
+    RFC 8058 one-click needs an HTTPS endpoint accepting POST; the self-hosted
+    daemon has no web surface, and routing unsubscribes through the hub would make
+    every install call home. A ``mailto:`` URI needs no infrastructure and the
+    daemon already speaks IMAP, so the opt-out lands where it can be read.
+    ``List-Unsubscribe-Post`` is deliberately absent — it is only valid alongside
+    an ``https:`` URI, and one-click binds bulk senders at 5,000+ messages/day.
+    """
+    return f"<mailto:{unsubscribe_address(from_address)}?subject=unsubscribe>"
 
 
 def _sign(body: str, signature: str | None) -> str:
@@ -91,6 +142,21 @@ def _sign(body: str, signature: str | None) -> str:
     if not signature:
         return body
     return f"{body.rstrip()}\n\n{signature}\n"
+
+
+OPT_OUT_LINE = "Don't want to hear from me? Reply with \"unsubscribe\" and I'll stop."
+
+
+def _opt_out(body: str) -> str:
+    """Append the visible opt-out line, after the signature and before the attribution.
+
+    Plain text rather than a link: a typed reply works in every client, including
+    the ones where Gmail declines to render its own unsubscribe button, so it
+    covers the recipients the ``List-Unsubscribe`` header alone does not reach.
+    Its job is the same as the header's — put an exit in front of someone who
+    wants one, so they take it instead of the spam button.
+    """
+    return f"{body.rstrip()}\n\n{OPT_OUT_LINE}\n"
 
 
 ATTRIBUTION = "Sent with OpenOutreach"

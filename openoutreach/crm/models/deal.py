@@ -20,6 +20,7 @@ class DealState(models.TextChoices):
             FINDING_EMAIL ─(collect_email/poll request_id)─▶
                 hit:  READY_TO_EMAIL ─(email opener)─▶ EMAILED ⟲ (agentic follow-up)
                                                        ─▶ COMPLETED / FAILED
+                                                       ─▶ UNSUBSCRIBED (opt-out)
                 miss: NO_EMAIL_BETTERCONTACT (provider found no address — a distinct
                       terminal, not a failure; still a fit positive → ML label=1)
 
@@ -53,6 +54,15 @@ class DealState(models.TextChoices):
     to the pool and bought a *second* job for the same lead.) The LinkedIn connect
     leg (READY_TO_CONNECT/PENDING/CONNECTED) was removed with the channel.
 
+    UNSUBSCRIBED is the sibling of NO_EMAIL_BETTERCONTACT on the other side of the
+    send: a fit positive whose *reachability* ended, not a verdict on the offer.
+    The recipient asked to be left alone — by a mail client's unsubscribe button
+    (``emails/inbox.py:scan_unsubscribes``) or in words the follow-up agent read —
+    so ``outcome`` stays blank exactly as it does on an enrichment miss, the ML
+    labeler keeps the lead at label=1, and the *enforcement* lives on
+    ``Lead.disqualified`` (permanent, account-level, cross-campaign) rather than
+    here, where it would only bind one campaign.
+
     NOTE: when adding a state, also add it to ``_STATE_LOG_STYLE`` in
     ``core/db/deals.py`` — an unmapped state logs as a red "ERROR" label.
     """
@@ -62,6 +72,7 @@ class DealState(models.TextChoices):
     READY_TO_EMAIL = "Ready to Email"
     EMAILED = "Emailed"
     NO_EMAIL_BETTERCONTACT = "No Email (BetterContact)"
+    UNSUBSCRIBED = "Unsubscribed"
     COMPLETED = "Completed"
     FAILED = "Failed"
 

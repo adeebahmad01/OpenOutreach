@@ -61,6 +61,7 @@ Choose exactly one:
 
 - **send_message**: Send a short email reply in this thread. You must also decide `follow_up_hours`.
 - **wait**: Check back later without sending. You must also decide `follow_up_hours`.
+- **suppress**: The lead asked to stop being contacted — "unsubscribe", "take me off your list", "stop emailing me", "remove me", "do not contact me again". End the thread and never email this person again from any campaign. Choose this over `mark_completed` whenever the request is to *stop being contacted*, not merely to decline this offer: "not interested, thanks" is `mark_completed` with `not_interested`, "not interested, please don't email me again" is `suppress`. Send no reply — the request is honoured silently.
 - **mark_completed**: End the conversation. You must choose an `outcome`:
   - `converted` — they explicitly booked a meeting, agreed to a trial, or committed to a concrete next step. A polite "thanks", an acknowledgment, or silence does NOT count as converted.
   - `not_interested` — they heard us out and explicitly declined

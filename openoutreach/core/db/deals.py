@@ -11,6 +11,8 @@ logger = logging.getLogger(__name__)
 # entry here, or set_profile_state falls back to a red "ERROR" label (see below).
 # NO_EMAIL_BETTERCONTACT is an enrichment miss (provider found no address) — an
 # expected terminal, not an operational error, so it renders muted yellow.
+# UNSUBSCRIBED is the same kind of event one step later (the recipient ended the
+# reachability rather than the provider) and renders the same way.
 _STATE_LOG_STYLE = {
     DealState.QUALIFIED: ("QUALIFIED", "green", []),
     DealState.READY_TO_FIND_EMAIL: ("READY_TO_FIND_EMAIL", "yellow", ["bold"]),
@@ -18,6 +20,7 @@ _STATE_LOG_STYLE = {
     DealState.READY_TO_EMAIL: ("READY_TO_EMAIL", "blue", ["bold"]),
     DealState.EMAILED: ("EMAILED", "blue", []),
     DealState.NO_EMAIL_BETTERCONTACT: ("NO EMAIL", "yellow", []),
+    DealState.UNSUBSCRIBED: ("UNSUBSCRIBED", "yellow", []),
     DealState.COMPLETED: ("COMPLETED", "green", ["bold"]),
     DealState.FAILED: ("FAILED", "red", ["bold"]),
 }
