@@ -9,8 +9,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CAMPAIGN_NAME = "LinkedIn Outreach"
-
 
 def setup_crm():
     from django.contrib.sites.models import Site

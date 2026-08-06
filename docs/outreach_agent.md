@@ -42,7 +42,7 @@ The `chat_summary` fact list is where a thread's research value currently accumu
 
 ## Prompt
 
-One template, `core/templates/prompts/outreach_agent.j2`, keeping the structure of the LinkedIn-era prompt it descends from: `Strategy` / `Actions` / `Timing` / `Capabilities` / `Rules`, with the context blocks above them.
+One template, `core/templates/prompts/outreach_agent.j2`, keeping the structure of the pre-pivot prompt it descends from: `Strategy` / `Actions` / `Timing` / `Capabilities` / `Rules`, with the context blocks above them.
 
 `## Strategy` is still the **two modes** it always was, re-weighted:
 

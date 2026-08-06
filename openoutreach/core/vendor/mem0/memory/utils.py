@@ -2,7 +2,7 @@
 # Source: https://github.com/mem0ai/mem0/blob/main/mem0/memory/utils.py
 # Pinned: c239d8a483120143707c42e459b48fb3c7261afb (2026-04-11)
 #
-# Only the JSON-cleanup helpers used by linkedin/db/summaries.py are kept,
+# Only the JSON-cleanup helpers used by core/db/summaries.py are kept,
 # verbatim from upstream so future syncs are a straight diff against the
 # upstream file at the same path.
 

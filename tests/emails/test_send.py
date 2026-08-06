@@ -215,9 +215,9 @@ class TestSendEmailSignature:
         return deliver.call_args.args[1].get_content()
 
     def test_signature_appended_after_blank_line(self):
-        body = self._sent_body("Eracle\nlinkedin.com/in/eracle/")
+        body = self._sent_body("Eracle\nopenoutreach.app")
         assert body == (
-            f"Body\n\nEracle\nlinkedin.com/in/eracle/\n\n{OPT_OUT_LINE}\n\n\n{ATTRIBUTION}\n"
+            f"Body\n\nEracle\nopenoutreach.app\n\n{OPT_OUT_LINE}\n\n\n{ATTRIBUTION}\n"
         )
 
     def test_body_carries_only_opt_out_and_attribution_when_signature_blank(self):

@@ -2,7 +2,7 @@
 # Source: https://github.com/mem0ai/mem0/blob/main/mem0/configs/prompts.py
 # Pinned: c239d8a483120143707c42e459b48fb3c7261afb (2026-04-11)
 #
-# Only the symbols actually used by linkedin/db/summaries.py are kept here,
+# Only the symbols actually used by core/db/summaries.py are kept here,
 # verbatim from upstream so future syncs are a straight diff against the
 # upstream file at the same path.
 

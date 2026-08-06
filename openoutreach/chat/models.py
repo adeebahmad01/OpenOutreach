@@ -52,7 +52,7 @@ class ChatMessage(models.Model):
         verbose_name=_("External message id"),
         help_text=_(
             "Message identity, used for dedup (per deal): the RFC-5322 Message-ID "
-            "of the email. (Legacy LinkedIn rows hold a Voyager entityUrn.)"
+            "of the email. (Legacy pre-pivot rows hold the retired channel's message URN.)"
         ),
     )
     is_outgoing = models.BooleanField(

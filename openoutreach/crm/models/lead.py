@@ -21,7 +21,7 @@ class Lead(models.Model):
     country_code = models.CharField(max_length=2, blank=True, default="")
     embedding = models.BinaryField(null=True, blank=True)
     # Firmographic text built from the Lead Finder row at discovery (same fields as
-    # the embedding), fed to the LLM qualifier. No LinkedIn re-scrape.
+    # the embedding), fed to the LLM qualifier. No profile re-scrape.
     profile_text = models.TextField(blank=True, default="")
     # The row's queryable fields, kept apart from the flattened ``profile_text`` so the
     # vocabulary knows which *search field* a word belongs to — ``cto`` is alive in

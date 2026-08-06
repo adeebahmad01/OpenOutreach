@@ -51,7 +51,7 @@ class DealState(models.TextChoices):
     here, because a timeout is evidence about the provider, not about whether this
     person has a findable address. (The deadline that used to revert
     FINDING_EMAIL → READY_TO_FIND_EMAIL made an outage worse — the deal returned
-    to the pool and bought a *second* job for the same lead.) The LinkedIn connect
+    to the pool and bought a *second* job for the same lead.) The retired connect
     leg (READY_TO_CONNECT/PENDING/CONNECTED) was removed with the channel.
 
     UNSUBSCRIBED is the sibling of NO_EMAIL_BETTERCONTACT on the other side of the
