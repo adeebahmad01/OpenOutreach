@@ -37,7 +37,7 @@ def migrate_env_to_db(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("legacy", "0002_linkedinprofile_self_lead"),
+        ("legacy", "0002_profile_self_lead"),
     ]
 
     operations = [

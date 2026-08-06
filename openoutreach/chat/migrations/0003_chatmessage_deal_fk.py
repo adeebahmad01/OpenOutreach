@@ -104,7 +104,7 @@ def populate_deal(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("chat", "0002_add_linkedin_sync_fields"),
+        ("chat", "0002_add_sync_fields"),
         ("crm", "0013_alter_deal_state"),
     ]
 

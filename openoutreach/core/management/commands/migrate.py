@@ -1,20 +1,22 @@
-"""`migrate`, with a pre-flight reconciliation of renamed app labels.
+"""`migrate`, with a pre-flight reconciliation of renames recorded in history.
 
-The `linkedin` app was renamed to `legacy`; existing installs recorded its
-migrations under the old label. Django validates migration-history consistency
-*before* running any migration, so the fix can't be a migration file — it has
-to run first. Overriding the command makes it fire on every `migrate` (direct
-or via `rundaemon`'s `call_command`), so no manual SQL is ever needed.
+Two things have been renamed since the first release: the `linkedin` app (now
+`legacy`), and two migration files whose names carried the platform mark.
+Existing installs recorded both under their old names. Django validates
+migration-history consistency *before* running any migration, so the fix can't
+be a migration file — it has to run first. Overriding the command makes it fire
+on every `migrate` (direct or via `rundaemon`'s `call_command`), so no manual
+SQL is ever needed.
 """
 from django.core.management.commands.migrate import Command as MigrateCommand
 from django.db import DEFAULT_DB_ALIAS, connections
 
-from openoutreach.core.migration_compat import reconcile_app_labels
+from openoutreach.core.migration_compat import reconcile_history
 
 
 class Command(MigrateCommand):
     def handle(self, *args, **options):
         connection = connections[options.get("database", DEFAULT_DB_ALIAS)]
-        for note in reconcile_app_labels(connection):
-            self.stdout.write(f"Reconciled renamed app label in django_migrations: {note}")
+        for note in reconcile_history(connection):
+            self.stdout.write(f"Reconciled rename in django_migrations: {note}")
         super().handle(*args, **options)
