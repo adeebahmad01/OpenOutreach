@@ -1,7 +1,7 @@
 # openoutreach/core/session.py
 """Browserless run session.
 
-The email-only replacement for the old LinkedIn ``AccountSession``: it carries
+The email-only replacement for the old channel ``AccountSession``: it carries
 the operator's identity and campaign context for the daemon and the agents, but
 owns no browser — there is nothing to log into, scrape, or reauthenticate. The
 operator is just the Django ``User`` running the daemon; ``self_profile`` is

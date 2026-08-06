@@ -6,10 +6,8 @@ __pycache__/
 .dockerignore
 .env
 
-/linkedin_state.json
 /.coverage
 /venv/
-/linkedin/management/commands/export_model.py
 /data/*
 !/data/.gitkeep
 /media/

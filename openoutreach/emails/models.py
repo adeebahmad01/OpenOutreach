@@ -161,7 +161,7 @@ class Mailbox(models.Model):
         Counts **outgoing ChatMessages** on this box's deals, not deals: the
         agentic loop sends many emails per deal (opener + every follow-up reply),
         and each outbound email is one row, so the message count is the true send
-        volume. LinkedIn ChatMessages never carry a mailbox (``deal.mailbox`` is
+        volume. Pre-pivot ChatMessages never carry a mailbox (``deal.mailbox`` is
         null), so they are naturally excluded.
         """
         from openoutreach.chat.models import ChatMessage

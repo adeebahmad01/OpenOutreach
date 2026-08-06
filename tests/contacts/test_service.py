@@ -39,10 +39,7 @@ def _config(token="tok", url="", country_code="us"):
 def _session(contribute_to_hub=True):
     """A daemon session stand-in for the register path."""
     session = MagicMock()
-    session.self_profile = {"public_identifier": "me"}
     session.django_user.email = "me@x.com"
-    session.linkedin_profile.linkedin_username = "me-user"
-    session.linkedin_profile.contribute_to_hub = contribute_to_hub
     return session
 
 

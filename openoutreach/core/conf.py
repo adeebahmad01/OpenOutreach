@@ -100,7 +100,7 @@ WARM_CEILING_SENDS = int(SECONDS_PER_DAY / MEAN_SEND_INTERVAL_SECONDS)
 # lookup. Each still-running poll doubles the delay (BASE·2^attempt, capped at
 # MAX); past DEADLINE the collect leg gives up and reverts the deal to
 # READY_TO_FIND_EMAIL for a fresh submit. A provider job resolves in
-# seconds-to-minutes, so these are short (unlike the retired LinkedIn
+# seconds-to-minutes, so these are short (unlike the retired channel's
 # connect-accept poll, which backed off in hours). A future provider (Apollo, …)
 # would carry its own triple.
 #

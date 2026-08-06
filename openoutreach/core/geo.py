@@ -3,7 +3,7 @@
 
 Both read an ISO-3166-1 alpha-2 country code and answer different questions. The
 operator's code now comes from onboarding (the operator tells us their country);
-a lead's code comes from the discovery row. Neither is scraped from LinkedIn.
+a lead's code comes from the discovery row. Neither is scraped from any network.
 
 - ``is_gdpr_protected`` / ``GDPR_COUNTRY_CODES`` — the broad *email-marketing
   opt-in* set (EU/EEA + UK + CH + CA/BR/AU/JP/KR/NZ). Drives newsletter

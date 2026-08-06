@@ -1,4 +1,4 @@
-# openoutreach/linkedin/ml/hub.py
+# openoutreach/core/ml/hub.py
 """Campaign kit: download from HuggingFace, lazy-load, freemium campaign import."""
 from __future__ import annotations
 

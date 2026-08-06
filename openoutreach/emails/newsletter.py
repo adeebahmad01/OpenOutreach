@@ -2,9 +2,9 @@
 """OpenOutreach newsletter subscription — a plain Brevo form POST.
 
 Subscribes the operator's own email (their connected mailbox address) to the
-OpenOutreach newsletter. Nothing here touches LinkedIn: the subscription was
-always an email signup; only the country-derived opt-in default and an optional
-LinkedIn field used to ride along, and both are gone.
+OpenOutreach newsletter. Nothing here touches the retired channel: the subscription
+was always an email signup; only the country-derived opt-in default and an optional
+profile field used to ride along, and both are gone.
 """
 from __future__ import annotations
 

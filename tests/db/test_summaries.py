@@ -1,4 +1,4 @@
-"""Tests for linkedin/db/summaries.py — the mem0-style fact-list boundary."""
+"""Tests for core/db/summaries.py — the mem0-style fact-list boundary."""
 from __future__ import annotations
 
 import json

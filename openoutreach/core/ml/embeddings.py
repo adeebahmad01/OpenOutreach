@@ -1,4 +1,4 @@
-# openoutreach/linkedin/ml/embeddings.py
+# openoutreach/core/ml/embeddings.py
 """Fastembed text embedding utilities."""
 from __future__ import annotations
 

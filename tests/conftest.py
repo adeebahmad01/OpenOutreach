@@ -34,7 +34,7 @@ class FakeAccountSession:
     ``self_profile`` is the OPERATOR's identity (still a plain dict, used by the
     contacts give-back and the summary/agent prompt builders). Leads carry their
     own ``profile_url`` identity on the model — the session no longer holds a
-    LinkedInProfile row.
+    per-operator profile row.
     """
 
     def __init__(self, django_user, campaign):
@@ -68,7 +68,7 @@ def fake_session(db):
 
     campaign = Campaign.objects.first()
     if campaign is None:
-        campaign = Campaign.objects.create(name="LinkedIn Outreach")
+        campaign = Campaign.objects.create(name="Email Outreach")
     campaign.users.add(user)
 
     return FakeAccountSession(django_user=user, campaign=campaign)
