@@ -19,6 +19,7 @@ import requests
 
 from openoutreach.core.models import SiteConfig
 from openoutreach.core.geo import is_eea_located
+from openoutreach.core import version
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,7 @@ def contribute(session, lead, emails: list[str], origin: str) -> None:
         "country_code": lead.country_code,
         "emails": emails,
         "origin": origin,
+        **_build_fields(),
     }
     _attach_embedding(lead, record)
     if config.contacts_api_token:
@@ -142,7 +144,8 @@ def _send(config: SiteConfig, path: str, body: dict, lead, headers: dict | None 
     """POST one record; log + swallow any transport failure. Returns the JSON
     body on success, else ``None``."""
     try:
-        resp = requests.post(_endpoint(config, path), json=body, headers=headers, timeout=_TIMEOUT_S)
+        resp = requests.post(_endpoint(config, path), json=body,
+                             headers=headers or _headers(), timeout=_TIMEOUT_S)
         resp.raise_for_status()
     except requests.RequestException as exc:
         logger.info("hub: give-back unavailable for %s: %s", lead.profile_url, exc)
@@ -159,4 +162,27 @@ def _endpoint(config: SiteConfig, path: str) -> str:
 
 
 def _auth(token: str) -> dict:
-    return {"Authorization": f"Bearer {token}"}
+    return {**_headers(), "Authorization": f"Bearer {token}"}
+
+
+def _headers() -> dict:
+    """Headers every hub call carries, authenticated or not.
+
+    The product token names the build (``OpenOutreach/2026.08.07+g947927d``), so
+    even a request that never reaches a stored row — a ``resolve`` miss — still
+    says which code asked."""
+    return {"User-Agent": version.user_agent()}
+
+
+def _build_fields() -> dict:
+    """Which build produced this record, for the hub to resolve to a release.
+
+    The sha is the identity; the hub decides whether it belongs to the published
+    history (and what its date is), because that verdict must not be the client's
+    to make. ``client_dirty`` is omitted when undetermined rather than sent as a
+    reassuring ``False``."""
+    fields = {"client_sha": version.commit_sha()}
+    dirty = version.is_dirty()
+    if dirty is not None:
+        fields["client_dirty"] = dirty
+    return fields

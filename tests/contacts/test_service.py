@@ -126,8 +126,11 @@ class TestContribute:
             service.contribute(_session(), lead, ["jane@acme.com", ""], service.ORIGIN_PROFILE_INFO)
         url, kwargs = post.call_args.args[0], post.call_args.kwargs
         assert url.endswith("/api/v2/contribute/")
-        assert kwargs["headers"] == {"Authorization": "Bearer tok"}
-        assert kwargs["json"] == {
+        assert kwargs["headers"]["Authorization"] == "Bearer tok"
+        # The build fields ride along on every record (see TestBuildReporting);
+        # this asserts the payload proper.
+        record = {k: v for k, v in kwargs["json"].items() if not k.startswith("client_")}
+        assert record == {
             "public_identifier": "jane-doe",
             "country_code": "in",
             "emails": ["jane@acme.com"],
@@ -185,3 +188,49 @@ class TestContribute:
         ) as post:
             service.contribute(_session(), lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
         assert "embedding" not in post.call_args.kwargs["json"]
+
+
+# ── which build sent it ──────────────────────────────────────────────
+
+
+@pytest.mark.django_db
+class TestBuildReporting:
+    """The client names its build; the hub decides what that name means."""
+
+    def test_contribute_sends_the_commit_sha_and_dirty_flag(self):
+        _config()
+        lead = LeadFactory(profile_url="jane-doe", country_code="us")
+        with patch.object(service.version, "commit_sha", return_value="a" * 40), \
+             patch.object(service.version, "is_dirty", return_value=True), \
+             patch.object(service.requests, "post", return_value=_resp(body={"credits": 1})) as post:
+            service.contribute(_session(), lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
+        body = post.call_args.kwargs["json"]
+        assert body["client_sha"] == "a" * 40
+        assert body["client_dirty"] is True
+
+    def test_undeterminable_dirtiness_is_omitted_not_sent_as_false(self):
+        _config()
+        lead = LeadFactory(profile_url="jane-doe", country_code="us")
+        with patch.object(service.version, "commit_sha", return_value="a" * 40), \
+             patch.object(service.version, "is_dirty", return_value=None), \
+             patch.object(service.requests, "post", return_value=_resp(body={"credits": 1})) as post:
+            service.contribute(_session(), lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
+        assert "client_dirty" not in post.call_args.kwargs["json"]
+
+    def test_every_call_carries_the_version_user_agent(self):
+        """Including resolve, which never reaches a stored row."""
+        _config()
+        lead = LeadFactory(profile_url="jane-doe")
+        with patch.object(service.version, "version_string", return_value="2026.08.07+gabc1234"), \
+             patch.object(service.requests, "get", return_value=_resp(body={"emails": []})) as get:
+            service.resolve(lead)
+        assert get.call_args.kwargs["headers"]["User-Agent"] == "OpenOutreach/2026.08.07+gabc1234"
+
+    def test_register_carries_the_build_of_the_first_contribution(self):
+        _config(token="")
+        lead = LeadFactory(profile_url="jane-doe", country_code="us")
+        with patch.object(service.version, "commit_sha", return_value="b" * 40), \
+             patch.object(service.requests, "post",
+                          return_value=_resp(body={"token": "t", "credits": 1})) as post:
+            service.contribute(_session(), lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
+        assert post.call_args.kwargs["json"]["client_sha"] == "b" * 40
