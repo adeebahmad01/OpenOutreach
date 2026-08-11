@@ -231,12 +231,15 @@ def _pipeline_summary(campaign) -> str:
 
 
 def _check_lookups(campaign) -> bool:
-    from openoutreach.emails.steps.lookup import check_lookup
+    from openoutreach.emails.steps.lookup import check_lookup, reclaim_lookup
 
-    deal = _due(campaign, DealState.FINDING_EMAIL).exclude(lookup_request_id="").first()
+    deal = _due(campaign, DealState.FINDING_EMAIL).first()
     if deal is None:
         return False
-    return _apply(deal, check_lookup(deal))
+    # A deal here without a handle has no job to poll — reclaim it rather than skip
+    # it, or it sits in a state no other row claims for as long as the install runs.
+    step = check_lookup if deal.lookup_request_id else reclaim_lookup
+    return _apply(deal, step(deal))
 
 
 # ── 2. Answer a reply ─────────────────────────────────────────────
@@ -410,8 +413,7 @@ def room_to_send_today(campaign) -> bool:
         Deal.objects.filter(campaign=campaign, lead__disqualified=False)
         .filter(
             Q(state=DealState.READY_TO_EMAIL)
-            | Q(state=DealState.FINDING_EMAIL, not_before__lte=horizon)
-            | Q(state=DealState.FINDING_EMAIL, not_before__isnull=True),
+            | Q(state=DealState.FINDING_EMAIL, not_before__lte=horizon),
         )
         .count()
     )

@@ -100,6 +100,27 @@ def _submit(deal) -> DealState | None:
     return DealState.FINDING_EMAIL
 
 
+def reclaim_lookup(deal) -> DealState:
+    """Send a FINDING_EMAIL deal that carries no job handle back to be bought.
+
+    ``_submit`` only returns FINDING_EMAIL once it has a ``request_id``, so a deal
+    parked here with an empty one has no job to poll and never had a credit spent on
+    it. Left alone it is invisible to every query — the poll row skips it and no
+    other row claims FINDING_EMAIL — so it waits forever while still counting
+    against the day's send headroom. Measured on a live install: two deals stranded
+    for 206 hours. Going back to READY_TO_FIND_EMAIL puts it in front of the buy
+    step again, under the same spend gate as everyone else.
+    """
+    logger.info("%s", block_header(
+        f"reclaim_lookup · {deal.campaign} · {deal.lead.profile_url}", "yellow"))
+    deal.not_before = None
+    deal.lookup_attempt = 0
+    logger.info("%s", step_line(
+        "no job handle", "nothing to poll → READY_TO_FIND_EMAIL",
+        glyph="⚠", color="yellow"))
+    return DealState.READY_TO_FIND_EMAIL
+
+
 def check_lookup(deal) -> DealState | None:
     """Poll this deal's in-flight lookup exactly once and act on the outcome.
 

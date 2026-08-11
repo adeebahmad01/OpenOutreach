@@ -70,6 +70,18 @@ class TestPriority:
         assert cycle.run_one_action(campaign) is True
         assert _called(steps) == {"check"}
 
+    def test_a_lookup_with_no_job_handle_is_reclaimed_not_stranded(self, campaign, steps):
+        """Measured on a live install: two deals sat at FINDING_EMAIL with an empty
+        ``request_id`` for 206 hours — the poll row skipped them and no other row
+        claims that state, while both kept counting against the day's headroom."""
+        _box()
+        deal = _deal(campaign, DealState.FINDING_EMAIL, lookup_request_id="")
+
+        assert cycle.run_one_action(campaign) is True
+        deal.refresh_from_db()
+        assert deal.state == DealState.READY_TO_FIND_EMAIL
+        assert "check" not in _called(steps)
+
     def test_a_reply_outranks_a_first_email(self, campaign, steps):
         """Someone who wrote back is owed an answer before a stranger is contacted."""
         box = _box()

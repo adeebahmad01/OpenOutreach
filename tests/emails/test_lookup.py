@@ -14,7 +14,7 @@ from django.utils import timezone
 
 from openoutreach.crm.models import DealState
 from openoutreach.emails.bettercontact import BetterContactUnavailable, PollOutcome
-from openoutreach.emails.steps.lookup import buy_address, check_lookup
+from openoutreach.emails.steps.lookup import buy_address, check_lookup, reclaim_lookup
 from tests.factories import DealFactory, LeadFactory
 
 
@@ -174,3 +174,28 @@ class TestCheckLookup:
             assert check_lookup(deal) is None
 
         assert deal.lookup_request_id == "req1"
+
+
+# ── reclaim_lookup ────────────────────────────────────────────────
+
+
+@pytest.mark.django_db
+class TestReclaimLookup:
+    def test_a_handleless_deal_goes_back_to_be_bought(self, campaign):
+        """No request_id means no job and no credit spent — the buy step owns it."""
+        deal = _in_flight(campaign, attempt=2, request_id="")
+        deal.not_before = timezone.now() - timedelta(hours=1)
+
+        assert reclaim_lookup(deal) == DealState.READY_TO_FIND_EMAIL
+        assert deal.not_before is None
+        assert deal.lookup_attempt == 0
+
+    def test_it_never_touches_the_provider(self, campaign):
+        """There is nothing to poll, and polling an empty handle would spend a call
+        to be told so."""
+        deal = _in_flight(campaign, request_id="")
+
+        with patch("openoutreach.emails.bettercontact.poll_once") as poll:
+            reclaim_lookup(deal)
+
+        poll.assert_not_called()
