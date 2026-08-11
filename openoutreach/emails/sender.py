@@ -23,6 +23,7 @@ def send_email(
     subject: str,
     body: str,
     *,
+    campaign=None,
     bcc: str | None = None,
     in_reply_to: str | None = None,
     references: str | None = None,
@@ -44,11 +45,18 @@ def send_email(
     ``in_reply_to``/``references`` thread a reply onto an existing email thread
     (both are prior Message-IDs). The returned Message-ID is stored on the
     outgoing ChatMessage so the next touch can thread onto it.
+
+    ``campaign`` decides whether the message *text* is logged as well as its
+    metadata — see ``_sent_block``. It is passed rather than inferred from ``bcc``,
+    which is ``None`` both on freemium campaigns and on an operator who never set
+    an address; keying off it would silently drop the log for the second.
     """
     message = _build_message(mailbox, to_address, subject, body, bcc, in_reply_to, references)
     _deliver(mailbox, message)
     logger.info("email sent from %s to %s: %s [%s]",
                 mailbox.from_address, to_address, subject, message["Message-ID"])
+    if campaign is not None and not campaign.is_freemium:
+        logger.info("%s", _sent_block(message))
     return message["Message-ID"]
 
 
@@ -98,6 +106,24 @@ def operator_bcc(user, campaign) -> str | None:
     if campaign.is_freemium:
         return None
     return user.email or None
+
+
+def _sent_block(message) -> str:
+    """The message as it actually went out, indented under its subject.
+
+    Read back off the assembled ``EmailMessage`` rather than from the ``body``
+    argument, so the log shows the signature, opt-out line and attribution that
+    ``_build_message`` appends — the text the recipient received, not the text the
+    agent wrote.
+
+    **The operator's own campaigns only.** They already receive every one of these
+    in full by BCC, so the log discloses nothing they do not already hold. Freemium
+    outreach is OpenOutreach's own conversation with someone who is not their
+    contact, and it stays metadata-only for the same reason it gets no BCC.
+    """
+    body = message.get_content().rstrip()
+    indented = "\n".join(f"    {line}" for line in body.splitlines())
+    return f"    Subject: {message['Subject']}\n\n{indented}"
 
 
 # ── Message assembly ──────────────────────────────────────────────

@@ -3,6 +3,8 @@
 
 A first email is the only cold volume this daemon produces, so it is the only send
 under a cap — replies are exempt (see ``test_reply.py``)."""
+import logging
+
 import pytest
 from unittest.mock import patch
 
@@ -187,6 +189,42 @@ class TestSendEmailBcc:
 
 
 @pytest.mark.django_db
+class TestSentBodyLogging:
+    """The message text is logged for the operator's own campaigns, never freemium."""
+
+    def _send(self, campaign, caplog):
+        box = Mailbox(username="s@infra.com", password="pw",
+                      from_address="s@infra.com", signature="— Ercole")
+        with caplog.at_level(logging.INFO, logger="openoutreach.emails.sender"), \
+             patch("openoutreach.emails.sender._deliver"):
+            send_email(box, "lead@corp.com", "Hi there", "How do you do discovery today?",
+                       campaign=campaign)
+        return caplog.text
+
+    def test_own_campaign_logs_the_body_as_sent(self, campaign, caplog):
+        text = self._send(campaign, caplog)
+        assert "Subject: Hi there" in text
+        assert "How do you do discovery today?" in text
+        # What the recipient got, not what the agent wrote: sender.py appends these.
+        assert "— Ercole" in text
+        assert "unsubscribe" in text.lower()
+
+    def test_freemium_campaign_logs_metadata_only(self, campaign, caplog):
+        campaign.is_freemium = True
+        text = self._send(campaign, caplog)
+        assert "lead@corp.com" in text          # the metadata line still goes out
+        assert "How do you do discovery today?" not in text
+
+    def test_no_campaign_logs_metadata_only(self, caplog):
+        """The default stays metadata-only, so a new call site cannot leak by omission."""
+        box = Mailbox(username="s@infra.com", password="pw", from_address="s@infra.com")
+        with caplog.at_level(logging.INFO, logger="openoutreach.emails.sender"), \
+             patch("openoutreach.emails.sender._deliver"):
+            send_email(box, "lead@corp.com", "Hi there", "Secret body")
+        assert "Secret body" not in caplog.text
+
+
+@pytest.mark.django_db
 class TestOperatorBcc:
     def test_operator_campaign_bccs_the_operator(self, campaign, operator):
         assert operator_bcc(operator, campaign) == "testuser@example.com"
@@ -285,9 +323,11 @@ class TestSendFirstEmail:
 
         send, next_state = self._run(deal, box)
 
-        # The operator's own campaign → they get a BCC of their own outreach.
+        # The operator's own campaign → they get a BCC of their own outreach, and
+        # the campaign rides along so the sender can log the body it sent.
         send.assert_called_once_with(
             box, "lead@corp.com", "Hi there", "Short opener.",
+            campaign=campaign,
             bcc="testuser@example.com",
         )
         assert next_state == DealState.EMAILED

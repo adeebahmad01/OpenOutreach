@@ -54,6 +54,7 @@ def send_first_email(deal, mailbox) -> DealState | None:
 
     message_id = send_email(
         mailbox, deal.lead.email, opener.subject, opener.message,
+        campaign=deal.campaign,
         bcc=operator_bcc(get_active_user(), deal.campaign),
     )
 

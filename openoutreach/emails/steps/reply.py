@@ -108,6 +108,7 @@ def _send_reply(deal, decision) -> DealState | None:
         deal.lead.email,
         _reply_subject(deal.email_subject),
         decision.message,
+        campaign=deal.campaign,
         bcc=operator_bcc(get_active_user(), deal.campaign),
         in_reply_to=_latest_external_id(deal),
         references=deal.email_message_id,
