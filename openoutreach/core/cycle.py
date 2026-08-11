@@ -191,8 +191,20 @@ def _log_idle(campaign) -> None:
     logger.info("[%s] idle — %s", campaign, _pipeline_summary(campaign))
 
 
+# What each waiting state means to someone reading a log, in pipeline order. The state
+# names are the schema's vocabulary and belong in the schema — READY_TO_FIND_EMAIL says
+# where a deal sits in a diagram, "waiting for an address to be bought" says what is
+# actually happening to that person.
+_WAITING_ON = (
+    (DealState.QUALIFIED, "waiting to be ranked"),
+    (DealState.READY_TO_FIND_EMAIL, "waiting for an address to be bought"),
+    (DealState.FINDING_EMAIL, "address on order"),
+    (DealState.READY_TO_EMAIL, "waiting to be emailed"),
+)
+
+
 def _pipeline_summary(campaign) -> str:
-    """One line of counts: what is waiting, in which state, against today's headroom."""
+    """One line of counts: who is waiting on what, against today's send headroom."""
     from django.db.models import Count
 
     from openoutreach.crm.models import Deal
@@ -204,14 +216,15 @@ def _pipeline_summary(campaign) -> str:
         .annotate(n=Count("state"))
         .values_list("state", "n"),
     )
-    waiting = " ".join(
-        f"{DealState(state).label}={counts.get(state, 0)}"
-        for state in (DealState.QUALIFIED, DealState.READY_TO_FIND_EMAIL,
-                      DealState.FINDING_EMAIL, DealState.READY_TO_EMAIL)
-    )
-    return (f"{waiting} replies={unanswered_replies(campaign).count()} "
-            f"sends left today={Mailbox.objects.remaining_today()} "
-            f"room to spend={room_to_send_today(campaign)}")
+    waiting = [f"{counts.get(state, 0)} {phrase}" for state, phrase in _WAITING_ON]
+    waiting.append(f"{unanswered_replies(campaign).count()} reply(ies) to answer")
+
+    left = Mailbox.objects.remaining_today()
+    # The gate, said as its consequence rather than as its name: `room to spend=False`
+    # tells you a boolean, "not buying or qualifying" tells you why two rows declined.
+    spending = ("buying and qualifying as needed" if room_to_send_today(campaign)
+                else "no send headroom left, so not buying or qualifying")
+    return f"{' · '.join(waiting)} · {left} send(s) left today · {spending}"
 
 
 # ── 1. Check an in-flight lookup ──────────────────────────────────
@@ -454,13 +467,17 @@ def refresh_capacities_if_due() -> None:
 # row it fired. Defined here rather than at the top because it holds the functions
 # themselves — the order of this tuple *is* the priority, and there is nowhere else
 # it is written down.
+#
+# The names are what the operator reads in the log, so they say what happens to a
+# lead, not which function ran. "top up" named the function and explained nothing;
+# "find & qualify new leads" is what that row actually does.
 ROWS = (
-    ("check lookup", _check_lookups),
-    ("answer reply", _answer_replies),
-    ("send first email", _send_first_emails),
-    ("score qualified", _score_qualified),
-    ("buy address", _buy_addresses),
-    ("top up", _top_up),
+    ("check for the email address we ordered", _check_lookups),
+    ("answer a reply", _answer_replies),
+    ("send a first email", _send_first_emails),
+    ("rank the qualified leads", _score_qualified),
+    ("buy an email address", _buy_addresses),
+    ("find & qualify new leads", _top_up),
 )
 
 

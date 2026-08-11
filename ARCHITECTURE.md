@@ -193,13 +193,20 @@ justified it (`P(f>0.5)=0.997 ≥ 0.75`), and passes `log=False` so the transiti
 twice; the score cannot ride in `reason`, which holds the LLM's qualification rationale.
 
 **The walk is also the daemon's time accounting.** `ROWS` pairs each row with a name, so every
-action logs which row fired and how long it took (`[Email Outreach] send first email — 2.3s`), and
+action logs which row fired and how long it took (`[Email Outreach] send a first email — 2.3s`), and
 at `debug` every row logs its decision time even when it declines. The steps log what they *did*;
 without this a row that spends twenty seconds deciding it has nothing to do says so nowhere. When
 no row fires, `_log_idle` prints the pipeline counts against today's headroom at most once every
 `IDLE_LOG_INTERVAL_S` — idle is the normal state, so a line per cycle would bury everything else,
 and the counts separate *no work* from *work behind a gate*, which look identical from outside and
 are entirely different problems.
+
+**Log vocabulary is the operator's, not the schema's.** A row is named for what happens to a lead
+(`find & qualify new leads`, not `top_up`), the idle counts say what each group is waiting *on*
+(`60 waiting to be ranked`, not `Qualified=60`), and the spend gate is printed as its consequence
+(`no send headroom left, so not buying or qualifying`, not `room to spend=False`). Function and
+state names belong in the code and the diagrams; a log line is read by someone asking what the
+daemon is doing to their pipeline.
 
 Campaigns take turns (`_rotate`, re-read each lap so a campaign created after boot joins). There is
 no share, no weight and no allocation: with nothing minted in advance there is no budget to split,

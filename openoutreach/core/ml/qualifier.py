@@ -415,15 +415,17 @@ class BayesianQualifier:
         # expensive step and it grows as O(n³) in the label count — 17s at 1,220
         # labels — so a line that only appears on completion means the longest stall
         # in the loop is the one stretch with nothing on screen to explain it.
-        logger.info("fitting the GP on %d label(s) (%d anchor(s)) — this takes a while",
-                    n, len(self._anchor_X))
+        logger.info("training this campaign's ranking model on %d judged lead(s)%s "
+                    "— the slowest thing the daemon does, please wait",
+                    n, f", {len(self._anchor_X)} of them still synthetic"
+                       if self._anchor_X else "")
         started = time.monotonic()
         self._pipeline.fit(X_fit, y_fit)
         lml = self._pipeline.named_steps['gpr'].log_marginal_likelihood_value_
 
         self._fitted = True
-        logger.info("GP fitted on %d label(s) in %.1fs (LML=%.2f)",
-                    n, time.monotonic() - started, lml)
+        logger.info("ranking model trained on %d judged lead(s) in %.1fs",
+                    n, time.monotonic() - started)
         logger.debug("GPR fitted on %d observations (%d anchors, %d after balancing, "
                       "LML=%.2f)", self.n_obs, len(self._anchor_X), n, lml)
         self._persist_pipeline()
