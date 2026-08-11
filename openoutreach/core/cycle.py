@@ -63,6 +63,12 @@ logger = logging.getLogger(__name__)
 # precisely a ``not_before`` can be honoured, so keep it well under the send spacing.
 CYCLE_SECONDS = 5
 
+# How often an idle cycle says so. Idle is the *normal* state here — sends are paced
+# minutes apart and a cycle is seconds — so a line per cycle would bury the lines that
+# mean something. One a minute is a pulse: enough to tell a working daemon from a
+# wedged one, and it carries the counts that say why there was nothing to do.
+IDLE_LOG_INTERVAL_S = 60
+
 # How often the mail pass logs into each box. The daemon's only inbound latency —
 # a reply is invisible until the next pass — traded against one IMAP login per box
 # per interval. Minutes, not seconds: nobody expects an answer inside a minute, and
@@ -77,6 +83,10 @@ MAIL_PASS_INTERVAL_S = 300
 HALTING_ERRORS = (ModelHTTPError,)
 
 _mail_read_at = None
+
+# When the last "nothing to do" line went out, so the pulse is one a minute rather
+# than one a cycle. Reset by any action, so the first idle after work always prints.
+_idle_logged_at: float | None = None
 
 # Per-campaign `(qualified, past-the-gate)` counts as of the last scoring pass, so a
 # pool that has not moved is not re-scored. Process-local by design: there is one
@@ -140,15 +150,67 @@ def run_one_action(campaign) -> bool:
 
     Each row is a query and a step. The first one that produces work wins and the
     cycle returns — nothing below it runs, which is what makes the order a priority.
+
+    Every row is timed and named, because the hierarchy is also the only account of
+    where the daemon's time goes: the steps log what they *did*, but a row that takes
+    twenty seconds to decide it has nothing to do says so nowhere else.
     """
+    global _idle_logged_at
     if campaign is None:
         return False
 
-    for row in (_check_lookups, _answer_replies, _send_first_emails,
-                _score_qualified, _buy_addresses, _top_up):
-        if row(campaign):
+    for name, row in ROWS:
+        started = time.monotonic()
+        acted = row(campaign)
+        elapsed = time.monotonic() - started
+        if acted:
+            logger.info("[%s] %s — %.1fs", campaign,
+                        colored(name, "cyan", attrs=["bold"]), elapsed)
+            _idle_logged_at = None
             return True
+        logger.debug("[%s] %s: nothing (%.1fs)", campaign, name, elapsed)
+    _log_idle(campaign)
     return False
+
+
+def _log_idle(campaign) -> None:
+    """Say the daemon is alive and why it has nothing to do — at most once a minute.
+
+    The counts are the hierarchy's own queries in summary form, so the line answers
+    the question idleness actually raises: is there no work, or is there work behind
+    a gate? A pipeline that is empty and a pipeline that is full but out of send
+    headroom look identical from outside and are entirely different problems.
+    """
+    global _idle_logged_at
+
+    now = time.monotonic()
+    if _idle_logged_at is not None and now - _idle_logged_at < IDLE_LOG_INTERVAL_S:
+        return
+    _idle_logged_at = now
+    logger.info("[%s] idle — %s", campaign, _pipeline_summary(campaign))
+
+
+def _pipeline_summary(campaign) -> str:
+    """One line of counts: what is waiting, in which state, against today's headroom."""
+    from django.db.models import Count
+
+    from openoutreach.crm.models import Deal
+    from openoutreach.emails.models import Mailbox
+
+    counts = dict(
+        Deal.objects.filter(campaign=campaign, lead__disqualified=False)
+        .values_list("state")
+        .annotate(n=Count("state"))
+        .values_list("state", "n"),
+    )
+    waiting = " ".join(
+        f"{DealState(state).label}={counts.get(state, 0)}"
+        for state in (DealState.QUALIFIED, DealState.READY_TO_FIND_EMAIL,
+                      DealState.FINDING_EMAIL, DealState.READY_TO_EMAIL)
+    )
+    return (f"{waiting} replies={unanswered_replies(campaign).count()} "
+            f"sends left today={Mailbox.objects.remaining_today()} "
+            f"room to spend={room_to_send_today(campaign)}")
 
 
 # ── 1. Check an in-flight lookup ──────────────────────────────────
@@ -359,7 +421,9 @@ def read_mail_if_due() -> None:
     now = timezone.now()
     if _mail_read_at and (now - _mail_read_at).total_seconds() < MAIL_PASS_INTERVAL_S:
         return
-    for box in Mailbox.objects.all():
+    boxes = list(Mailbox.objects.all())
+    logger.info("mail pass: reading %d mailbox(es)", len(boxes))
+    for box in boxes:
         read_mail(box)
     _mail_read_at = now
 
@@ -376,9 +440,27 @@ def refresh_capacities_if_due() -> None:
 
     if not measurement_due():
         return
-    for box in Mailbox.objects.all():
+    boxes = list(Mailbox.objects.all())
+    logger.info("warmth: re-measuring %d mailbox(es)", len(boxes))
+    for box in boxes:
         refresh_capacity(box)
     mark_measured()
+
+
+# ── The hierarchy ─────────────────────────────────────────────────
+
+# The ordered list from this module's docstring, made data so the walk can name the
+# row it fired. Defined here rather than at the top because it holds the functions
+# themselves — the order of this tuple *is* the priority, and there is nowhere else
+# it is written down.
+ROWS = (
+    ("check lookup", _check_lookups),
+    ("answer reply", _answer_replies),
+    ("send first email", _send_first_emails),
+    ("score qualified", _score_qualified),
+    ("buy address", _buy_addresses),
+    ("top up", _top_up),
+)
 
 
 # ── Plumbing ──────────────────────────────────────────────────────
