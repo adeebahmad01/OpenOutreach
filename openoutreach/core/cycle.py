@@ -160,6 +160,7 @@ def run_one_action(campaign) -> bool:
         return False
 
     for name, row in ROWS:
+        logger.debug("[%s] → %s?", campaign, name)
         started = time.monotonic()
         acted = row(campaign)
         elapsed = time.monotonic() - started

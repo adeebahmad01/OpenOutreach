@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Protocol, runtime_checkable
 
 import jinja2
@@ -410,10 +411,19 @@ class BayesianQualifier:
                 alpha=0.1,
             )),
         ])
+        # Announced *before* it runs, not after. This is the daemon's one genuinely
+        # expensive step and it grows as O(n³) in the label count — 17s at 1,220
+        # labels — so a line that only appears on completion means the longest stall
+        # in the loop is the one stretch with nothing on screen to explain it.
+        logger.info("fitting the GP on %d label(s) (%d anchor(s)) — this takes a while",
+                    n, len(self._anchor_X))
+        started = time.monotonic()
         self._pipeline.fit(X_fit, y_fit)
         lml = self._pipeline.named_steps['gpr'].log_marginal_likelihood_value_
 
         self._fitted = True
+        logger.info("GP fitted on %d label(s) in %.1fs (LML=%.2f)",
+                    n, time.monotonic() - started, lml)
         logger.debug("GPR fitted on %d observations (%d anchors, %d after balancing, "
                       "LML=%.2f)", self.n_obs, len(self._anchor_X), n, lml)
         self._persist_pipeline()
