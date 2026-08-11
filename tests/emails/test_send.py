@@ -256,15 +256,15 @@ class TestSendEmailSignature:
     def test_signature_appended_after_blank_line(self):
         body = self._sent_body("Eracle\nopenoutreach.app")
         assert body == (
-            f"Body\n\nEracle\nopenoutreach.app\n\n{OPT_OUT_LINE}\n\n\n{ATTRIBUTION}\n"
+            f"Body\n\nEracle\nopenoutreach.app\n\n{OPT_OUT_LINE}\n\n{ATTRIBUTION}\n"
         )
 
     def test_body_carries_only_opt_out_and_attribution_when_signature_blank(self):
-        assert self._sent_body("") == f"Body\n\n{OPT_OUT_LINE}\n\n\n{ATTRIBUTION}\n"
+        assert self._sent_body("") == f"Body\n\n{OPT_OUT_LINE}\n\n{ATTRIBUTION}\n"
 
     def test_body_carries_only_opt_out_and_attribution_when_signature_unset(self):
         """A never-asked box (NULL) sends unsigned rather than crashing on None."""
-        assert self._sent_body(None) == f"Body\n\n{OPT_OUT_LINE}\n\n\n{ATTRIBUTION}\n"
+        assert self._sent_body(None) == f"Body\n\n{OPT_OUT_LINE}\n\n{ATTRIBUTION}\n"
 
 
 class TestSendEmailAttribution:
