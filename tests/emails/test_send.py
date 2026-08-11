@@ -201,13 +201,17 @@ class TestSentBodyLogging:
                        campaign=campaign)
         return caplog.text
 
-    def test_own_campaign_logs_the_body_as_sent(self, campaign, caplog):
+    def test_own_campaign_logs_what_the_agent_generated(self, campaign, caplog):
         text = self._send(campaign, caplog)
         assert "Subject: Hi there" in text
         assert "How do you do discovery today?" in text
-        # What the recipient got, not what the agent wrote: sender.py appends these.
-        assert "— Ercole" in text
-        assert "unsubscribe" in text.lower()
+
+    def test_the_appended_boilerplate_is_not_logged(self, campaign, caplog):
+        """Signature, opt-out and attribution are the same on every send — noise here."""
+        text = self._send(campaign, caplog)
+        assert "— Ercole" not in text
+        assert ATTRIBUTION.strip() not in text
+        assert OPT_OUT_LINE.strip() not in text
 
     def test_freemium_campaign_logs_metadata_only(self, campaign, caplog):
         campaign.is_freemium = True

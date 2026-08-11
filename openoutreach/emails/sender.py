@@ -56,7 +56,7 @@ def send_email(
     logger.info("email sent from %s to %s: %s [%s]",
                 mailbox.from_address, to_address, subject, message["Message-ID"])
     if campaign is not None and not campaign.is_freemium:
-        logger.info("%s", _sent_block(message))
+        logger.info("%s", _sent_block(subject, body))
     return message["Message-ID"]
 
 
@@ -108,22 +108,21 @@ def operator_bcc(user, campaign) -> str | None:
     return user.email or None
 
 
-def _sent_block(message) -> str:
-    """The message as it actually went out, indented under its subject.
+def _sent_block(subject: str, body: str) -> str:
+    """What the agent wrote, indented under its subject.
 
-    Read back off the assembled ``EmailMessage`` rather than from the ``body``
-    argument, so the log shows the signature, opt-out line and attribution that
-    ``_build_message`` appends — the text the recipient received, not the text the
-    agent wrote.
+    The ``body`` argument, deliberately — not the assembled message. The signature,
+    opt-out line and attribution are fixed text appended to every send, so logging
+    them repeats what the operator already knows on every line and buries the one
+    part that differs: what the agent actually composed for this lead.
 
     **The operator's own campaigns only.** They already receive every one of these
     in full by BCC, so the log discloses nothing they do not already hold. Freemium
     outreach is OpenOutreach's own conversation with someone who is not their
     contact, and it stays metadata-only for the same reason it gets no BCC.
     """
-    body = message.get_content().rstrip()
-    indented = "\n".join(f"    {line}" for line in body.splitlines())
-    return f"    Subject: {message['Subject']}\n\n{indented}"
+    indented = "\n".join(f"    {line}" for line in body.rstrip().splitlines())
+    return f"    Subject: {subject}\n\n{indented}"
 
 
 # ── Message assembly ──────────────────────────────────────────────
