@@ -17,8 +17,8 @@
 | **A. Differential-privacy embeddings** (add noise to scraped-profile vectors) | **Moot as framed.** Vectors are now built from the **licensed Lead Finder payload**, not a scrape. The raw firmographic text is processed transiently for embedding + LLM qualification and the store still holds only the numeric vector — but the "irreversible noise on scraped data" motivation is gone. Re-open only if embeddings are ever centralised in raw form. |
 | **B. Credential security** (encrypt stored passwords/cookies) | **Removed.** No account password or session cookie is stored anywhere — there is no login. The finding no longer exists. |
 | **C. Operational PII cleanup** (redact scraped PII in logs/diagnostics) | **Mostly moot.** No browser/Voyager diagnostics or scraped-profile dumps exist. Ordinary log hygiene for lead names/emails still applies. |
-| **D. Data retention enforcement** | **Still relevant**, re-keyed onto the current models (`Lead` keyed on `profile_url`, `Deal`, `Task`, `ChatMessage`). A retention/purge job remains a genuine open item. |
-| **E. Right to erasure** / **G. Data portability** | **Still relevant.** Per-person erasure/export should key on the stored `profile_url` and cascade `Lead`/`Deal`/`Task`/`ChatMessage`. |
+| **D. Data retention enforcement** | **Still relevant**, re-keyed onto the current models (`Lead` keyed on `profile_url`, `Deal`, `ChatMessage`). A retention/purge job remains a genuine open item. |
+| **E. Right to erasure** / **G. Data portability** | **Still relevant.** Per-person erasure/export should key on the stored `profile_url` and cascade `Lead`/`Deal`/`ChatMessage`. |
 | **F. Remove stored names** | **Largely satisfied by design.** Discovery persists `profile_url`, `country_code`, `email`, and `profile_text`; there is no transient re-fetch from any platform. Minimisation of any residual name/company fields is still worth a pass. |
 
 ## Current posture (authoritative)

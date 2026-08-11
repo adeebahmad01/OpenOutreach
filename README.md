@@ -135,35 +135,40 @@ Then open:
 | 📧 **Agentic Email Outreach**      | Resolves a work email per best-fit lead (one credit per hit), sends an AI-written opener from your own mailbox over SMTP, then reads replies (IMAP) and runs multi-turn follow-up. |
 | 🔄 **Stateful Pipeline**          | Tracks deal states (`QUALIFIED` → `READY_TO_FIND_EMAIL` → `FINDING_EMAIL` → `READY_TO_EMAIL` → `EMAILED` → `COMPLETED`/`FAILED`) in a local DB — fully resumable. |
 | ⏱️ **Send-Gated Spend**           | Paid email lookups ride on send capacity — a per-mailbox daily cap bounds how many leads enter the pipeline, so you never resolve more than you can send. |
+| 🕗 **Sends On Your Hours**        | Cold email leaves Mon–Fri, 08:00–20:00 in your own timezone, spaced minutes apart from each mailbox. Replies are answered whenever they arrive. |
 | 💾 **Built-in CRM**               | Full data ownership via Django Admin — browse Leads, Deals, and conversations.                                     |
 | 🐳 **One-Command Deployment**      | Dockerized setup with interactive onboarding; a slim runtime with no browser and no VNC.                            |
-| ✍️ **AI-Powered Messaging**        | Agentic multi-turn follow-up conversations — the AI agent reads the thread, composes replies, and schedules future follow-ups. |
+| ✍️ **AI-Powered Messaging**        | Agentic multi-turn conversations — the AI agent reads the thread and composes replies. Nobody is chased: it writes when they write back. |
 
 ---
 
 ## 📖 How the Pipeline Works
 
-The daemon runs a continuous **task queue** backed by a persistent `Task` model. Four task types self-schedule follow-on work:
+The daemon runs a short cycle that asks the deals what they need — there is no queue table and nothing is scheduled in advance. Each pass walks one ordered list and stops at the first thing it can do, so priority *is* that order:
 
-| Task Type | What it does |
-|-----------|-------------|
-| **find_email** | Submits a work-email lookup for a ranked, qualified lead — a free hub-cache hit resolves immediately; otherwise it fires a paid provider job and parks the deal at `FINDING_EMAIL`. |
-| **collect_email** | Polls the in-flight lookup (self-chaining backoff): hit → `READY_TO_EMAIL`, miss → `FAILED` (blank outcome, ML-skipped), couldn't-run/timeout → back to the queue. |
-| **follow_up** | Runs the AI agent over an emailed deal — reads replies, decides send/wait/complete, and re-arms the next follow-up. |
-| **email** | Sends one AI-written opener to a `READY_TO_EMAIL` lead from your mailbox pool, then parks the deal at `EMAILED`. |
+| # | Step | What it does |
+|---|------|-------------|
+| 1 | **check a lookup** | Polls an in-flight work-email job: hit → `READY_TO_EMAIL`, miss → `NO_EMAIL_BETTERCONTACT`, still running → ask again later on the same job. |
+| 2 | **answer a reply** | Runs the AI agent over a deal whose newest message is inbound — replies, closes the deal, or honours an unsubscribe. |
+| 3 | **send a first email** | Sends one AI-written opener to a `READY_TO_EMAIL` lead, then parks the deal at `EMAILED`. |
+| 4 | **rank the pool** | Promotes the qualified leads the model is confident about. |
+| 5 | **buy an address** | Free hub-cache hit resolves immediately; otherwise fires a paid provider job and parks the deal at `FINDING_EMAIL`. |
+| 6 | **top up** | Discovers and qualifies more leads. |
 
-**Discover → qualify → gate → find email → email.** An LLM turns your campaign into an ICP filter (cached on the Campaign); discovery pages matching profiles into embedded `Lead`s. Qualification runs the GP + LLM loop over the stored firmographic text. The GP confidence gate promotes `QUALIFIED → READY_TO_FIND_EMAIL`, **rationing the paid lookup** so only the best-fit leads cost a credit. A hit sends an opener; a miss ends the deal as `FAILED` with a blank outcome (so the ML labeler skips it — an unfindable address is not a fit signal).
+Steps 5 and 6 share one gate: never spend money, and never spend an LLM call qualifying, for someone there is no room to email today.
+
+**Discover → qualify → gate → find email → email.** One LLM pass turns your campaign into opening search keywords; from there the keyword vocabulary grows by counting the words that appear in profiles the LLM has accepted, and the walk keeps firing the most promising set. Qualification runs the GP + LLM loop over the stored firmographic text. The GP confidence gate promotes `QUALIFIED → READY_TO_FIND_EMAIL`, **rationing the paid lookup** so only the best-fit leads cost a credit. A hit sends an opener; a miss ends the deal as `NO_EMAIL_BETTERCONTACT` with a blank outcome (so the ML labeler skips it — an unfindable address is not a fit signal).
 
 **The qualification loop in detail:**
 
-Discovered profiles are embedded (384-dim FastEmbed vectors) from the licensed firmographic payload. The backfill chain decides which profile to evaluate next using a balance-driven strategy:
+Discovered profiles are embedded (384-dim FastEmbed vectors) from the licensed firmographic payload. Which profile to evaluate next is a balance-driven choice:
 
 - **When negatives outnumber positives** → **exploit**: pick the profile with highest predicted qualification probability (fill the pipeline with likely positives)
 - **Otherwise** → **explore**: pick the profile with highest BALD (Bayesian Active Learning by Disagreement) score (seek the most informative label)
 
 All qualification decisions go through the LLM. The GP model selects which candidate to evaluate next and gates promotion from `QUALIFIED` to `READY_TO_FIND_EMAIL`. Every LLM decision feeds back into the model, making candidate selection progressively smarter.
 
-**Cold start:** With fewer than 2 labelled profiles, the model can't fit — candidates are selected in order and qualified via LLM. As labels accumulate, the GP gets better at selecting high-value candidates. When the unlabelled pool empties, discovery pages a fresh batch.
+**Cold start:** a campaign with no acceptances yet has nothing to fit on, so the ICP is also written out as a handful of **synthetic ideal profiles** and embedded as the model's positives. Each real acceptance retires one of them, so the invented evidence thins out at the rate ground truth replaces it. When the unlabelled pool empties, discovery pages a fresh batch.
 
 Configure behavior via Django Admin (`SiteConfig` + `Campaign`).
 
@@ -175,11 +180,11 @@ Configure behavior via Django Admin (`SiteConfig` + `Campaign`).
 ├── docs/                             # architecture, configuration, docker, templating, testing
 ├── openoutreach/                    # single source package; Django apps nested inside
 │   ├── settings.py                  # Django settings (SQLite at data/db.sqlite3)
-│   ├── core/                        # engine app: daemon, task queue + scheduler,
-│   │                                #   Campaign/SiteConfig/Task, LLM factory, onboarding,
-│   │                                #   ML + discovery/qualify pipeline, the two agents
+│   ├── core/                        # engine app: the daemon cycle, Campaign/SiteConfig,
+│   │                                #   LLM factory, onboarding, ML + discovery/qualify
+│   │                                #   pipeline, the outreach agent
 │   ├── emails/                      # discovery/enrichment client, Mailbox + SMTP/IMAP,
-│   │                                #   sender, the four task handlers
+│   │                                #   sender, the mail pass, the pipeline steps
 │   ├── crm/                         # Lead + Deal models
 │   ├── chat/                        # ChatMessage (per-Deal conversation)
 │   └── legacy/                      # model-less migration-history anchor (retired channel)

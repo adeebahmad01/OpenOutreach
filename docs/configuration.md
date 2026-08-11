@@ -27,10 +27,12 @@ Managed via Django Admin (`/admin/`) or created during onboarding.
 | `campaign_target` | text | Who you're going after + the outcome. Feeds the same. |
 | `booking_link` | string | URL the agent can offer when suggesting a meeting. |
 | `is_freemium` | boolean | Freemium campaign (uses `KitQualifier` instead of the per-campaign GP). |
-| `action_fraction` | float | Fraction of activity a freemium campaign devotes to the maintainer-configured promotional email campaign. |
-| `icp_filters` | JSON | Cached Lead Finder filter spec (`{"filters": …, "country_code": …}`), generated once by an LLM pass. Clear it to regenerate. |
-| `discovery_offset` | integer | Page cursor — how far discovery has paged the ICP; advances across cycles/restarts. |
+| `country_code` | string | ISO-3166 alpha-2 target country for this campaign's leads. |
+| `headcount_min` / `headcount_max` | integer | Company-size band, applied to every discovery query. |
+| `anchor_profiles` / `anchor_embeddings` | JSON / binary | Synthetic ideal profiles standing in for positives until real acceptances replace them, one per acceptance. |
 | `model_blob` | binary | The per-campaign trained GP model (joblib). |
+
+Discovery keeps no filter spec or page cursor on the campaign: the keyword sets it has fired, and how far each was paged, live in their own `Keyword` / node rows.
 
 ## Sending mailboxes (`Mailbox` model)
 
@@ -43,9 +45,11 @@ Each `Mailbox` is one SMTP/IMAP box you own. Boxes are added during onboarding b
 | `username` | string | SMTP/IMAP login (unique). | (required) |
 | `password` | string | App password. | (required) |
 | `from_address` | string | The `From:` / sending identity. | (required) |
-| `daily_limit` | integer | Warm-safe sends/day, enforced per box at send time. | `DEFAULT_EMAIL_DAILY_LIMIT` (40) |
+| `daily_limit` | integer | Warm-safe sends/day, enforced per box at send time. **Measured, not configured** — `emails/warmth.py` overwrites it daily from the box's own Sent folder. | `WARM_FLOOR_SENDS` (5) |
+| `signature` | text | Per-box sign-off appended to every send. Asked once per box at onboarding; a declined `""` sticks (the NULL is what means "never asked"). | (asked once) |
+| `next_send_at` | datetime | When this box may send its next *first* email — rewritten after each one. | (null) |
 
-Sending is raw `smtplib` (`emails/sender.py`); reply-reading is IMAP (`emails/inbox.py`). The email queue drains eagerly, capped only by the pool-wide per-box daily headroom.
+Sending is raw `smtplib` (`emails/sender.py`); reply-reading is IMAP (`emails/inbox.py`). First emails are gated three ways — the sending window, the per-box spacing, and the measured daily cap. Replies are exempt from all three.
 
 ## Newsletter jurisdiction default
 
