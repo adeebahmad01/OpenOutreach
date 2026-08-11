@@ -147,6 +147,24 @@ class TestPickingABox:
         box.save(update_fields=["next_send_at"])
         assert Mailbox.objects.free_for_first_email() == box
 
+    def test_the_daily_ledger_starts_at_the_operators_midnight(self):
+        """Not the server's UTC midnight, which for a US operator falls at 19:00 —
+        inside the window, so the cap would reset an hour before the day ends."""
+        from zoneinfo import ZoneInfo
+
+        from openoutreach.emails.models import _local_midnight
+
+        zone = ZoneInfo("America/New_York")
+        with patch("openoutreach.emails.models.operator_timezone", return_value=zone):
+            midnight = _local_midnight()
+        assert midnight.astimezone(zone).hour == 0
+
+    def test_no_box_is_free_outside_the_sending_window(self, campaign):
+        """Out of hours nothing opens a conversation, however much headroom is left."""
+        _box(daily_limit=10)
+        with patch("openoutreach.emails.models.within_sending_window", return_value=False):
+            assert Mailbox.objects.free_for_first_email() is None
+
 
 # ── Email pool ────────────────────────────────────────────────────
 
@@ -368,6 +386,19 @@ class TestSendFirstEmail:
         box.refresh_from_db()
         assert box.next_send_at > timezone.now()
         assert Mailbox.objects.free_for_first_email() is None
+
+    def test_the_gap_lands_in_the_jittered_band(self, campaign, operator):
+        """3 min + U[30s, 90s] — never the floor exactly, never past 4.5 minutes."""
+        from datetime import timedelta
+
+        box = _box(daily_limit=10)
+        deal = _ready(campaign, "lead@corp.com")
+        self._run(deal, box)
+
+        box.refresh_from_db()
+        deal.refresh_from_db()
+        gap = box.next_send_at - deal.email_sent_at
+        assert timedelta(seconds=210) <= gap <= timedelta(seconds=270)
 
     def test_no_bcc_on_a_freemium_campaign(self, campaign, operator):
         """Freemium outreach is OpenOutreach's own — the operator gets no copy."""

@@ -13,7 +13,7 @@ Set during onboarding, editable in Django Admin. `SiteConfig` is the single sour
 | `llm_api_base` | Base URL — **only** for `openai_compatible:*`. | (none) |
 | `bettercontact_api_key` | [BetterContact](https://bettercontact.rocks?fpr=openoutreach) key (affiliate link — no markup to you). Powers **both** Lead Finder discovery **and** work-email enrichment. **Blank disables discovery + enrichment.** | (empty) |
 | `contacts_api_token` / `contacts_api_url` | Cross-operator contacts-store token (earned on first contribution) and URL (blank → default hub). | (empty) |
-| `country_code` | ISO-3166 alpha-2. The only persisted operator setting — drives the active-hours timezone and the email/GDPR jurisdiction rules. | (from onboarding) |
+| `country_code` | ISO-3166 alpha-2. The only persisted operator setting — drives the sending-window timezone and the email/GDPR jurisdiction rules. | (from onboarding) |
 
 The operator's own email and name live on the Django `User` (created at onboarding), not on `SiteConfig`.
 
@@ -57,28 +57,26 @@ Not user-configurable per campaign; edit the source to change.
 
 | Key | Value | Description |
 |:----|:------|:------------|
-| `ENABLE_ACTIVE_HOURS` | `True` | `False` → run 24/7. |
-| `ACTIVE_START_HOUR` / `ACTIVE_END_HOUR` | `9` / `19` | Single contiguous active-hours window (the *worker loop's* hours — no weekend handling here; follow-up **due dates** are weekend-free on their own, see below). |
-| `ACTIVE_TIMEZONE` | `None` | `None` → resolved at runtime from the operator's country; set an IANA name to pin it. |
+| `SEND_WINDOW_START_HOUR` / `SEND_WINDOW_END_HOUR` | `8` / `20` | The hours a **first email** may leave, in the operator's local time (start inclusive, end exclusive). Weekends are shut. Gates cold sends only — discovery, paid lookups and the mail pass run 24/7, so replies are still read and answered out of hours. The timezone is resolved from `SiteConfig.country_code`; multi-zone countries take the first zone `pytz` lists. |
+| `MIN_SEND_INTERVAL_SECONDS` | `180` | Floor between two first emails **from one box**. Replies are exempt. |
+| `SEND_INTERVAL_JITTER_MIN_SECONDS` / `SEND_INTERVAL_JITTER_MAX_SECONDS` | `30` / `90` | Added as `U[min, max]` on top of the floor → a 3.5–4.5 min realized gap. |
+| `WARM_HISTORY_DAYS` / `WARM_GROWTH_FACTOR` / `WARM_FLOOR_SENDS` | `30` / `1.5` / `5` | The measured per-box daily ceiling: p75 of the days the box actually sent over the trailing window, ×1.5 when the receiver has not pushed back, never below the floor. `WARM_CEILING_SENDS` is **derived**, not declared — `SEND_WINDOW_SECONDS / MEAN_SEND_INTERVAL_SECONDS` = 43200/240 = **180** at the current settings — so widening the window or the gap moves the rail with it. |
 | `COLLECT_BACKOFF_BASE_S` / `COLLECT_BACKOFF_MAX_S` | `5` / `30d` | The `collect_email` poll doubles its delay on every still-running attempt and **never gives up** — an unterminated job is queued, not lost, so the leg keeps the same `request_id` rather than abandoning the deal and paying for a second job. MAX rails the interval only, so the schedule stays representable. |
 | `COLLECT_TODAY_HORIZON_S` | `1d` | An in-flight lookup whose next poll is further out than this stops counting against *today's* send headroom in `flush_find_email_queue` — otherwise a few stalled lookups wedge the submit drain shut. |
-| `DEFAULT_EMAIL_DAILY_LIMIT` | `40` | Per-mailbox warm-safe send ceiling stored on each `Mailbox`. |
 | `CAMPAIGN_CONFIG.min_gp_confidence` | `0.9` | GP probability threshold for promoting `QUALIFIED → READY_TO_FIND_EMAIL` (rations the paid lookup). |
 | `CAMPAIGN_CONFIG.qualification_n_mc_samples` | `100` | Monte Carlo samples for BALD. |
 | `CAMPAIGN_CONFIG.embedding_model` | `BAAI/bge-small-en-v1.5` | FastEmbed model for 384-dim embeddings. |
-| `CAMPAIGN_CONFIG.burst_min/max_seconds` | `2700` / `3900` | Human-rhythm work burst (45–65 min) before a break. |
-| `CAMPAIGN_CONFIG.break_min/max_seconds` | `600` / `1200` | Break length (10–20 min) after each burst. |
 
 There is **no spend cap and no Poisson pacing** — paid `find_email` spend is gated by mailbox send-headroom, so a lookup only fires when its result could be sent today.
 
 ## Working-day pacing
 
-Follow-up gaps are **business time**, with no configuration knob: the agent's `follow_up_hours` is
-advanced through `core/business_time.add_business_hours`, which does not count weekend hours, so 24h
-chosen on a Friday afternoon comes due Monday afternoon and `next_follow_up_at` never lands on a
-Saturday or Sunday. The agent is likewise told the thread's age in **working** days
-(`business_days_between`). Public holidays are not modelled. This is independent of the active-hours
-window above: business time decides *when a follow-up is due*, active hours decide *when the worker
-is awake*.
+Nobody is chased, so there is no follow-up gap left to schedule and no knob for one.
+`core/business_time.py` only *measures* now: it tells the outreach agent a thread's age in **working**
+days (`business_days_between`), so a Friday message answered on Monday reads as one day old rather
+than three. Public holidays are not modelled — that data is per-country and per-year, and the figure
+is coarse enough that a missed holiday costs one slightly-off number in a prompt.
 
-See [Templating](./templating.md) for follow-up messaging configuration.
+The same Mon–Fri line gates the **sending window** above (`core/sending_window.py`), which decides
+when a cold email may leave. The two answer different questions from one calendar: business time
+describes *how old a conversation is*, the window decides *when a new one may start*.

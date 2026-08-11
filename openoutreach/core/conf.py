@@ -32,9 +32,9 @@ FASTEMBED_CACHE_DIR = ROOT_DIR / ".cache" / "fastembed"
 # failed send holds capacity at what was already demonstrated.
 #
 # The floor lets a box with no history start somewhere. The ceiling is not a
-# number of its own at all — it is *derived* from the send pacing below
-# (``WARM_CEILING_SENDS``, defined there because it cannot be stated before the
-# interval it divides). It used to be a declared 50, the top of the 30–50/day
+# number of its own at all — it is *derived* from the send pacing and the sending
+# window below (``WARM_CEILING_SENDS``, defined there because it cannot be stated
+# before the interval it divides). It used to be a declared 50, the top of the 30–50/day
 # band cold-email practice converges on for a warmed Google Workspace box; that
 # figure was folklore this repo never measured, and pinning volume an order below
 # the rate made the two guards redundant rather than complementary. What still
@@ -57,20 +57,26 @@ WARM_FLOOR_SENDS = 5        # a box with no history still sends this much
 # time (~11s apart, 40 messages inside one hour) — a machine signature, and
 # several times the ~20/hour Gmail is observed to tolerate.
 #
-# The floor is the low end of the 3–8 minute band the cold-email field
-# converges on; the jitter spans the rest of it. Jitter is not decoration: a
-# send exactly every 180s is as machine-shaped as no spacing at all.
+# The floor is the low end of the 3–8 minute band the cold-email field converges
+# on, and the jitter now sits *on* that floor rather than spanning the band: the
+# realized gap is 3.5–4.5 minutes. Concentrating the day's volume into a 12-hour
+# window (below) costs half the clock, and the gap is the only place to pay for
+# it — a receiver reads the rate, and ~15/hour is still under the ~20/hour Gmail
+# is observed to tolerate. Jitter is not decoration: a send exactly every 180s is
+# as machine-shaped as no spacing at all, which is why the floor keeps a spread
+# around it rather than being tightened to a fixed 4 minutes.
 #
 # Per box rather than pool-wide (``Mailbox.next_send_at``): the daily ceiling is
 # already per box, two mailboxes are two sending identities, and one receiver's
 # rhythm says nothing about the other's.
 #
-# This bounds the *rate*, and the rate sets the day: a daemon that never stops
-# and never sends twice inside one interval cannot exceed a day divided by the
-# mean interval, whatever any ceiling says. So the warm rail is *computed* from
-# these two rather than declared beside them — one number, one place to change
-# it. Widen the pacing and the daily rail widens with it; tighten it and the rail
-# follows, with no second constant left behind stating the old arithmetic.
+# This bounds the *rate*, and the rate sets the day: a daemon that never sends
+# twice inside one interval cannot exceed its sending window divided by the mean
+# interval, whatever any ceiling says. So the warm rail is *computed* from the
+# pacing and the window rather than declared beside them — one number, one place
+# to change it. Widen either and the daily rail widens with it; tighten either
+# and the rail follows, with no second constant left behind stating the old
+# arithmetic.
 #
 # The daily measurement still decides where a box sits on its way up — a young
 # box is held at its demonstrated volume however much time the clock leaves — but
@@ -78,17 +84,52 @@ WARM_FLOOR_SENDS = 5        # a box with no history still sends this much
 # permits. Burst throttling is the failure mode the interval guards; the ramp
 # guards the other one.
 # ----------------------------------------------------------------------
-MIN_SEND_INTERVAL_SECONDS = 180      # 3 minutes, the hard floor between sends
-SEND_INTERVAL_JITTER_SECONDS = 300   # + U[0, 300) → a 3–8 minute spread
+MIN_SEND_INTERVAL_SECONDS = 180          # 3 minutes, the hard floor between sends
+SEND_INTERVAL_JITTER_MIN_SECONDS = 30    # + U[30, 90] → a 3.5–4.5 minute spread
+SEND_INTERVAL_JITTER_MAX_SECONDS = 90
 
-SECONDS_PER_DAY = 24 * 60 * 60
+# Mean realized gap: the floor plus the expected value of U[min, max].
+MEAN_SEND_INTERVAL_SECONDS = MIN_SEND_INTERVAL_SECONDS + (
+    SEND_INTERVAL_JITTER_MIN_SECONDS + SEND_INTERVAL_JITTER_MAX_SECONDS) / 2
 
-# Mean realized gap: the floor plus the expected value of U[0, jitter).
-MEAN_SEND_INTERVAL_SECONDS = MIN_SEND_INTERVAL_SECONDS + SEND_INTERVAL_JITTER_SECONDS / 2
+# ----------------------------------------------------------------------
+# Sending window (core/sending_window.py) — the hours a *first* email may leave,
+# in the operator's own local time (resolved from their onboarding country code).
+# Replies are exempt, for the same reason they are exempt from the cap: answering
+# someone who wrote to you is not cold volume, and holding a written answer until
+# Monday morning is worse for the conversation than sending it at 21:00.
+#
+# A cold opener that lands at 03:00 is a machine announcing itself. Everything
+# else in the send path is shaped to read as a person typing — the pacing, the
+# jitter, the per-box identity — and a 24/7 clock undoes it in the one field the
+# recipient sees before they open anything. It is also the sender's own interest:
+# a message that arrives during the working day is read when it arrives, rather
+# than sitting under a night's accumulation.
+#
+# This is a *reinstatement*, not a new idea. Active hours existed for the
+# Playwright era, to make a browser session look like a human's working day, and
+# were deleted with the browser. The reason survived the channel; the
+# implementation did not, because it gated the whole daemon loop. This one gates
+# only the cold send: discovery, paid lookups and the mail pass keep running
+# overnight, so the queue is stocked and replies are read the moment they land.
+#
+# Weekends stop. Saturday cold email is weaker signal to receivers and to people,
+# and ``business_time.is_business_day`` already draws the Mon–Fri line.
+#
+# The window is the operator's, not the recipient's: we know where the operator
+# is (one onboarding answer) and never where the lead is (the discovery row
+# carries a country at best, and the campaign may target several).
+# ----------------------------------------------------------------------
+SEND_WINDOW_START_HOUR = 8   # inclusive — no first email before 08:00 local
+SEND_WINDOW_END_HOUR = 20    # exclusive — none from 20:00 on
 
-# The rail: sends a single box could emit in a day at that mean gap (~261 today).
-# Floored, so the rail never claims a send the pacing has no room for.
-WARM_CEILING_SENDS = int(SECONDS_PER_DAY / MEAN_SEND_INTERVAL_SECONDS)
+SEND_WINDOW_SECONDS = (SEND_WINDOW_END_HOUR - SEND_WINDOW_START_HOUR) * 3600
+
+# The rail: sends a single box could emit inside one window at that mean gap
+# (180 today). Floored, so the rail never claims a send the clock has no room
+# for — the window halves the day, and a ceiling still derived from 24 hours
+# would promise volume the pacing cannot deliver before 20:00.
+WARM_CEILING_SENDS = int(SEND_WINDOW_SECONDS / MEAN_SEND_INTERVAL_SECONDS)
 
 # ----------------------------------------------------------------------
 # collect_email poll backoff — the bound leg that polls an in-flight paid

@@ -54,6 +54,7 @@ from django.utils import timezone
 from pydantic_ai.exceptions import ModelHTTPError
 from termcolor import colored
 
+from openoutreach.core.sending_window import within_sending_window
 from openoutreach.crm.models import DealState
 
 logger = logging.getLogger(__name__)
@@ -224,7 +225,10 @@ def _pipeline_summary(campaign) -> str:
     # tells you a boolean, "not buying or qualifying" tells you why two rows declined.
     spending = ("buying and qualifying as needed" if room_to_send_today(campaign)
                 else "no send headroom left, so not buying or qualifying")
-    return f"{' · '.join(waiting)} · {left} send(s) left today · {spending}"
+    # Same reasoning for the clock: a stocked queue and free headroom at 22:00 looks
+    # like a stuck daemon unless the line says which gate is holding it.
+    clock = "" if within_sending_window() else " · outside sending hours, so not emailing"
+    return f"{' · '.join(waiting)} · {left} send(s) left today · {spending}{clock}"
 
 
 # ── 1. Check an in-flight lookup ──────────────────────────────────

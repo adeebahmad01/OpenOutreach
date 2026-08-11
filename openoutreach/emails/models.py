@@ -6,12 +6,20 @@ from django.db import models
 from django.utils import timezone
 
 from openoutreach.core.conf import WARM_FLOOR_SENDS
+from openoutreach.core.sending_window import operator_timezone, within_sending_window
 from openoutreach.emails.delivery_policy import Response
 
 
 def _local_midnight():
-    """Start of today in local time — the horizon every per-day ledger counts from."""
-    return timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    """Start of today where the operator is — the horizon every per-day ledger counts from.
+
+    The operator's zone, not the server's UTC, because the day is now a *window*: an
+    operator in New York has their UTC midnight at 19:00, an hour before the window
+    shuts, so a UTC ledger would reset the daily cap inside the working day and hand
+    each box a fresh allowance for its last hour.
+    """
+    return timezone.localtime(timezone.now(), operator_timezone()).replace(
+        hour=0, minute=0, second=0, microsecond=0)
 
 
 class MailboxManager(models.Manager):
@@ -27,14 +35,18 @@ class MailboxManager(models.Manager):
     def free_for_first_email(self):
         """The box that may send a first email right now, or None.
 
-        Three conditions, all per box: headroom left today, not paused by the
-        receiver (both inside ``headroom_today``), and its spacing clock elapsed.
-        Among the free boxes the most idle one wins, so volume spreads rather than
-        piling on whichever row sorts first.
+        The clock speaks first and for the whole pool: outside the operator's
+        working window no box may open a conversation, however much headroom it has
+        (``core/sending_window.py``). Then three conditions, all per box: headroom
+        left today, not paused by the receiver (both inside ``headroom_today``), and
+        its spacing clock elapsed. Among the free boxes the most idle one wins, so
+        volume spreads rather than piling on whichever row sorts first.
 
         Only *first* emails come through here. A reply is not cold volume and is
-        sent regardless of cap or spacing.
+        sent regardless of window, cap or spacing.
         """
+        if not within_sending_window():
+            return None
         now = timezone.now()
         ranked = [
             (box, headroom) for box in self.all()

@@ -20,7 +20,11 @@ from datetime import timedelta
 from django.utils import timezone
 from termcolor import colored
 
-from openoutreach.core.conf import MIN_SEND_INTERVAL_SECONDS, SEND_INTERVAL_JITTER_SECONDS
+from openoutreach.core.conf import (
+    MIN_SEND_INTERVAL_SECONDS,
+    SEND_INTERVAL_JITTER_MAX_SECONDS,
+    SEND_INTERVAL_JITTER_MIN_SECONDS,
+)
 from openoutreach.crm.models import DealState
 
 logger = logging.getLogger(__name__)
@@ -78,12 +82,18 @@ def send_first_email(deal, mailbox) -> DealState | None:
 def _space_out(mailbox, now) -> None:
     """Set when this box may send its next first email.
 
-    Fresh jitter every time: a fixed 3-minute cadence is its own machine signature,
-    so the gap has to vary. Per box, because the daily ceiling is per box — two
-    mailboxes are two sending identities and one receiver's rhythm says nothing
-    about the other's.
+    Fresh jitter every time: a fixed cadence is its own machine signature, so the
+    gap has to vary. Per box, because the daily ceiling is per box — two mailboxes
+    are two sending identities and one receiver's rhythm says nothing about the
+    other's.
+
+    A time past the end of the working day is written unchanged rather than
+    clamped to tomorrow morning: the window is enforced pool-wide in
+    ``Mailbox.objects.free_for_first_email``, and a second clamp here would be a
+    copy of that rule free to drift from it.
     """
     mailbox.next_send_at = now + timedelta(
-        seconds=MIN_SEND_INTERVAL_SECONDS + random.uniform(0, SEND_INTERVAL_JITTER_SECONDS),
+        seconds=MIN_SEND_INTERVAL_SECONDS + random.uniform(
+            SEND_INTERVAL_JITTER_MIN_SECONDS, SEND_INTERVAL_JITTER_MAX_SECONDS),
     )
     mailbox.save(update_fields=["next_send_at"])
