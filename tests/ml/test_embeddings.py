@@ -67,19 +67,19 @@ class TestLeadEmbeddingFields:
         )
         assert lead.embedding_array is None
 
-    def test_get_labeled_arrays_empty(self, fake_session):
+    def test_get_labeled_arrays_empty(self, campaign):
         from openoutreach.crm.models import Lead
 
-        campaign = fake_session.campaign
+        campaign = campaign
         X, y = Lead.get_labeled_arrays(campaign)
         assert X.shape == (0, 384)
         assert y.shape == (0,)
 
-    def test_get_labeled_arrays_from_deals(self, fake_session):
+    def test_get_labeled_arrays_from_deals(self, campaign):
         """Labels are derived from Deal state + outcome."""
         from openoutreach.crm.models import Deal, Lead, Outcome, DealState
 
-        campaign = fake_session.campaign
+        campaign = campaign
 
         # Create a lead with embedding + QUALIFIED deal → label=1
         emb = np.random.randn(384).astype(np.float32)
@@ -104,12 +104,12 @@ class TestLeadEmbeddingFields:
         assert len(X) == 2
         assert set(y) == {0, 1}
 
-    def test_get_labeled_arrays_keeps_no_email_miss_positive(self, fake_session):
+    def test_get_labeled_arrays_keeps_no_email_miss_positive(self, campaign):
         """A NO_EMAIL_BETTERCONTACT miss is a fit positive (label=1), not skipped —
         the LLM qualified it; only enrichment failed."""
         from openoutreach.crm.models import Deal, Lead, DealState
 
-        campaign = fake_session.campaign
+        campaign = campaign
         emb = np.random.randn(384).astype(np.float32)
         lead = Lead.objects.create(
             profile_url="https://linkedin.com/in/dana/", embedding=emb.tobytes(),
@@ -123,11 +123,11 @@ class TestLeadEmbeddingFields:
         assert len(X) == 1
         assert list(y) == [1]
 
-    def test_get_labeled_arrays_skips_operational_failures(self, fake_session):
+    def test_get_labeled_arrays_skips_operational_failures(self, campaign):
         """FAILED deals with non-wrong_fit outcome are not training data."""
         from openoutreach.crm.models import Deal, Lead, Outcome, DealState
 
-        campaign = fake_session.campaign
+        campaign = campaign
 
         emb = np.random.randn(384).astype(np.float32)
         lead = Lead.objects.create(

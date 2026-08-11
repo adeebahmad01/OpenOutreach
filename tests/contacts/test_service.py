@@ -36,11 +36,12 @@ def _config(token="tok", url="", country_code="us"):
     return cfg
 
 
-def _session(contribute_to_hub=True):
-    """A daemon session stand-in for the register path."""
-    session = MagicMock()
-    session.django_user.email = "me@x.com"
-    return session
+@pytest.fixture(autouse=True)
+def _operator(db):
+    """The register path stamps the operator's email; give it one to find."""
+    from tests.factories import UserFactory
+
+    return UserFactory(username="me", email="me@x.com")
 
 
 # ── resolve ──────────────────────────────────────────────────────────
@@ -99,21 +100,21 @@ class TestContribute:
         _config()
         lead = LeadFactory(country_code="in")
         with patch.object(service.requests, "post") as post:
-            service.contribute(_session(), lead, [], service.ORIGIN_BETTERCONTACT)
+            service.contribute(lead, [], service.ORIGIN_BETTERCONTACT)
         post.assert_not_called()
 
     def test_eea_lead_is_skipped_client_side(self):
         _config()
         lead = LeadFactory(country_code="de")
         with patch.object(service.requests, "post") as post:
-            service.contribute(_session(), lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
+            service.contribute(lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
         post.assert_not_called()
 
     def test_unknown_country_is_skipped(self):
         _config()
         lead = LeadFactory(country_code="")
         with patch.object(service.requests, "post") as post:
-            service.contribute(_session(), lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
+            service.contribute(lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
         post.assert_not_called()
 
     def test_with_token_posts_the_record(self):
@@ -123,7 +124,7 @@ class TestContribute:
             service.requests, "post", return_value=_resp(200, {"accepted": 1, "credits": 7}),
         ) as post:
             # the empty string is filtered out
-            service.contribute(_session(), lead, ["jane@acme.com", ""], service.ORIGIN_PROFILE_INFO)
+            service.contribute(lead, ["jane@acme.com", ""], service.ORIGIN_PROFILE_INFO)
         url, kwargs = post.call_args.args[0], post.call_args.kwargs
         assert url.endswith("/api/v2/contribute/")
         assert kwargs["headers"]["Authorization"] == "Bearer tok"
@@ -143,7 +144,7 @@ class TestContribute:
         with patch.object(
             service.requests, "post", return_value=_resp(200, {"token": "NEW", "credits": 1}),
         ) as post:
-            service.contribute(_session(), lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
+            service.contribute(lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
         url, kwargs = post.call_args.args[0], post.call_args.kwargs
         assert url.endswith("/api/v2/register/")
         assert kwargs["json"]["operator_email"] == "me@x.com"
@@ -157,7 +158,7 @@ class TestContribute:
             service.requests, "post", side_effect=requests.ConnectionError("boom"),
         ):
             # must not raise
-            service.contribute(_session(), lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
+            service.contribute(lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
         assert SiteConfig.load().contacts_api_token == ""
 
     def test_eea_operator_contributes_nothing(self):
@@ -167,7 +168,7 @@ class TestContribute:
         cfg.save()
         lead = LeadFactory(country_code="in")
         with patch.object(service.requests, "post") as post:
-            service.contribute(_session(), lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
+            service.contribute(lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
         post.assert_not_called()
 
     def test_cached_embedding_rides_along(self):
@@ -177,7 +178,7 @@ class TestContribute:
         with patch.object(
             service.requests, "post", return_value=_resp(200, {"accepted": 1, "credits": 7}),
         ) as post:
-            service.contribute(_session(), lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
+            service.contribute(lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
         assert post.call_args.kwargs["json"]["embedding"] == list(range(384))
 
     def test_uncached_embedding_is_omitted(self):
@@ -186,7 +187,7 @@ class TestContribute:
         with patch.object(
             service.requests, "post", return_value=_resp(200, {"accepted": 1, "credits": 7}),
         ) as post:
-            service.contribute(_session(), lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
+            service.contribute(lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
         assert "embedding" not in post.call_args.kwargs["json"]
 
 
@@ -203,7 +204,7 @@ class TestBuildReporting:
         with patch.object(service.version, "commit_sha", return_value="a" * 40), \
              patch.object(service.version, "is_dirty", return_value=True), \
              patch.object(service.requests, "post", return_value=_resp(body={"credits": 1})) as post:
-            service.contribute(_session(), lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
+            service.contribute(lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
         body = post.call_args.kwargs["json"]
         assert body["client_sha"] == "a" * 40
         assert body["client_dirty"] is True
@@ -214,7 +215,7 @@ class TestBuildReporting:
         with patch.object(service.version, "commit_sha", return_value="a" * 40), \
              patch.object(service.version, "is_dirty", return_value=None), \
              patch.object(service.requests, "post", return_value=_resp(body={"credits": 1})) as post:
-            service.contribute(_session(), lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
+            service.contribute(lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
         assert "client_dirty" not in post.call_args.kwargs["json"]
 
     def test_every_call_carries_the_version_user_agent(self):
@@ -232,5 +233,5 @@ class TestBuildReporting:
         with patch.object(service.version, "commit_sha", return_value="b" * 40), \
              patch.object(service.requests, "post",
                           return_value=_resp(body={"token": "t", "credits": 1})) as post:
-            service.contribute(_session(), lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
+            service.contribute(lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
         assert post.call_args.kwargs["json"]["client_sha"] == "b" * 40

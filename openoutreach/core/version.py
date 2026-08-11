@@ -139,10 +139,15 @@ def _commit_date(sha: str) -> str:
     Parsed out of the commit object via ``git``; without it (or without the object)
     the date is simply unknown — the hub can still resolve the date from the sha
     against the published history, so this is a convenience, not the source of truth.
+
+    ``%at`` (author date), not ``%ct``: a rebase or a cherry-pick rewrites the
+    committer timestamp, so the same code would report a different CalVer depending
+    on how it reached the branch. The author date is when the change was written,
+    which is what a build identifier should name.
     """
     if sha == UNKNOWN:
         return UNKNOWN
-    stamp = _git("show", "-s", "--format=%ct", sha)
+    stamp = _git("show", "-s", "--format=%at", sha)
     if not stamp or not stamp.isdigit():
         return UNKNOWN
     return datetime.fromtimestamp(int(stamp), tz=UTC).strftime("%Y.%m.%d")

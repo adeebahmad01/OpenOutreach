@@ -1,6 +1,8 @@
 # tests/emails/test_send.py
-"""The Layer-1 email send path: Mailbox pacing, the eager flush planner,
-the email pool query, and the EMAIL task handler."""
+"""The first-email path: the per-box cap and spacing, the ready pool, and the step.
+
+A first email is the only cold volume this daemon produces, so it is the only send
+under a cap — replies are exempt (see ``test_reply.py``)."""
 import pytest
 from unittest.mock import patch
 
@@ -8,8 +10,6 @@ from django.utils import timezone
 
 from openoutreach.core.agents.outreach import OutreachDecision
 from openoutreach.core.db.deals import get_emailable_deals
-from openoutreach.core.models import Task
-from openoutreach.core.scheduler import flush_email_queue
 from openoutreach.crm.models import DealState
 from openoutreach.emails.models import Mailbox
 from openoutreach.emails.sender import (
@@ -19,13 +19,8 @@ from openoutreach.emails.sender import (
     send_email,
     unsubscribe_address,
 )
-from openoutreach.emails.tasks.send import handle_email
+from openoutreach.emails.steps.send import send_first_email
 from tests.factories import DealFactory, LeadFactory
-
-
-# Allowance high enough never to bind — these cases exercise the *other*
-# bounds (pool headroom, pending guard). The quota split has its own tests.
-_UNCAPPED = 10_000
 
 
 def _box(email="a@b.com", daily_limit=10):
@@ -43,35 +38,74 @@ def _ready(campaign, email="lead@corp.com"):
     )
 
 
-def _record_send(deal, box, user):
-    """Register one outgoing email on a box — the cap ledger counts outgoing
-    ChatMessages per box, not deals (the agentic loop sends many per deal)."""
+def _record_send(deal, box, user, when=None):
+    """Register one first contact on a box — what the cap ledger counts."""
     from openoutreach.chat.models import ChatMessage
 
+    when = when or timezone.now()
     deal.mailbox = box
     deal.state = DealState.EMAILED
-    deal.email_sent_at = timezone.now()
+    deal.email_sent_at = when
     deal.save()
     ChatMessage.objects.create(
         deal=deal, external_id=f"<m{deal.pk}@corp.com>", content="body",
-        is_outgoing=True, owner=user, creation_date=timezone.now(),
+        is_outgoing=True, owner=user, creation_date=when,
     )
+    return deal
+
+
+def _record_reply_exchange(deal, box, user, when):
+    """One inbound reply and our answer, both inside an existing thread."""
+    from openoutreach.chat.models import ChatMessage
+
+    for i, outgoing in enumerate((False, True)):
+        ChatMessage.objects.create(
+            deal=deal, external_id=f"<r{deal.pk}-{i}@corp.com>", content="body",
+            is_outgoing=outgoing, owner=user, creation_date=when,
+        )
 
 
 # ── Mailbox pacing ────────────────────────────────────────────────
 
 
 @pytest.mark.django_db
-class TestMailboxPacing:
-    def test_sent_today_counts_outgoing_messages_for_this_box(self, fake_session):
+class TestMailboxCap:
+    """The cap counts *people first contacted today*, not messages sent today."""
+
+    def test_a_first_email_spends_one(self, campaign, operator):
         box = _box(daily_limit=10)
-        d = _ready(fake_session.campaign)
         assert box.sent_today() == 0
-        _record_send(d, box, fake_session.django_user)
+        _record_send(_ready(campaign), box, operator)
         assert box.sent_today() == 1
         assert box.headroom_today() == 9
 
-    def test_remaining_today_sums_headroom_across_boxes(self, fake_session):
+    def test_replies_inside_an_older_thread_are_free(self, campaign, operator):
+        """Answering someone who wrote back is not cold volume, so it costs no cap."""
+        from datetime import timedelta
+
+        box = _box(daily_limit=10)
+        yesterday = timezone.now() - timedelta(days=1)
+        deal = _record_send(_ready(campaign), box, operator, when=yesterday)
+        _record_reply_exchange(deal, box, operator, when=timezone.now())
+
+        assert box.sent_today() == 0
+        assert box.headroom_today() == 10
+
+    def test_one_person_reached_twice_today_counts_once(self, campaign, operator):
+        """Distinct leads, so a second campaign's touch is not a second person."""
+        from openoutreach.core.models import Campaign
+
+        box = _box(daily_limit=10)
+        lead = LeadFactory(email="lead@corp.com")
+        other = Campaign.objects.create(name="Second")
+        for c in (campaign, other):
+            _record_send(
+                DealFactory(campaign=c, lead=lead, state=DealState.READY_TO_EMAIL),
+                box, operator,
+            )
+        assert box.sent_today() == 1
+
+    def test_remaining_today_sums_headroom_across_boxes(self, campaign):
         _box("a@b.com", daily_limit=3)
         _box("c@d.com", daily_limit=5)
         assert Mailbox.objects.remaining_today() == 8
@@ -79,18 +113,37 @@ class TestMailboxPacing:
     def test_remaining_today_zero_with_no_boxes(self):
         assert Mailbox.objects.remaining_today() == 0
 
-    def test_least_loaded_picks_box_with_most_headroom(self, fake_session):
+
+@pytest.mark.django_db
+class TestPickingABox:
+    def test_picks_the_box_with_most_headroom(self, campaign, operator):
         light = _box("light@b.com", daily_limit=10)
         heavy = _box("heavy@b.com", daily_limit=10)
-        # Spend 4 on heavy.
         for _ in range(4):
-            _record_send(_ready(fake_session.campaign), heavy, fake_session.django_user)
-        assert Mailbox.objects.least_loaded_under_cap() == light
+            _record_send(_ready(campaign), heavy, operator)
+        assert Mailbox.objects.free_for_first_email() == light
 
-    def test_least_loaded_returns_none_when_all_capped(self, fake_session):
+    def test_none_when_every_box_is_capped(self, campaign, operator):
         box = _box(daily_limit=1)
-        _record_send(_ready(fake_session.campaign), box, fake_session.django_user)
-        assert Mailbox.objects.least_loaded_under_cap() is None
+        _record_send(_ready(campaign), box, operator)
+        assert Mailbox.objects.free_for_first_email() is None
+
+    def test_a_box_still_spacing_out_is_not_free(self, campaign):
+        """The 3-minute floor between two cold emails, per box."""
+        from datetime import timedelta
+
+        box = _box(daily_limit=10)
+        box.next_send_at = timezone.now() + timedelta(minutes=3)
+        box.save(update_fields=["next_send_at"])
+        assert Mailbox.objects.free_for_first_email() is None
+
+    def test_a_box_past_its_spacing_is_free_again(self, campaign):
+        from datetime import timedelta
+
+        box = _box(daily_limit=10)
+        box.next_send_at = timezone.now() - timedelta(seconds=1)
+        box.save(update_fields=["next_send_at"])
+        assert Mailbox.objects.free_for_first_email() == box
 
 
 # ── Email pool ────────────────────────────────────────────────────
@@ -98,79 +151,23 @@ class TestMailboxPacing:
 
 @pytest.mark.django_db
 class TestEmailableDeals:
-    def test_returns_only_ready_to_email(self, fake_session):
-        ready = _ready(fake_session.campaign)
-        DealFactory(campaign=fake_session.campaign, lead=LeadFactory(), state=DealState.QUALIFIED)
-        DealFactory(campaign=fake_session.campaign, lead=LeadFactory(), state=DealState.EMAILED)
-        deals = list(get_emailable_deals(fake_session))
+    def test_returns_only_ready_to_email(self, campaign):
+        ready = _ready(campaign)
+        DealFactory(campaign=campaign, lead=LeadFactory(), state=DealState.QUALIFIED)
+        DealFactory(campaign=campaign, lead=LeadFactory(), state=DealState.EMAILED)
+        deals = list(get_emailable_deals(campaign))
         assert deals == [ready]
 
-    def test_excludes_disqualified_lead(self, fake_session):
-        deal = _ready(fake_session.campaign)
+    def test_excludes_disqualified_lead(self, campaign):
+        deal = _ready(campaign)
         deal.lead.disqualified = True
         deal.lead.save()
-        assert list(get_emailable_deals(fake_session)) == []
+        assert list(get_emailable_deals(campaign)) == []
 
-    def test_oldest_first(self, fake_session):
-        first = _ready(fake_session.campaign, "first@c.com")
-        second = _ready(fake_session.campaign, "second@c.com")
-        assert list(get_emailable_deals(fake_session)) == [first, second]
-
-
-# ── flush_email_queue (the eager planner) ─────────────────────────
-
-
-@pytest.mark.django_db
-class TestFlushEmailQueue:
-    def _pending_emails(self, campaign):
-        return Task.objects.filter(
-            task_type=Task.TaskType.EMAIL, payload__campaign_id=campaign.pk,
-        ).count()
-
-    def test_no_op_without_a_mailbox(self, fake_session):
-        _ready(fake_session.campaign)
-        assert flush_email_queue(fake_session, fake_session.campaign, allowance=_UNCAPPED) == 0
-        assert self._pending_emails(fake_session.campaign) == 0
-
-    def test_no_op_on_empty_pool(self, fake_session):
-        _box()
-        assert flush_email_queue(fake_session, fake_session.campaign, allowance=_UNCAPPED) == 0
-
-    def test_mints_one_slot_however_deep_the_pool(self, fake_session):
-        # Single-slot by design: a batch would schedule the whole day up front and
-        # bury anything minted after it, follow-ups included.
-        _box(daily_limit=10)
-        _ready(fake_session.campaign, "x@c.com")
-        _ready(fake_session.campaign, "y@c.com")
-        assert flush_email_queue(fake_session, fake_session.campaign, allowance=_UNCAPPED) == 1
-        assert self._pending_emails(fake_session.campaign) == 1
-
-    def test_does_not_mint_a_second_while_one_is_pending(self, fake_session):
-        _box(daily_limit=10)
-        _ready(fake_session.campaign, "x@c.com")
-        _ready(fake_session.campaign, "y@c.com")
-        flush_email_queue(fake_session, fake_session.campaign, allowance=_UNCAPPED)
-        assert flush_email_queue(fake_session, fake_session.campaign, allowance=_UNCAPPED) == 0
-
-    def test_capped_by_pool_headroom(self, fake_session):
-        _box(daily_limit=1)
-        _ready(fake_session.campaign, "x@c.com")
-        _ready(fake_session.campaign, "y@c.com")
-        assert flush_email_queue(fake_session, fake_session.campaign, allowance=_UNCAPPED) == 1
-
-    def test_no_op_when_email_task_already_pending(self, fake_session):
-        _box(daily_limit=10)
-        _ready(fake_session.campaign)
-        Task.objects.create(
-            task_type=Task.TaskType.EMAIL,
-            scheduled_at=timezone.now(),
-            payload={"campaign_id": fake_session.campaign.pk},
-        )
-        assert flush_email_queue(fake_session, fake_session.campaign, allowance=_UNCAPPED) == 0
-        assert self._pending_emails(fake_session.campaign) == 1
-
-
-# ── sender.send_email (SMTP assembly) ─────────────────────────────
+    def test_oldest_first(self, campaign):
+        first = _ready(campaign, "first@c.com")
+        second = _ready(campaign, "second@c.com")
+        assert list(get_emailable_deals(campaign)) == [first, second]
 
 
 class TestSendEmailBcc:
@@ -191,17 +188,17 @@ class TestSendEmailBcc:
 
 @pytest.mark.django_db
 class TestOperatorBcc:
-    def test_operator_campaign_bccs_the_operator(self, fake_session):
-        assert operator_bcc(fake_session.django_user, fake_session.campaign) == "testuser@example.com"
+    def test_operator_campaign_bccs_the_operator(self, campaign, operator):
+        assert operator_bcc(operator, campaign) == "testuser@example.com"
 
-    def test_freemium_campaign_never_bccs(self, fake_session):
-        fake_session.campaign.is_freemium = True
-        assert operator_bcc(fake_session.django_user, fake_session.campaign) is None
+    def test_freemium_campaign_never_bccs(self, campaign, operator):
+        campaign.is_freemium = True
+        assert operator_bcc(operator, campaign) is None
 
-    def test_blank_operator_email_yields_no_bcc(self, fake_session):
+    def test_blank_operator_email_yields_no_bcc(self, campaign, operator):
         """An empty address would set an empty Bcc header, not "no copy"."""
-        fake_session.django_user.email = ""
-        assert operator_bcc(fake_session.django_user, fake_session.campaign) is None
+        operator.email = ""
+        assert operator_bcc(operator, campaign) is None
 
 
 class TestSendEmailSignature:
@@ -263,81 +260,98 @@ class TestSendEmailAttribution:
         assert "lead@corp.com" in logged and "Hi" in logged
 
 
-# ── handle_email (the EMAIL task) ─────────────────────────────────
+# ── send_first_email (the step) ───────────────────────────────────
 
 
 @pytest.mark.django_db
-class TestHandleEmail:
-    def _run(self, fake_session):
-        task = Task.objects.create(
-            task_type=Task.TaskType.EMAIL,
-            scheduled_at=timezone.now(),
-            payload={"campaign_id": fake_session.campaign.pk},
-        )
+class TestSendFirstEmail:
+    def _run(self, deal, box, subject="Hi there", message="Short opener."):
         with patch(
             "openoutreach.core.db.summaries.materialize_profile_summary_if_missing",
         ), patch(
             "openoutreach.core.agents.outreach.run_outreach_agent",
             return_value=OutreachDecision(
-                action="send_message", subject="Hi there",
-                message="Short opener.", follow_up_hours=48,
-            ),
+                action="send_message", subject=subject, message=message),
         ), patch(
             "openoutreach.emails.sender.send_email", return_value="<mid@corp.com>",
         ) as send:
-            handle_email(task, fake_session, qualifiers={})
-        return send
+            next_state = send_first_email(deal, box)
+        deal.save()
+        return send, next_state
 
-    def test_sends_and_records_then_moves_to_emailed(self, fake_session):
+    def test_sends_records_and_moves_to_emailed(self, campaign, operator):
         box = _box(daily_limit=10)
-        deal = _ready(fake_session.campaign, "lead@corp.com")
-        send = self._run(fake_session)
+        deal = _ready(campaign, "lead@corp.com")
+
+        send, next_state = self._run(deal, box)
 
         # The operator's own campaign → they get a BCC of their own outreach.
         send.assert_called_once_with(
             box, "lead@corp.com", "Hi there", "Short opener.",
             bcc="testuser@example.com",
         )
+        assert next_state == DealState.EMAILED
         deal.refresh_from_db()
-        assert deal.state == DealState.EMAILED
         assert deal.mailbox == box
         assert deal.email_subject == "Hi there"
         assert deal.email_message_id == "<mid@corp.com>"
         assert deal.email_sent_at is not None
 
-    def test_follow_up_countdown_skips_the_weekend(self, fake_session):
-        """A Friday opener with a 48h gap comes due Tuesday, not Sunday."""
-        from datetime import datetime, timezone as dt_timezone
+    def test_the_sent_email_is_recorded_as_the_thread_root(self, campaign, operator):
+        from openoutreach.chat.models import ChatMessage
 
-        _box(daily_limit=10)
-        deal = _ready(fake_session.campaign, "lead@corp.com")
-        friday = datetime(2026, 3, 20, 14, 0, tzinfo=dt_timezone.utc)
+        box = _box(daily_limit=10)
+        deal = _ready(campaign, "lead@corp.com")
+        self._run(deal, box)
 
-        with patch("openoutreach.emails.tasks.send.timezone.now", return_value=friday):
-            self._run(fake_session)
+        message = ChatMessage.objects.get(deal=deal)
+        assert message.is_outgoing
+        assert message.external_id == "<mid@corp.com>"
+
+    def test_no_follow_up_clock_is_armed(self, campaign, operator):
+        """Nobody is chased, so a sent deal carries no schedule at all."""
+        box = _box(daily_limit=10)
+        deal = _ready(campaign, "lead@corp.com")
+        self._run(deal, box)
 
         deal.refresh_from_db()
-        assert deal.next_follow_up_at == datetime(2026, 3, 24, 14, 0, tzinfo=dt_timezone.utc)
-        assert deal.next_follow_up_at.weekday() < 5
+        assert deal.not_before is None
 
-    def test_no_bcc_on_a_freemium_campaign(self, fake_session):
+    def test_the_box_is_spaced_out_afterwards(self, campaign, operator):
+        box = _box(daily_limit=10)
+        self._run(_ready(campaign, "lead@corp.com"), box)
+
+        box.refresh_from_db()
+        assert box.next_send_at > timezone.now()
+        assert Mailbox.objects.free_for_first_email() is None
+
+    def test_no_bcc_on_a_freemium_campaign(self, campaign, operator):
         """Freemium outreach is OpenOutreach's own — the operator gets no copy."""
-        _box(daily_limit=10)
-        _ready(fake_session.campaign, "lead@corp.com")
-        fake_session.campaign.is_freemium = True
-        fake_session.campaign.save(update_fields=["is_freemium"])
+        campaign.is_freemium = True
+        campaign.save(update_fields=["is_freemium"])
+        box = _box(daily_limit=10)
 
-        send = self._run(fake_session)
+        send, _ = self._run(_ready(campaign, "lead@corp.com"), box)
 
         assert send.call_args.kwargs["bcc"] is None
 
-    def test_no_op_when_every_box_is_capped(self, fake_session):
-        box = _box(daily_limit=1)
-        spent = _ready(fake_session.campaign, "spent@corp.com")
-        _record_send(spent, box, fake_session.django_user)
-        queued = _ready(fake_session.campaign, "queued@corp.com")
+    def test_a_lead_suppressed_mid_run_is_not_emailed(self, campaign, operator):
+        """An unsubscribe can land in the seconds the agent takes to write."""
+        box = _box(daily_limit=10)
+        deal = _ready(campaign, "lead@corp.com")
 
-        send = self._run(fake_session)
+        with patch(
+            "openoutreach.core.db.summaries.materialize_profile_summary_if_missing",
+        ), patch(
+            "openoutreach.core.agents.outreach.run_outreach_agent",
+            side_effect=lambda d: (
+                type(d.lead).objects.filter(pk=d.lead.pk).update(disqualified=True)
+                or OutreachDecision(action="send_message", subject="s", message="m")
+            ),
+        ), patch(
+            "openoutreach.emails.sender.send_email",
+        ) as send:
+            next_state = send_first_email(deal, box)
+
         send.assert_not_called()
-        queued.refresh_from_db()
-        assert queued.state == DealState.READY_TO_EMAIL
+        assert next_state is None

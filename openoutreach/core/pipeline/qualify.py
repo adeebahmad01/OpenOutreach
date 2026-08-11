@@ -12,7 +12,7 @@ from openoutreach.core.ml.qualifier import BayesianQualifier
 logger = logging.getLogger(__name__)
 
 
-def fetch_qualification_candidates(session):
+def fetch_qualification_candidates(campaign):
     """Embedded, un-dealt Leads awaiting qualification in this campaign, oldest first.
 
     Invariant (convention, not DB-enforced): a disqualified lead never gets a NEW
@@ -22,12 +22,12 @@ def fetch_qualification_candidates(session):
 
     return list(
         Lead.objects.filter(disqualified=False, embedding__isnull=False)
-        .exclude(deal__campaign=session.campaign)
+        .exclude(deal__campaign=campaign)
         .order_by("creation_date")
     )
 
 
-def run_qualification(session, qualifier: BayesianQualifier, candidates=None) -> str | None:
+def run_qualification(campaign, qualifier: BayesianQualifier, candidates=None) -> str | None:
     """Qualify one unlabelled profile via the LLM. Returns profile_url or None.
 
     ``candidates`` restricts the selection to a caller-chosen subset — the consume
@@ -43,7 +43,7 @@ def run_qualification(session, qualifier: BayesianQualifier, candidates=None) ->
     from openoutreach.core.ml.qualifier import qualify_with_llm, format_prediction
 
     if candidates is None:
-        candidates = fetch_qualification_candidates(session)
+        candidates = fetch_qualification_candidates(campaign)
     if not candidates:
         return None
 
@@ -90,17 +90,16 @@ def run_qualification(session, qualifier: BayesianQualifier, candidates=None) ->
         logger.debug("No profile text for %s — skipping qualification", profile_url)
         return None
 
-    campaign = session.campaign
     label, reason = qualify_with_llm(
         candidate.profile_text,
         product_docs=campaign.product_docs,
         campaign_target=campaign.campaign_target,
     )
-    _save_qualification_result(session, qualifier, profile_url, embedding, label, reason)
+    _save_qualification_result(campaign, qualifier, profile_url, embedding, label, reason)
     return profile_url
 
 
-def _save_qualification_result(session, qualifier: BayesianQualifier, profile_url: str, embedding: np.ndarray, label: int, reason: str):
+def _save_qualification_result(campaign, qualifier: BayesianQualifier, profile_url: str, embedding: np.ndarray, label: int, reason: str):
     # LLM rejections are tracked as FAILED Deals with "Disqualified" closing reason
     # (campaign-scoped), not as Lead.disqualified (permanent account-level exclusion).
     #
@@ -116,11 +115,11 @@ def _save_qualification_result(session, qualifier: BayesianQualifier, profile_ur
 
     if label == 1:
         try:
-            promote_lead_to_deal(session, profile_url, reason=reason)
+            promote_lead_to_deal(campaign, profile_url, reason=reason)
         except ValueError as e:
             logger.warning("Cannot promote %s: %s — disqualifying", profile_url, e)
-            create_disqualified_deal(session, profile_url, reason=str(e))
+            create_disqualified_deal(campaign, profile_url, reason=str(e))
             return
         logger.info("%s %s: %s", profile_url, colored("QUALIFIED", "green", attrs=["bold"]), reason)
     else:
-        create_disqualified_deal(session, profile_url, reason=reason)
+        create_disqualified_deal(campaign, profile_url, reason=reason)

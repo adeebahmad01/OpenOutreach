@@ -24,16 +24,23 @@ class MailboxManager(models.Manager):
         """
         return sum(box.headroom_today() for box in self.all())
 
-    def least_loaded_under_cap(self):
-        """The box with the most headroom today, or None if none has any.
+    def free_for_first_email(self):
+        """The box that may send a first email right now, or None.
 
-        Reads ``headroom_today`` rather than comparing counts directly, so a box
-        the receiver has paused is excluded here exactly as it is from
-        ``remaining_today`` — the picker and the budget must not disagree about
-        which boxes can send.
+        Three conditions, all per box: headroom left today, not paused by the
+        receiver (both inside ``headroom_today``), and its spacing clock elapsed.
+        Among the free boxes the most idle one wins, so volume spreads rather than
+        piling on whichever row sorts first.
+
+        Only *first* emails come through here. A reply is not cold volume and is
+        sent regardless of cap or spacing.
         """
-        ranked = [(box, headroom) for box in self.all()
-                  if (headroom := box.headroom_today()) > 0]
+        now = timezone.now()
+        ranked = [
+            (box, headroom) for box in self.all()
+            if (box.next_send_at is None or box.next_send_at <= now)
+            and (headroom := box.headroom_today()) > 0
+        ]
         if not ranked:
             return None
         return max(ranked, key=lambda pair: pair[1])[0]
@@ -132,6 +139,12 @@ class Mailbox(models.Model):
     # idempotent, so nothing is lost.
     unsub_scan_uid = models.PositiveBigIntegerField(default=0)
     unsub_scan_uidvalidity = models.PositiveBigIntegerField(default=0)
+    # The earliest this box may send its next *first* email — the send-spacing clock,
+    # rewritten after every first contact as ``now + MIN_SEND_INTERVAL + jitter``.
+    # Per box rather than pool-wide because the daily cap is per box too: two boxes
+    # are two sending identities, and one receiver's rhythm says nothing about the
+    # other's. Replies ignore it entirely (see ``sent_today``). Null = free now.
+    next_send_at = models.DateTimeField(null=True, blank=True)
 
     objects = MailboxManager()
 
@@ -156,19 +169,31 @@ class Mailbox(models.Model):
         ).exists()
 
     def sent_today(self) -> int:
-        """Emails this box has sent since local midnight (the per-box cap ledger).
+        """People this box has *first contacted* since local midnight — the cap ledger.
 
-        Counts **outgoing ChatMessages** on this box's deals, not deals: the
-        agentic loop sends many emails per deal (opener + every follow-up reply),
-        and each outbound email is one row, so the message count is the true send
-        volume. Pre-pivot ChatMessages never carry a mailbox (``deal.mailbox`` is
-        null), so they are naturally excluded.
+        Counts each of the box's threads by its **first** outgoing message and keeps
+        the ones that begin today, then counts distinct *leads*. So a reply inside a
+        thread opened yesterday is free, and one person reached from two campaigns
+        counts once.
+
+        Cold volume is what a receiver punishes, and answering someone who wrote to
+        you is not cold volume — replying within minutes is more human, not less. The
+        ledger is derived from the message log rather than a counter, so there is
+        nothing to drift after a crash. Pre-pivot ChatMessages never carry a mailbox
+        (``deal.mailbox`` is null), so they are naturally excluded.
         """
+        from django.db.models import Min
+
         from openoutreach.chat.models import ChatMessage
 
-        return ChatMessage.objects.filter(
-            deal__mailbox=self, is_outgoing=True, creation_date__gte=_local_midnight(),
-        ).count()
+        opened_today = (
+            ChatMessage.objects
+            .filter(deal__mailbox=self, is_outgoing=True)
+            .values("deal_id", "deal__lead_id")
+            .annotate(first_sent=Min("creation_date"))
+            .filter(first_sent__gte=_local_midnight())
+        )
+        return len({row["deal__lead_id"] for row in opened_today})
 
     def headroom_today(self) -> int:
         """Sends this box has left today before hitting its measured capacity.

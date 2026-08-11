@@ -14,7 +14,7 @@ from openoutreach.crm.models import DealState
 logger = logging.getLogger(__name__)
 
 
-def find_freemium_candidate(session, qualifier) -> dict | None:
+def find_freemium_candidate(campaign, qualifier) -> dict | None:
     """Return the top-ranked embedded lead eligible for the paid email lookup.
 
     Priority: seed profiles with QUALIFIED Deals are returned first (ranked by
@@ -23,7 +23,6 @@ def find_freemium_candidate(session, qualifier) -> dict | None:
     """
     from openoutreach.crm.models import Deal, Lead
 
-    campaign = session.campaign
 
     # All embedded lead IDs
     embedded_pks = set(Lead.objects.filter(embedding__isnull=False).values_list("pk", flat=True))

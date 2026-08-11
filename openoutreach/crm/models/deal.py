@@ -8,17 +8,16 @@ class DealState(models.TextChoices):
 
     A lead is discovered and qualified without an email in hand (Lead Finder
     returns firmographics, not addresses), so the funnel first *finds* the email
-    and then *talks*. The paid lookup is a two-leg async handshake (mirroring the
-    retired connect→check_pending pair): a **submit** leg (``find_email``) fires
-    the provider job and parks the deal at FINDING_EMAIL, and a **collect** leg
-    (``collect_email``) polls that job. The job handle (``request_id``), the poll
-    backoff, and the give-up deadline all live in the collect task's *payload* —
-    never on the deal — so an in-flight lookup survives a daemon restart on the
-    persisted task row, and the deal stays clean:
+    and then *talks*. The paid lookup is a two-step async handshake: ``buy_address``
+    fires the provider job and parks the deal at FINDING_EMAIL, and ``check_lookup``
+    polls it. The job handle (``lookup_request_id``), the poll backoff
+    (``lookup_attempt`` + ``not_before``) and every other schedule this deal is
+    subject to live **on this row** — the state is the queue, so a deal carries its
+    own timing and nothing external gates it:
 
-        QUALIFIED ─(GP rank gate)─▶ READY_TO_FIND_EMAIL ─(find_email/submit)─▶
-            FINDING_EMAIL ─(collect_email/poll request_id)─▶
-                hit:  READY_TO_EMAIL ─(email opener)─▶ EMAILED ⟲ (agentic follow-up)
+        QUALIFIED ─(GP rank gate)─▶ READY_TO_FIND_EMAIL ─(buy_address)─▶
+            FINDING_EMAIL ─(check_lookup on lookup_request_id)─▶
+                hit:  READY_TO_EMAIL ─(first email)─▶ EMAILED ⟲ (agent answers replies)
                                                        ─▶ COMPLETED / FAILED
                                                        ─▶ UNSUBSCRIBED (opt-out)
                 miss: NO_EMAIL_BETTERCONTACT (provider found no address — a distinct
@@ -34,11 +33,15 @@ class DealState(models.TextChoices):
       double-charge) while the ``collect_email`` leg polls to termination. A free
       hub-cache hit skips this state entirely (READY_TO_FIND_EMAIL →
       READY_TO_EMAIL directly, no submit).
-    - **READY_TO_EMAIL** — an address exists; queued for the opener. A cheap,
-      *ungated* FIFO send-queue paced only by the per-box daily cap.
-    - **EMAILED** — the opener has been sent; the agentic follow-up loop reads
-      IMAP replies and decides send/wait/complete until the deal reaches a
-      terminal COMPLETED / FAILED. Pacing is the agent's own ``follow_up_hours``.
+    - **READY_TO_EMAIL** — an address exists; waiting for the first email. A cheap,
+      *ungated* FIFO send-queue paced only by the per-box daily cap and spacing.
+    - **EMAILED** — the first email has been sent. **Nobody is ever chased.** The
+      deal becomes actionable again only when the recipient replies: the per-mailbox
+      mail pass (``emails/inbox.py``) writes inbound ChatMessages, and a deal whose
+      newest inbound message is newer than its newest outgoing one is the queue the
+      outreach agent serves. No reply means no further email, ever — so EMAILED is
+      where most deals come to rest, and resting there costs nothing because nothing
+      iterates them.
 
     A lookup *miss* is terminal (NO_EMAIL_BETTERCONTACT — the provider resolved no
     address). It is a *distinct* terminal from FAILED so downstream work can build
@@ -46,18 +49,21 @@ class DealState(models.TextChoices):
     fit positive, so the ML labeler keeps it as label=1 — only reachability failed,
     not fit. A *couldn't-run*
     (no key / API down at submit) leaves the deal at READY_TO_FIND_EMAIL to
-    retry. A job that has not terminated is *never* abandoned: the collect leg
-    doubles its poll interval on the same request_id and the deal simply waits
+    retry. A job that has not terminated is *never* abandoned: ``check_lookup``
+    doubles ``not_before`` on the same request_id and the deal simply waits
     here, because a timeout is evidence about the provider, not about whether this
     person has a findable address. (The deadline that used to revert
     FINDING_EMAIL → READY_TO_FIND_EMAIL made an outage worse — the deal returned
-    to the pool and bought a *second* job for the same lead.) The retired connect
-    leg (READY_TO_CONNECT/PENDING/CONNECTED) was removed with the channel.
+    to the pool and bought a *second* job for the same lead.) That wait is now
+    strictly this deal's own: ``not_before`` gates one row, where the retired task
+    queue's backoff doubled as the daemon's sleep horizon and once stalled the whole
+    install for 34 hours. The retired connect leg (READY_TO_CONNECT/PENDING/
+    CONNECTED) was removed with the channel.
 
     UNSUBSCRIBED is the sibling of NO_EMAIL_BETTERCONTACT on the other side of the
     send: a fit positive whose *reachability* ended, not a verdict on the offer.
     The recipient asked to be left alone — by a mail client's unsubscribe button
-    (``emails/inbox.py:scan_unsubscribes``) or in words the follow-up agent read —
+    (the ``+unsub`` alias, found by the mail pass) or in words the agent read —
     so ``outcome`` stays blank exactly as it does on an enrichment miss, the ML
     labeler keeps the lead at label=1, and the *enforcement* lives on
     ``Lead.disqualified`` (permanent, account-level, cross-campaign) rather than
@@ -95,6 +101,11 @@ class Deal(models.Model):
         constraints = [
             models.UniqueConstraint(fields=["lead", "campaign"], name="unique_deal_per_campaign"),
         ]
+        # The cycle's one query: every step selects on state, and the two that wait
+        # narrow it by ``not_before``.
+        indexes = [
+            models.Index(fields=["state", "not_before"], name="deal_state_not_before_idx"),
+        ]
 
     lead = models.ForeignKey("Lead", on_delete=models.CASCADE)
     campaign = models.ForeignKey(
@@ -129,13 +140,23 @@ class Deal(models.Model):
     # In-Reply-To/References carries it, so the IMAP reader matches replies back to
     # this exact campaign/deal (the disambiguator when one lead is emailed across
     # two campaigns). Null until sent.
-    email_message_id = models.CharField(max_length=300, blank=True, default="")
-    # When the agentic email follow-up loop should next touch this EMAILED deal
-    # (read replies + let the agent decide send/wait/complete). The agent owns
-    # the pace: each run stamps ``now + decision.follow_up_hours``; the opener
-    # seeds it on the first send. The scheduler drains EMAILED deals whose clock
-    # is due. Null until the deal reaches EMAILED.
-    next_follow_up_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    # Indexed because the mail pass looks every inbound message up by it: the walk
+    # reads the box, not the deals, so this is the join back from a reply's
+    # References header to the thread it belongs to.
+    email_message_id = models.CharField(max_length=300, blank=True, default="", db_index=True)
+    # "Do not touch this deal before this time" — the only schedule a deal carries,
+    # and it gates *this row alone*. Null means always eligible. Written by the two
+    # steps that need to wait: the lookup poll's backoff (``check_lookup``) and a
+    # deferred address purchase when there is no room to email the result today.
+    # There is deliberately no follow-up clock here: nobody is chased, so the only
+    # thing that re-opens an EMAILED deal is an inbound message.
+    not_before = models.DateTimeField(null=True, blank=True, db_index=True)
+    # The in-flight paid lookup: the provider's job handle and how many times it has
+    # been polled (the backoff exponent). Both live here rather than in an external
+    # row, so a restart resumes the job from the deal itself and a stalled provider
+    # can never hold up anything but this lead.
+    lookup_request_id = models.CharField(max_length=64, blank=True, default="")
+    lookup_attempt = models.PositiveSmallIntegerField(default=0)
     profile_summary = models.JSONField(null=True, blank=True, default=None)
     chat_summary = models.JSONField(null=True, blank=True, default=None)
     creation_date = models.DateTimeField(default=timezone.now)

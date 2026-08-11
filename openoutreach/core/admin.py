@@ -1,11 +1,7 @@
 # openoutreach/core/admin.py
 from django.contrib import admin
 
-from openoutreach.core.conf import QUOTA_WINDOW_DAYS
-from openoutreach.core.models import (
-    Campaign, Keyword, QueryNode, SiteConfig, Task,
-)
-from openoutreach.core.quota import realized_share
+from openoutreach.core.models import Campaign, Keyword, QueryNode, SiteConfig
 from openoutreach.discovery import describe_filters
 
 
@@ -22,9 +18,7 @@ class SiteConfigAdmin(admin.ModelAdmin):
 
 @admin.register(Campaign)
 class CampaignAdmin(admin.ModelAdmin):
-    list_display = (
-        "name", "booking_link", "is_freemium", "action_fraction", "opener_share", "phase",
-    )
+    list_display = ("name", "booking_link", "is_freemium", "phase")
     filter_horizontal = ("users",)
 
     @admin.display(description="phase")
@@ -38,15 +32,6 @@ class CampaignAdmin(admin.ModelAdmin):
         """
         n = len(obj.anchor_profiles or [])
         return f"cold ({n} anchor{'' if n == 1 else 's'})" if n else "learning"
-
-    @admin.display(description=f"openers ({QUOTA_WINDOW_DAYS}d)")
-    def opener_share(self, obj):
-        """Realized share of recent openers, next to the target it's held to.
-
-        The declared ``action_fraction`` and the actual split had no reason to
-        agree until the quota landed, and nothing displayed the gap.
-        """
-        return f"{100 * realized_share(obj):.0f}%"
 
 
 @admin.register(QueryNode)
@@ -92,14 +77,3 @@ class KeywordAdmin(admin.ModelAdmin):
     def node_count(self, obj):
         """How many query nodes carry this keyword."""
         return obj.nodes.count()
-
-
-@admin.register(Task)
-class TaskAdmin(admin.ModelAdmin):
-    list_display = ("task_type", "status", "scheduled_at", "payload", "created_at")
-    list_filter = ("task_type", "status")
-    readonly_fields = (
-        "task_type", "status", "scheduled_at", "payload",
-        "created_at", "started_at", "completed_at",
-    )
-    date_hierarchy = "scheduled_at"

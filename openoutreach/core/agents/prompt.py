@@ -11,6 +11,7 @@ from __future__ import annotations
 import jinja2
 
 from openoutreach.core.conf import PROMPTS_DIR
+from openoutreach.core.operator import seller_full_name
 
 _ENV = jinja2.Environment(loader=jinja2.FileSystemLoader(str(PROMPTS_DIR)))
 
@@ -20,16 +21,11 @@ def render(template_name: str, **context) -> str:
     return _ENV.get_template(template_name).render(**context)
 
 
-def base_context(session, deal) -> dict:
+def base_context(deal) -> dict:
     """The channel-agnostic prompt variables shared by every outreach entrypoint."""
     campaign = deal.campaign
-    self_prof = session.self_profile
-    self_name = (
-        f"{self_prof.get('first_name', '')} {self_prof.get('last_name', '')}".strip()
-        or session.django_user.username
-    )
     return {
-        "self_name": self_name,
+        "self_name": seller_full_name(),
         "product_docs": campaign.product_docs or "",
         "campaign_target": campaign.campaign_target or "",
         "booking_link": campaign.booking_link or "",

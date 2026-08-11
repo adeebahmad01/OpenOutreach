@@ -18,6 +18,7 @@ import logging
 import requests
 
 from openoutreach.core.models import SiteConfig
+from openoutreach.core.operator import get_active_user
 from openoutreach.core.geo import is_eea_located
 from openoutreach.core import version
 
@@ -66,7 +67,7 @@ def resolve(lead) -> str | None:
     return email
 
 
-def contribute(session, lead, emails: list[str], origin: str) -> None:
+def contribute(lead, emails: list[str], origin: str) -> None:
     """Give *lead*'s email(s) to the store — best-effort, non-EU only.
 
     ``origin`` records where the address came from (``ORIGIN_BETTERCONTACT`` /
@@ -104,7 +105,7 @@ def contribute(session, lead, emails: list[str], origin: str) -> None:
     if config.contacts_api_token:
         _send(config, "contribute", record, lead, headers=_auth(config.contacts_api_token))
     else:
-        _register(config, session, record, lead)
+        _register(config, record, lead)
 
 
 def _attach_embedding(lead, record: dict) -> None:
@@ -121,14 +122,14 @@ def _attach_embedding(lead, record: dict) -> None:
     record["embedding"] = lead.embedding_array.tolist()
 
 
-def _register(config: SiteConfig, session, record: dict, lead) -> None:
+def _register(config: SiteConfig, record: dict, lead) -> None:
     """Mint + persist the operator token via the folded first contribution.
 
     Keyed to the operator's own email — the single operator identity the hub uses
     for "one token per operator" and as the provenance / revocation handle.
     """
     body = {
-        "operator_email": session.django_user.email,
+        "operator_email": get_active_user().email,
         **record,
     }
     response = _send(config, "register", body, lead)

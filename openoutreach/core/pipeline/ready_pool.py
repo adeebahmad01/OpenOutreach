@@ -35,7 +35,7 @@ from openoutreach.crm.models import DealState
 logger = logging.getLogger(__name__)
 
 
-def promote_to_ready(session, qualifier: BayesianQualifier) -> int:
+def promote_to_ready(campaign, qualifier: BayesianQualifier) -> int:
     """Promote QUALIFIED profiles at or above the GP confidence gate to
     READY_TO_FIND_EMAIL.
 
@@ -47,7 +47,7 @@ def promote_to_ready(session, qualifier: BayesianQualifier) -> int:
     from openoutreach.crm.models import Lead
 
     threshold = CAMPAIGN_CONFIG["min_gp_confidence"]
-    profiles = get_qualified_profiles(session)
+    profiles = get_qualified_profiles(campaign)
     if not profiles:
         return 0
 
@@ -73,15 +73,15 @@ def promote_to_ready(session, qualifier: BayesianQualifier) -> int:
         if prob >= threshold:
             pid = p.get("profile_url", "?")
             logger.info("%s READY_TO_FIND_EMAIL (P(f>0.5)=%.3f)", pid, prob)
-            set_profile_state(session, p["profile_url"], DealState.READY_TO_FIND_EMAIL.value)
+            set_profile_state(campaign, p["profile_url"], DealState.READY_TO_FIND_EMAIL.value)
             promoted += 1
 
     return promoted
 
 
-def find_ready_candidate(session, qualifier: BayesianQualifier) -> dict | None:
+def find_ready_candidate(campaign, qualifier: BayesianQualifier) -> dict | None:
     """Return the top-ranked READY_TO_FIND_EMAIL profile, or None."""
-    profiles = get_ready_to_find_email_profiles(session)
+    profiles = get_ready_to_find_email_profiles(campaign)
     if not profiles:
         return None
 

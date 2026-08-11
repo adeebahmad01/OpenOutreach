@@ -1,24 +1,33 @@
 # openoutreach/emails/inbox.py
-"""IMAP reply-reader — feeds the agentic follow-up loop its inbound messages.
+"""The mail pass — one IMAP walk per mailbox, for everything that arrives in it.
 
-Reads replies to a deal's email thread over IMAP, upserts them as incoming
-``ChatMessage`` rows, and folds the new ones into the Deal's ``chat_summary``.
-The follow-up agent then reads those ChatMessage rows — the inbound side of the
-same conversation store its outgoing replies are written to.
+Two kinds of inbound mail matter, and they used to be read by two different
+readers on two different schedules:
 
-Threading: the opener's Message-ID (``Deal.email_message_id``) is the immutable
-thread root; a reply carries it in ``References``/``In-Reply-To``, so a single
-IMAP header search over the deal's own box finds this thread's replies. Dedup is
-by the reply's own Message-ID (``ChatMessage.external_id``), idempotent without
-trusting IMAP ``\\Seen`` flags.
+- a **reply**, which threads (its ``References``/``In-Reply-To`` carries the
+  opener's Message-ID) and becomes an inbound ``ChatMessage`` on that deal;
+- an **opt-out**, which does *not* thread — a mail client's unsubscribe button
+  mints a fresh message with no threading headers at all — and is found instead by
+  the ``+unsub`` alias it was addressed to.
 
-The second reader here, ``scan_unsubscribes``, is deliberately *not* threaded and
-*not* per-deal. A mail client's unsubscribe button mints a fresh message with no
-``References`` and no ``In-Reply-To``, so the thread search above can never see
-it — it has to be found box-wide, by the ``+unsub`` alias it was addressed to.
-The two readers cover each other: this one is robust because the mail comes from
-the address we mailed, and a *worded* unsubscribe threads normally and reaches
-the follow-up agent as a ``suppress`` decision instead.
+Both are now one pass over the UIDs above ``Mailbox.unsub_scan_uid``. The reply
+reader used to log into IMAP and run a header search **per deal**, which meant the
+cost of asking "did anyone answer?" grew with the number of open threads and was
+paid before the daemon knew whether there was anything to answer. Reading the box
+once instead makes that cost the size of the *new mail*, which is what it actually
+is — and it is the only reason an install can leave every unanswered thread open
+forever without paying for them.
+
+Nothing here decides anything. The pass writes rows; a deal whose newest inbound
+message is newer than its newest outgoing one is what the cycle then serves.
+
+**The cursor now gates replies as well as opt-outs.** That is safe in both
+directions: a changed ``UIDVALIDITY`` restarts the walk from zero rather than
+trusting a cursor that now points at unrelated mail, and every write is an upsert
+keyed on ``(deal, Message-ID)``, so re-reading a message can only rewrite the row
+it already wrote. The cursor advances to ``UIDNEXT - 1`` — the box's own high-water
+mark — rather than to the last *interesting* message, because the interesting ones
+are rare and anchoring on them would re-walk the whole tail every pass.
 """
 from __future__ import annotations
 
@@ -33,90 +42,188 @@ logger = logging.getLogger(__name__)
 
 IMAP_TIMEOUT_SECONDS = 30
 
+# Headers a plus-addressed alias can land in. Clients rewrite recipients freely and
+# some providers only record the tagged address in a delivery header, so an opt-out
+# is looked for in all of them rather than in ``To`` alone.
+_RECIPIENT_HEADERS = ("To", "Cc", "Delivered-To", "X-Original-To", "Envelope-To")
 
-def sync_inbox(session, deal) -> None:
-    """Read this deal's email replies over IMAP and fold new ones into its summary.
+# Message-IDs as they appear inside References / In-Reply-To.
+_MESSAGE_ID = re.compile(r"<[^<>@\s]+@[^<>@\s]+>")
 
-    No-op until the deal has been emailed (a bound ``mailbox`` + a thread root):
-    an un-emailed deal has no thread to read. Side-effects only — the agent reads
-    the resulting ChatMessage rows, mirroring ``sync_conversation``.
+
+def read_mail(mailbox) -> tuple[int, int]:
+    """Walk this box's new mail once. Returns ``(replies stored, leads suppressed)``.
+
+    Best-effort: an unreachable box logs and returns ``(0, 0)`` with its cursor
+    untouched, so nothing is skipped when the network is at fault rather than the
+    mail. The cursor only moves after the walk completes.
     """
-    if not deal.mailbox_id or not deal.email_message_id:
-        return
-
-    new_messages = _fetch_replies(session, deal)
-    if not new_messages:
-        return
-
-    from openoutreach.core.db.summaries import seller_name_from, update_chat_summary
-
-    update_chat_summary(deal, new_messages, seller_name=seller_name_from(session))
-
-
-# ── Unsubscribe scan ──────────────────────────────────────────────
-
-
-def scan_unsubscribes(mailbox) -> int:
-    """Suppress the sender of every new INBOX message addressed to the ``+unsub`` alias.
-
-    Box-wide and resumable: the scan reads only UIDs above ``unsub_scan_uid``, so
-    a mailbox with years of history is walked once and every later pass looks at
-    the handful of messages that arrived since. The cursor is advanced to the
-    box's current ``UIDNEXT - 1`` rather than to the last *matching* UID — the
-    matches are rare, and anchoring on them would re-search the whole tail on
-    every pass.
-
-    Returns the number of leads suppressed. Best-effort: an unreachable box logs
-    and yields 0 with the cursor untouched, so nothing is skipped when the network
-    is at fault rather than the mail.
-    """
-    from openoutreach.core.db.leads import suppress_email
-    from openoutreach.emails.sender import unsubscribe_address
-
-    alias = unsubscribe_address(mailbox.from_address)
     imap = imaplib.IMAP4_SSL(mailbox.imap_host, mailbox.imap_port, timeout=IMAP_TIMEOUT_SECONDS)
     try:
         imap.login(mailbox.username, mailbox.password)
         uidvalidity, uidnext = _uid_state(imap)
         if uidvalidity is None:
-            logger.warning("unsub scan: %s did not report UIDVALIDITY", mailbox.from_address)
-            return 0
+            logger.warning("mail pass: %s did not report UIDVALIDITY", mailbox.from_address)
+            return 0, 0
         start = _resume_from(mailbox, uidvalidity)
         status, _ = imap.select("INBOX", readonly=True)
         if status != "OK":
-            logger.warning("unsub scan: cannot select INBOX on %s", mailbox.from_address)
-            return 0
-        senders = _unsubscribe_senders(imap, alias, start)
+            logger.warning("mail pass: cannot select INBOX on %s", mailbox.from_address)
+            return 0, 0
+        replies, suppressed = _walk(imap, mailbox, start)
     except (imaplib.IMAP4.error, OSError) as exc:
-        logger.warning("unsub scan: could not read %s (%s)", mailbox.from_address, exc)
-        return 0
+        logger.warning("mail pass: could not read %s (%s)", mailbox.from_address, exc)
+        return 0, 0
     finally:
         _logout(imap)
 
-    suppressed = sum(suppress_email(sender) for sender in senders)
-    _advance_scan_cursor(mailbox, uidnext, uidvalidity)
-    logger.info("unsub scan: %s examined UIDs >%d, %d opt-out(s), %d lead(s) suppressed",
-                mailbox.from_address, start, len(senders), suppressed)
-    return suppressed
+    _advance_cursor(mailbox, uidnext, uidvalidity)
+    if replies or suppressed:
+        logger.info("mail pass: %s read UIDs >%d — %d reply(ies), %d suppressed",
+                    mailbox.from_address, start, replies, suppressed)
+    else:
+        logger.debug("mail pass: %s read UIDs >%d — nothing new", mailbox.from_address, start)
+    return replies, suppressed
+
+
+def _walk(imap, mailbox, start_uid: int) -> tuple[int, int]:
+    """Classify every message above *start_uid*: opt-out, reply to a thread, or neither.
+
+    Headers are read first and the body is fetched only for a message that turns out
+    to be a reply we are tracking — most of a real inbox is neither, and paying for
+    those bodies is what would make walking the whole box expensive.
+    """
+    from openoutreach.emails.sender import unsubscribe_address
+
+    alias = unsubscribe_address(mailbox.from_address)
+    replies = suppressed = 0
+
+    for uid in _new_uids(imap, start_uid):
+        headers = _headers_of(imap, uid)
+        if headers is None:
+            continue
+        if _addressed_to_alias(headers, alias):
+            suppressed += _suppress_sender(headers)
+            continue
+        deal = _deal_for_thread(mailbox, headers)
+        if deal is None:
+            continue
+        if _store_reply(deal, mailbox, _message_of(imap, uid) or headers):
+            replies += 1
+
+    return replies, suppressed
+
+
+# ── Classification ────────────────────────────────────────────────
+
+
+def _addressed_to_alias(msg: Message, alias: str) -> bool:
+    """True when the ``+unsub`` alias appears in any recipient header."""
+    alias = alias.lower()
+    return any(
+        alias in (msg.get(header) or "").lower() for header in _RECIPIENT_HEADERS
+    )
+
+
+def _suppress_sender(msg: Message) -> int:
+    """Suppress every lead holding this message's From address. Returns leads suppressed."""
+    from openoutreach.core.db.leads import suppress_email
+
+    sender = parseaddr(msg.get("From", ""))[1].lower()
+    if not sender:
+        return 0
+    return suppress_email(sender)
+
+
+def _deal_for_thread(mailbox, msg: Message):
+    """The Deal this message replies to, or None.
+
+    Matches the thread root (``Deal.email_message_id``, the opener's Message-ID)
+    against every id in ``References``/``In-Reply-To``. Scoped to this box's own
+    deals, so a message that happens to quote an id we sent from a *different*
+    mailbox is not folded into the wrong thread.
+    """
+    from openoutreach.crm.models import Deal
+
+    ids = _referenced_ids(msg)
+    if not ids:
+        return None
+    return (
+        Deal.objects.filter(mailbox=mailbox, email_message_id__in=ids)
+        .select_related("lead", "campaign", "mailbox")
+        .first()
+    )
+
+
+def _referenced_ids(msg: Message) -> list[str]:
+    """Every Message-ID referenced by this message, with and without angle brackets.
+
+    Both forms are returned because what we stored is whatever the SMTP server
+    handed back at send time, and servers differ on the brackets.
+    """
+    raw = " ".join(filter(None, (msg.get("References"), msg.get("In-Reply-To"))))
+    bracketed = _MESSAGE_ID.findall(raw)
+    return bracketed + [mid.strip("<>") for mid in bracketed]
+
+
+# ── Message → ChatMessage ─────────────────────────────────────────
+
+
+def _store_reply(deal, mailbox, msg: Message) -> bool:
+    """Upsert an inbound reply as a ChatMessage. Returns True only if newly created.
+
+    Skips our own outbound copies (From == the sending box) and messages with no
+    Message-ID or empty body. Dedup key is ``(deal, external_id=reply Message-ID)``,
+    so the walk is idempotent without trusting IMAP ``\\Seen`` flags.
+    """
+    from openoutreach.chat.models import ChatMessage
+    from openoutreach.core.operator import get_active_user
+
+    message_id = (msg.get("Message-ID") or "").strip()
+    from_addr = parseaddr(msg.get("From", ""))[1].lower()
+    if not message_id or from_addr == (mailbox.from_address or "").lower():
+        return False
+
+    body = _plain_text_body(msg)
+    if not body:
+        return False
+
+    sent_at = _sent_at(msg)
+    _, created = ChatMessage.objects.update_or_create(
+        deal=deal,
+        external_id=message_id,
+        defaults={
+            "content": body,
+            "is_outgoing": False,
+            "owner": get_active_user(),
+            **({"creation_date": sent_at} if sent_at else {}),
+        },
+    )
+    if created:
+        logger.info("reply from %s on deal %s", from_addr, deal.pk)
+    return created
+
+
+# ── UID cursor ────────────────────────────────────────────────────
 
 
 def _resume_from(mailbox, uidvalidity: int) -> int:
     """The UID to resume above — 0 when the server has reissued its UIDs.
 
-    A changed ``UIDVALIDITY`` means the stored cursor now points at unrelated
-    mail. Restarting the scan costs one full pass over a box; trusting the stale
-    cursor would silently skip every opt-out below it, forever.
+    A changed ``UIDVALIDITY`` means the stored cursor now points at unrelated mail.
+    Restarting costs one full pass over a box; trusting the stale cursor would
+    silently skip every reply and every opt-out below it, forever.
     """
     if uidvalidity == mailbox.unsub_scan_uidvalidity:
         return mailbox.unsub_scan_uid
     if mailbox.unsub_scan_uidvalidity:
-        logger.info("unsub scan: %s UIDVALIDITY %d → %d, rescanning from the start",
+        logger.info("mail pass: %s UIDVALIDITY %d → %d, rereading from the start",
                     mailbox.from_address, mailbox.unsub_scan_uidvalidity, uidvalidity)
     return 0
 
 
-def _advance_scan_cursor(mailbox, uidnext: int, uidvalidity: int) -> None:
-    """Persist the scan's new resume point — everything below ``UIDNEXT`` is read."""
+def _advance_cursor(mailbox, uidnext: int, uidvalidity: int) -> None:
+    """Persist the walk's new resume point — everything below ``UIDNEXT`` is read."""
     mailbox.unsub_scan_uid = max(mailbox.unsub_scan_uid, uidnext - 1)
     mailbox.unsub_scan_uidvalidity = uidvalidity
     mailbox.save(update_fields=["unsub_scan_uid", "unsub_scan_uidvalidity"])
@@ -126,7 +233,7 @@ def _uid_state(imap) -> tuple[int | None, int]:
     """``(UIDVALIDITY, UIDNEXT)`` for INBOX, or ``(None, 0)`` if the server won't say.
 
     Read with STATUS before SELECT so both numbers are in hand before any message
-    is looked at: the scan's resume point and its new cursor are decided from the
+    is looked at: the walk's resume point and its new cursor are decided from the
     same snapshot of the box. The response is an unordered attribute list, so each
     number is picked out by name rather than by position.
     """
@@ -147,87 +254,40 @@ def _status_int(text: str, attribute: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def _unsubscribe_senders(imap, alias: str, start_uid: int) -> list[str]:
-    """Sender addresses of messages above *start_uid* addressed to the unsub *alias*.
-
-    ``HEADER To <alias>`` substring-matches the alias wherever it sits in the To
-    header, which is what makes this work across clients that rewrite the display
-    name. A server answering ``start:*`` when nothing is above ``start`` returns
-    the newest message instead of an empty set — harmless, since re-examining it
-    only ever re-suppresses an address already suppressed.
-    """
-    status, data = imap.uid("SEARCH", None, "UID", f"{start_uid + 1}:*", "HEADER", "To", alias)
-    if status != "OK" or not data or not data[0]:
-        return []
-    return [addr for uid in data[0].split() if (addr := _sender_of(imap, uid))]
-
-
-def _sender_of(imap, uid) -> str:
-    """The lowercased From address of one message, headers only; "" if unreadable."""
-    status, data = imap.uid("FETCH", uid, "(BODY.PEEK[HEADER.FIELDS (FROM)])")
-    if status != "OK":
-        return ""
-    for item in data:
-        if isinstance(item, tuple):
-            raw = email.message_from_bytes(item[1]).get("From", "")
-            return parseaddr(raw)[1].lower()
-    return ""
-
-
 # ── IMAP transport ────────────────────────────────────────────────
 
 
-def _fetch_replies(session, deal) -> list:
-    """Fetch this thread's replies from the deal's box and upsert incoming rows.
+def _new_uids(imap, start_uid: int) -> list:
+    """UIDs strictly above *start_uid*.
 
-    Returns the newly-created ``ChatMessage`` rows in chronological order, so the
-    caller can incrementally update ``chat_summary``.
+    A server answering ``start:*`` when nothing is above ``start`` returns the
+    newest message instead of an empty set, so the result is filtered rather than
+    trusted — otherwise every quiet pass would re-read the same message.
     """
-    mailbox = deal.mailbox
-    root_id = deal.email_message_id
-
-    imap = imaplib.IMAP4_SSL(mailbox.imap_host, mailbox.imap_port, timeout=IMAP_TIMEOUT_SECONDS)
-    try:
-        imap.login(mailbox.username, mailbox.password)
-        imap.select("INBOX")
-        nums = _search_thread(imap, root_id)
-        new_messages = [
-            row
-            for num in nums
-            if (row := _upsert_reply(session, deal, mailbox, _fetch_message(imap, num))) is not None
-        ]
-    finally:
-        _logout(imap)
-
-    new_messages.sort(key=lambda m: m.creation_date or m.pk)
-    logger.debug("inbox: %d reply(ies) matched thread %s (%d new)",
-                 len(nums), root_id, len(new_messages))
-    return new_messages
-
-
-def _search_thread(imap, root_id: str) -> list:
-    """Message sequence numbers of INBOX replies that reference the thread root.
-
-    Matches the root Message-ID in either ``References`` or ``In-Reply-To`` (a
-    direct reply to the opener carries it in both). Searches on the id core
-    without angle brackets, which HEADER substring-matches ``<core>`` in the
-    reply's header regardless of surrounding ids.
-    """
-    core = root_id.strip("<>")
-    status, data = imap.search(
-        None, "OR", "HEADER", "References", core, "HEADER", "In-Reply-To", core,
-    )
+    status, data = imap.uid("SEARCH", None, "UID", f"{start_uid + 1}:*")
     if status != "OK" or not data or not data[0]:
         return []
-    return data[0].split()
+    return [uid for uid in data[0].split() if int(uid) > start_uid]
 
 
-def _fetch_message(imap, num) -> Message:
-    """Fetch and parse one message by sequence number."""
-    status, data = imap.fetch(num, "(RFC822)")
-    if status != "OK" or not data or not data[0]:
-        return email.message_from_bytes(b"")
-    return email.message_from_bytes(data[0][1])
+def _headers_of(imap, uid) -> Message | None:
+    """One message's headers, or None if unreadable. ``PEEK`` so nothing is marked read."""
+    return _fetch_part(imap, uid, "(BODY.PEEK[HEADER])")
+
+
+def _message_of(imap, uid) -> Message | None:
+    """One whole message, or None if unreadable."""
+    return _fetch_part(imap, uid, "(BODY.PEEK[])")
+
+
+def _fetch_part(imap, uid, spec: str) -> Message | None:
+    status, data = imap.uid("FETCH", uid, spec)
+    if status != "OK" or not data:
+        return None
+    for item in data:
+        if isinstance(item, tuple):
+            return email.message_from_bytes(item[1])
+    return None
 
 
 def _logout(imap) -> None:
@@ -242,38 +302,7 @@ def _logout(imap) -> None:
         pass
 
 
-# ── Message → ChatMessage ─────────────────────────────────────────
-
-
-def _upsert_reply(session, deal, mailbox, msg: Message):
-    """Upsert an inbound reply as a ChatMessage; return the row only if newly created.
-
-    Skips our own outbound copies (From == the sending box) and messages with no
-    Message-ID or empty body. Dedup key is ``(deal, external_id=reply Message-ID)``.
-    """
-    from openoutreach.chat.models import ChatMessage
-
-    message_id = (msg.get("Message-ID") or "").strip()
-    from_addr = parseaddr(msg.get("From", ""))[1].lower()
-    if not message_id or from_addr == (mailbox.from_address or "").lower():
-        return None
-
-    body = _plain_text_body(msg)
-    if not body:
-        return None
-
-    sent_at = _sent_at(msg)
-    obj, created = ChatMessage.objects.update_or_create(
-        deal=deal,
-        external_id=message_id,
-        defaults={
-            "content": body,
-            "is_outgoing": False,
-            "owner": session.django_user,
-            **({"creation_date": sent_at} if sent_at else {}),
-        },
-    )
-    return obj if created else None
+# ── Body parsing ──────────────────────────────────────────────────
 
 
 def _sent_at(msg: Message):

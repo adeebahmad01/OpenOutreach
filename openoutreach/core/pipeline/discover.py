@@ -157,7 +157,7 @@ def _handle_empty(node, offset: int, page) -> str | None:
     return verdict
 
 
-def discover(session, qualifier=None) -> int:
+def discover(campaign, qualifier=None) -> int:
     """Fire frontier nodes until one returns leads. Returns the count of new Leads.
 
     ``0`` means the frontier is spanned (nothing unfired and nothing left to deepen) or a
@@ -173,7 +173,6 @@ def discover(session, qualifier=None) -> int:
     from openoutreach.discovery import step_line
     from openoutreach.emails import bettercontact
 
-    campaign = session.campaign
     if campaign.is_freemium:
         return 0
     if not bettercontact.is_configured():

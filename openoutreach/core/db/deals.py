@@ -26,13 +26,13 @@ _STATE_LOG_STYLE = {
 }
 
 
-def _deals_at_state(session, state: DealState) -> list:
+def _deals_at_state(campaign, state: DealState) -> list:
     """Return profile dicts for all Deals at the given state in this campaign."""
     from openoutreach.crm.models import Deal
 
     qs = Deal.objects.filter(
         state=state,
-        campaign=session.campaign,
+        campaign=campaign,
     ).select_related("lead")
     return [d.lead.to_profile_dict() for d in qs]
 
@@ -55,7 +55,7 @@ def _existing_deal_or_lead(profile_url: str, campaign):
 # ── State transitions ──
 
 
-def set_profile_state(session, profile_url: str, new_state: str, reason: str = "", outcome: str = "", log: bool = True):
+def set_profile_state(campaign, profile_url: str, new_state: str, reason: str = "", outcome: str = "", log: bool = True):
     """Move the Deal to the corresponding state.
 
     Campaign-scoped: only finds Deals in the current campaign.
@@ -69,7 +69,7 @@ def set_profile_state(session, profile_url: str, new_state: str, reason: str = "
     from openoutreach.crm.models import Deal
 
     deal = (
-        Deal.objects.filter(lead__profile_url=profile_url, campaign=session.campaign)
+        Deal.objects.filter(lead__profile_url=profile_url, campaign=campaign)
         .select_related("lead")
         .first()
     )
@@ -101,7 +101,7 @@ def set_profile_state(session, profile_url: str, new_state: str, reason: str = "
 # ── State queries ──
 
 
-def get_qualified_profiles(session) -> list:
+def get_qualified_profiles(campaign) -> list:
     """QUALIFIED deals awaiting the rank gate.
 
     The single find-email-pool chokepoint: ``ready_pool`` promotes above the GP
@@ -111,16 +111,16 @@ def get_qualified_profiles(session) -> list:
 
     qs = Deal.objects.filter(
         state=DealState.QUALIFIED,
-        campaign=session.campaign,
+        campaign=campaign,
     ).select_related("lead")
     return [d.lead.to_profile_dict() for d in qs]
 
 
-def get_ready_to_find_email_profiles(session) -> list:
-    return _deals_at_state(session, DealState.READY_TO_FIND_EMAIL)
+def get_ready_to_find_email_profiles(campaign) -> list:
+    return _deals_at_state(campaign, DealState.READY_TO_FIND_EMAIL)
 
 
-def get_emailable_deals(session):
+def get_emailable_deals(campaign):
     """The email pool — Deals queued for their single Layer-1 email, oldest first.
 
     Symmetric with the connect pools above: each reads exactly one FSM state. The
@@ -134,7 +134,7 @@ def get_emailable_deals(session):
 
     return (
         Deal.objects.filter(
-            campaign=session.campaign,
+            campaign=campaign,
             state=DealState.READY_TO_EMAIL,
             lead__disqualified=False,
         )
@@ -147,7 +147,7 @@ def get_emailable_deals(session):
 
 
 @transaction.atomic
-def create_disqualified_deal(session, profile_url: str, reason: str = ""):
+def create_disqualified_deal(campaign, profile_url: str, reason: str = ""):
     """Create a FAILED Deal with 'Disqualified' closing reason for an LLM-rejected lead.
 
     LLM qualification rejections are tracked as FAILED Deals (campaign-scoped),
@@ -155,7 +155,6 @@ def create_disqualified_deal(session, profile_url: str, reason: str = ""):
     """
     from openoutreach.crm.models import Outcome
 
-    campaign = session.campaign
     lead, existing = _existing_deal_or_lead(profile_url, campaign)
     if existing:
         return existing
@@ -166,7 +165,7 @@ def create_disqualified_deal(session, profile_url: str, reason: str = ""):
     deal = _create_deal(
         lead=lead,
         state=DealState.FAILED,
-        session=session,
+        campaign=campaign,
         outcome=Outcome.WRONG_FIT,
         reason=reason,
     )
@@ -176,9 +175,8 @@ def create_disqualified_deal(session, profile_url: str, reason: str = ""):
     return deal
 
 
-def create_freemium_deal(session, profile_url: str):
+def create_freemium_deal(campaign, profile_url: str):
     """Create a QUALIFIED Deal in the freemium campaign for a candidate lead."""
-    campaign = session.campaign
     lead, existing = _existing_deal_or_lead(profile_url, campaign)
     if existing:
         return existing
@@ -187,8 +185,8 @@ def create_freemium_deal(session, profile_url: str):
 
     deal = _create_deal(
         lead=lead,
+        campaign=campaign,
         state=DealState.QUALIFIED,
-        session=session,
     )
 
     logger.info("%s %s", profile_url, colored("FREEMIUM DEAL", "cyan", attrs=["bold"]))
@@ -196,7 +194,7 @@ def create_freemium_deal(session, profile_url: str):
 
 
 def _create_deal(
-    *, lead, state, session,
+    *, lead, state, campaign,
     outcome="", reason="",
 ):
     """Shared Deal creation with common defaults."""
@@ -204,7 +202,7 @@ def _create_deal(
 
     return Deal.objects.create(
         lead=lead,
-        campaign=session.campaign,
+        campaign=campaign,
         state=state,
         outcome=outcome,
         reason=reason,

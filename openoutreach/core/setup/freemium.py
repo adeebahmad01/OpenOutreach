@@ -31,7 +31,6 @@ def import_freemium_campaign(kit_config: dict):
             "campaign_target": kit_config["campaign_target"],
             "booking_link": kit_config["booking_link"],
             "is_freemium": True,
-            "action_fraction": kit_config["action_fraction"],
         },
     )
 
@@ -39,12 +38,11 @@ def import_freemium_campaign(kit_config: dict):
     for user in User.objects.filter(is_active=True, is_staff=True):
         campaign.users.add(user)
 
-    logger.info("[Freemium] Campaign imported: %s (action_fraction=%.2f)",
-               campaign_name, kit_config["action_fraction"])
+    logger.info("[Freemium] Campaign imported: %s", campaign_name)
     return campaign
 
 
-def seed_profiles(session, kit_config: dict):
+def seed_profiles(campaign, kit_config: dict):
     """Seed a Lead + QUALIFIED freemium Deal for each profile listed in kit config.
 
     The seed's ``profile_url`` is an opaque identity key (never fetched).
@@ -62,4 +60,4 @@ def seed_profiles(session, kit_config: dict):
     for slug in seed_slugs:
         url = profile_url_from_slug(slug)
         Lead.objects.get_or_create(profile_url=url)
-        create_freemium_deal(session, url)
+        create_freemium_deal(campaign, url)

@@ -7,10 +7,13 @@ render from one template (``outreach_agent.j2``) which branches on the only thin
 that actually differs: whether a thread exists yet.
 
 - **first touch** (no thread): the agent must ``send_message`` and must supply a
-  ``subject``. ``emails/tasks/send.py`` sends it and records the thread root.
-- **in thread**: replies are read from the mailbox first, then the agent picks
-  ``send_message`` / ``wait`` / ``mark_completed`` / ``suppress``.
-  ``emails/tasks/follow_up.py`` executes the choice.
+  ``subject``. ``emails/steps/send.py`` sends it and records the thread root.
+- **in thread**: the agent only ever runs on a thread the lead has *replied* to —
+  the mail pass has already written the reply — so it picks ``send_message`` /
+  ``mark_completed`` / ``suppress``. ``emails/steps/reply.py`` executes the choice.
+
+There is no ``wait`` and no follow-up interval, because nobody is chased: silence
+is not a decision the agent gets to make, it is simply the absence of work.
 
 ``suppress`` is the *worded* unsubscribe — "take me off your list", "stop
 emailing me". It threads like any other reply, so the box-wide alias scan in
@@ -40,7 +43,7 @@ logger = logging.getLogger(__name__)
 class OutreachDecision(BaseModel):
     """Structured output from the outreach agent, at either end of the thread."""
 
-    action: Literal["send_message", "mark_completed", "wait", "suppress"] = Field(
+    action: Literal["send_message", "mark_completed", "suppress"] = Field(
         description=(
             "What to do next for this lead. The first email in a thread is always send_message. "
             "Use suppress when the lead asked to stop being contacted."
@@ -64,13 +67,6 @@ class OutreachDecision(BaseModel):
         default=None,
         description="Why the conversation ended. Required when action='mark_completed'.",
     )
-    follow_up_hours: float = Field(
-        description=(
-            "Working hours until the next follow-up — weekends do not count, so 24 means "
-            "the next working day. Always required — you decide the pace."
-        ),
-    )
-
     @model_validator(mode="after")
     def _check_required_fields(self):
         if self.action == "send_message" and not self.message:
@@ -87,26 +83,22 @@ class OutreachDecision(BaseModel):
 RECENT_MESSAGES_WINDOW = 6
 
 
-def run_outreach_agent(session, deal) -> OutreachDecision:
-    """Decide the next move for ``deal`` — the cold open or the next turn in its thread.
+def run_outreach_agent(deal) -> OutreachDecision:
+    """Decide the next move for ``deal`` — the cold open or the answer to a reply.
 
-    On an existing thread, replies are synced from the mailbox first (folding new
-    inbound messages into ``deal.chat_summary``) so the agent decides on a current
-    view. On a first touch there is nothing to read, and the decision is validated
-    to be a sendable opener with a subject.
+    The caller has already folded any new inbound messages into ``deal.chat_summary``
+    (``emails/steps/reply.py``), so this reads the conversation store rather than the
+    mailbox — no IMAP here. On a first touch there is nothing to read, and the
+    decision is validated to be a sendable opener with a subject.
     """
     public_id = deal.lead.profile_url
     is_first_touch = not deal.email_message_id
 
     if not is_first_touch:
-        from openoutreach.emails.inbox import sync_inbox
-
-        sync_inbox(session, deal)
-        deal.refresh_from_db(fields=["chat_summary", "profile_summary"])
         _log_chat_facts(public_id, deal)
 
     recent = [] if is_first_touch else _load_recent_messages(deal)
-    system_prompt = _render_system_prompt(session, deal, recent, is_first_touch)
+    system_prompt = _render_system_prompt(deal, recent, is_first_touch)
 
     agent = Agent(
         get_llm_model(),
@@ -134,7 +126,7 @@ def _validate_opener(decision: OutreachDecision, public_id: str) -> None:
 # ── Prompt context ────────────────────────────────────────────────
 
 
-def _render_system_prompt(session, deal, recent_messages: list, is_first_touch: bool) -> str:
+def _render_system_prompt(deal, recent_messages: list, is_first_touch: bool) -> str:
     """Render the outreach prompt for whichever end of the thread we're at."""
     now = timezone.now()
     thread_context = {} if is_first_touch else {
@@ -142,11 +134,10 @@ def _render_system_prompt(session, deal, recent_messages: list, is_first_touch: 
         "recent_messages": _format_recent_messages(recent_messages, now),
         "today": now.strftime("%Y-%m-%d"),
         "business_days_since_last_outgoing": _business_days_since_last_outgoing(recent_messages, now),
-        "unanswered_outgoing": _count_unanswered_outgoing(recent_messages),
     }
     return render(
         "outreach_agent.j2",
-        **base_context(session, deal),
+        **base_context(deal),
         is_first_touch=is_first_touch,
         **thread_context,
     )
@@ -199,17 +190,6 @@ def _business_days_since_last_outgoing(messages: list, now: datetime) -> int | N
     if not timestamps:
         return None
     return business_days_between(max(timestamps), now)
-
-
-def _count_unanswered_outgoing(messages: list) -> int:
-    """Trailing run of outgoing messages with no lead reply after them."""
-    count = 0
-    for m in reversed(messages):
-        if m.is_outgoing:
-            count += 1
-        else:
-            break
-    return count
 
 
 def _log_chat_facts(public_id: str, deal) -> None:

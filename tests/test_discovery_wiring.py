@@ -32,11 +32,6 @@ def _finder_key(db):
     config.save()
 
 
-class _Session:
-    def __init__(self, campaign):
-        self.campaign = campaign
-
-
 def _campaign(**kw):
     defaults = dict(name="C", product_docs="p", campaign_target="t")
     defaults.update(kw)
@@ -74,19 +69,19 @@ class TestGates:
     def test_freemium_campaigns_never_search(self, db):
         c = _campaign(is_freemium=True)
         with patch.object(discover_mod, "_fetch") as fetch:
-            assert discover(_Session(c)) == 0
+            assert discover(c) == 0
         fetch.assert_not_called()
 
     def test_no_finder_key_is_a_no_op(self, db):
         SiteConfig.objects.update(bettercontact_api_key="")
         with patch.object(discover_mod, "_fetch") as fetch:
-            assert discover(_Session(_campaign())) == 0
+            assert discover(_campaign()) == 0
         fetch.assert_not_called()
 
     def test_no_icp_text_is_a_no_op(self, db):
         c = _campaign(product_docs="", campaign_target="")
         with patch.object(discover_mod, "_fetch") as fetch:
-            assert discover(_Session(c)) == 0
+            assert discover(c) == 0
         fetch.assert_not_called()
 
 
@@ -97,7 +92,7 @@ class TestHarvest:
         page = Page([_row()], 9027)
 
         with patch.object(discover_mod, "_fetch", return_value=page):
-            created = discover(_Session(c))
+            created = discover(c)
 
         assert created == 1
         node.refresh_from_db()
@@ -115,7 +110,7 @@ class TestHarvest:
         Lead.objects.create(profile_url="https://linkedin.com/in/a", profile_text="x")
 
         with patch.object(discover_mod, "_fetch", return_value=Page([_row()], 10)):
-            assert discover(_Session(c)) == 0
+            assert discover(c) == 0
 
         node.refresh_from_db()
         assert node.state == QueryNode.State.FIRED
@@ -125,7 +120,7 @@ class TestHarvest:
         c = _campaign()
         _node(c, [("lead_job_title", "founder")])
         with patch.object(discover_mod, "_fetch", return_value=Page([_row()], 10)):
-            discover(_Session(c))
+            discover(c)
 
         stored = Lead.objects.get().source_fields
         assert stored["contact_job_title"] == "founder"
@@ -139,7 +134,7 @@ class TestEmptyPages:
 
         with patch.object(discover_mod, "_fetch",
                           side_effect=[Page([], 0), Page([], 0)]) as fetch:
-            discover(_Session(c))
+            discover(c)
 
         assert fetch.call_count == 2
         node.refresh_from_db()
@@ -151,7 +146,7 @@ class TestEmptyPages:
 
         with patch.object(discover_mod, "_fetch",
                           side_effect=[Page([], 0), Page([_row()], 5)]):
-            discover(_Session(c))
+            discover(c)
 
         node.refresh_from_db()
         assert node.state == QueryNode.State.FRONTIER
@@ -164,7 +159,7 @@ class TestEmptyPages:
 
         with patch.object(discover_mod, "_fetch",
                           return_value=Page([], 71403396)) as fetch:
-            assert discover(_Session(c)) == 0
+            assert discover(c) == 0
 
         assert fetch.call_count == 1  # not even retried — the count already answered
         node.refresh_from_db()
@@ -176,7 +171,7 @@ class TestEmptyPages:
                      state=QueryNode.State.FIRED, next_offset=400)
 
         with patch.object(discover_mod, "_fetch", return_value=Page([], None)) as fetch:
-            discover(_Session(c))
+            discover(c)
 
         assert fetch.call_count == 1  # no retry past offset 0 — this is the end, not a zero
         node.refresh_from_db()
@@ -189,7 +184,7 @@ class TestEmptyPages:
 
         pages = [Page([], 0), Page([], 0), Page([_row()], 10)]
         with patch.object(discover_mod, "_fetch", side_effect=pages):
-            assert discover(_Session(c)) == 1
+            assert discover(c) == 1
 
         assert QueryNode.objects.filter(campaign=c, state=QueryNode.State.DEAD).count() == 1
 
@@ -197,7 +192,7 @@ class TestEmptyPages:
         c = _campaign()
         _node(c, [("lead_job_title", "a")], state=QueryNode.State.DRAINED)
         with patch.object(discover_mod, "_fetch") as fetch:
-            assert discover(_Session(c)) == 0
+            assert discover(c) == 0
         fetch.assert_not_called()
 
 
@@ -209,7 +204,7 @@ class TestOutage:
         node = _node(c, [("lead_job_title", "founder")])
 
         with patch.object(discover_mod, "_fetch", return_value=None):
-            assert discover(_Session(c)) == 0
+            assert discover(c) == 0
 
         node.refresh_from_db()
         assert node.state == QueryNode.State.FRONTIER

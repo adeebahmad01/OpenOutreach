@@ -130,7 +130,7 @@ class TestHeadroomRespectsVerdicts:
             mailbox=box, response=Response.BLOCKED, smtp_code=550,
         )
         assert Mailbox.objects.remaining_today() == 0
-        assert Mailbox.objects.least_loaded_under_cap() is None
+        assert Mailbox.objects.free_for_first_email() is None
 
     def test_sending_falls_through_to_an_unpaused_box(self):
         paused = _box()
@@ -143,5 +143,5 @@ class TestHeadroomRespectsVerdicts:
             username="c@d.com", password="pw", from_address="c@d.com",
             daily_limit=10,
         )
-        assert Mailbox.objects.least_loaded_under_cap() == healthy
+        assert Mailbox.objects.free_for_first_email() == healthy
         assert Mailbox.objects.remaining_today() == 10

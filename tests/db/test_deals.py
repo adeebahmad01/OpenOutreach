@@ -30,10 +30,10 @@ def _make_deal(session, slug="alice"):
 
 
 @pytest.mark.django_db
-def test_no_email_miss_logs_muted_not_failed(fake_session, caplog):
-    url = _make_deal(fake_session)
+def test_no_email_miss_logs_muted_not_failed(campaign, caplog):
+    url = _make_deal(campaign)
     with caplog.at_level(logging.INFO, logger="openoutreach.core.db.deals"):
-        set_profile_state(fake_session, url, DealState.NO_EMAIL_BETTERCONTACT.value)
+        set_profile_state(campaign, url, DealState.NO_EMAIL_BETTERCONTACT.value)
 
     line = caplog.text
     assert "NO EMAIL" in line
@@ -41,10 +41,10 @@ def test_no_email_miss_logs_muted_not_failed(fake_session, caplog):
 
 
 @pytest.mark.django_db
-def test_true_failure_still_logs_failed(fake_session, caplog):
-    url = _make_deal(fake_session)
+def test_true_failure_still_logs_failed(campaign, caplog):
+    url = _make_deal(campaign)
     with caplog.at_level(logging.INFO, logger="openoutreach.core.db.deals"):
-        set_profile_state(fake_session, url, DealState.FAILED.value, reason="wrong fit")
+        set_profile_state(campaign, url, DealState.FAILED.value, reason="wrong fit")
 
     assert "FAILED" in caplog.text
     assert "NO EMAIL" not in caplog.text

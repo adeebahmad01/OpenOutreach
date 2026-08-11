@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 @transaction.atomic
-def promote_lead_to_deal(session, profile_url: str, reason: str = ""):
+def promote_lead_to_deal(campaign, profile_url: str, reason: str = ""):
     """Create a QUALIFIED Deal for a Lead.
 
     Returns the Deal.
@@ -22,7 +22,7 @@ def promote_lead_to_deal(session, profile_url: str, reason: str = ""):
 
     deal = Deal.objects.create(
         lead=lead,
-        campaign=session.campaign,
+        campaign=campaign,
         state=DealState.QUALIFIED,
         reason=reason,
     )

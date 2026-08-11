@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from django.contrib.auth.models import User
 from django.db import models
-from django.utils import timezone
 
 from openoutreach.discovery import SEARCH_FIELDS, describe_node
 
@@ -68,7 +67,6 @@ class Campaign(models.Model):
     campaign_target = models.TextField(blank=True)
     booking_link = models.URLField(max_length=500, blank=True)
     is_freemium = models.BooleanField(default=False)
-    action_fraction = models.FloatField(default=0.2)
     seed_public_ids = models.JSONField(default=list, blank=True)
     model_blob = models.BinaryField(null=True, blank=True)
     # ISO-3166 alpha-2 target country for this campaign's leads — the contacts
@@ -105,101 +103,6 @@ class Campaign(models.Model):
 
     def __str__(self):
         return self.name
-
-
-class TaskQuerySet(models.QuerySet):
-    def _priority_order(self):
-        """Opportunity-cost rank for a single worker: value-to-funnel first.
-
-        Every task run defers the rest, so ready work is ranked by what it's
-        worth: a live reply (``follow_up``) and a cheap poll that unblocks a deal
-        (``collect_email``) preempt a cold opener (``email``), which preempts
-        starting new *paid* speculative work (``find_email``). This orders
-        *claiming* among ready tasks only — it must never drive the sleep clock
-        (see ``seconds_to_next``)."""
-        return models.Case(
-            models.When(task_type=Task.TaskType.FOLLOW_UP, then=models.Value(0)),
-            models.When(task_type=Task.TaskType.COLLECT_EMAIL, then=models.Value(1)),
-            models.When(task_type=Task.TaskType.EMAIL, then=models.Value(2)),
-            default=models.Value(3),
-            output_field=models.IntegerField(),
-        )
-
-    def pending(self):
-        """PENDING tasks, highest funnel-value first, then oldest-scheduled."""
-        return self.filter(status=Task.Status.PENDING).order_by(
-            self._priority_order(), "scheduled_at",
-        )
-
-    def claim_next(self) -> "Task | None":
-        """The highest-priority task that is due (its ``scheduled_at`` has arrived)."""
-        return self.pending().filter(scheduled_at__lte=timezone.now()).first()
-
-    def seconds_to_next(self) -> float | None:
-        """Seconds until the *earliest-scheduled* pending task, or None if empty.
-
-        Ordered by ``scheduled_at`` alone — NOT by priority — so the daemon sleeps
-        to the soonest due-time and never oversleeps a sooner low-priority task
-        (a ``find_email`` due in 1m) sitting behind a far-future high-priority one
-        (a ``follow_up`` due in 6h)."""
-        next_task = (
-            self.filter(status=Task.Status.PENDING)
-            .order_by("scheduled_at")
-            .only("scheduled_at")
-            .first()
-        )
-        if next_task is None:
-            return None
-        return max((next_task.scheduled_at - timezone.now()).total_seconds(), 0)
-
-
-class Task(models.Model):
-    class TaskType(models.TextChoices):
-        FIND_EMAIL = "find_email"        # submit leg — fire a paid lookup
-        COLLECT_EMAIL = "collect_email"  # poll leg — check an in-flight lookup (payload carries request_id)
-        FOLLOW_UP = "follow_up"
-        EMAIL = "email"
-
-    class Status(models.TextChoices):
-        PENDING = "pending"
-        RUNNING = "running"
-        COMPLETED = "completed"
-        FAILED = "failed"
-
-    task_type = models.CharField(max_length=20, choices=TaskType.choices)
-    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
-    scheduled_at = models.DateTimeField()
-    payload = models.JSONField(default=dict)
-    created_at = models.DateTimeField(auto_now_add=True)
-    started_at = models.DateTimeField(null=True, blank=True)
-    completed_at = models.DateTimeField(null=True, blank=True)
-
-    objects = TaskQuerySet.as_manager()
-
-    class Meta:
-        indexes = [
-            models.Index(
-                fields=["status", "scheduled_at"],
-                name="core_task_status_sched_idx",
-            ),
-        ]
-
-    def __str__(self):
-        return f"{self.task_type} [{self.status}] scheduled={self.scheduled_at}"
-
-    def mark_running(self):
-        self.status = self.Status.RUNNING
-        self.started_at = timezone.now()
-        self.save(update_fields=["status", "started_at"])
-
-    def mark_completed(self):
-        self.status = self.Status.COMPLETED
-        self.completed_at = timezone.now()
-        self.save(update_fields=["status", "completed_at"])
-
-    def mark_failed(self):
-        self.status = self.Status.FAILED
-        self.save(update_fields=["status"])
 
 
 class Keyword(models.Model):

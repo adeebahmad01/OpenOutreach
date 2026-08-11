@@ -28,47 +28,22 @@ def _mock_embeddings(request):
             yield
 
 
-class FakeAccountSession:
-    """Minimal stand-in for AccountSession — the Django User + SiteConfig identity.
-
-    ``self_profile`` is the OPERATOR's identity (still a plain dict, used by the
-    contacts give-back and the summary/agent prompt builders). Leads carry their
-    own ``profile_url`` identity on the model — the session no longer holds a
-    per-operator profile row.
-    """
-
-    def __init__(self, django_user, campaign):
-        self.django_user = django_user
-        self.campaign = campaign
-        self.self_profile = {
-            "public_identifier": django_user.email or django_user.username,
-            "first_name": "Diego",
-            "last_name": "Ramirez",
-            "urn": "urn:li:fsd_profile:TEST",
-        }
-        # Resolved post-login on the real session; None here → no active-hours
-        # gating (planner tests disable active hours regardless).
-        self.active_timezone = None
-
-    @property
-    def campaigns(self):
-        from openoutreach.core.models import Campaign
-        return Campaign.objects.filter(users=self.django_user)
-
-    def ensure_browser(self):
-        pass
+@pytest.fixture
+def operator(db):
+    """The onboarded operator — what ``core.operator.get_active_user()`` will find."""
+    return UserFactory(username="testuser", email="testuser@example.com")
 
 
 @pytest.fixture
-def fake_session(db):
-    """An AccountSession-like object backed by the Django test DB."""
+def campaign(db, operator):
+    """The campaign under test, owned by the operator.
+
+    Steps and pipeline functions take a campaign now; the operator is looked up
+    (``core/operator.py``) rather than threaded through, so nothing carries a
+    session object any more.
+    """
     from openoutreach.core.models import Campaign
 
-    user = UserFactory(username="testuser", email="testuser@example.com")
-
-    campaign = Campaign.objects.first()
-    if campaign is None:
-        campaign = Campaign.objects.create(name="Email Outreach")
-    campaign.users.add(user)
-
-    return FakeAccountSession(django_user=user, campaign=campaign)
+    row = Campaign.objects.first() or Campaign.objects.create(name="Email Outreach")
+    row.users.add(operator)
+    return row

@@ -48,19 +48,10 @@ WARM_FLOOR_SENDS = 5        # a box with no history still sends this much
 # WARM_CEILING_SENDS — derived from the pacing constants; see below.
 
 # ----------------------------------------------------------------------
-# Proportional send quota (core/quota.py) — the trailing window the freemium
-# ``action_fraction`` is measured over. The ledger is derived from
-# ``Deal.email_sent_at``, so this is the only knob: all-time counting would make
-# the ledger unbounded debt (one overshoot silences a campaign forever), while a
-# window lets the ratio self-heal as history rolls off. 30 days is long enough to
-# smooth a stalled week and short enough that a correction lands this month.
-# ----------------------------------------------------------------------
-QUOTA_WINDOW_DAYS = 30
-
-# ----------------------------------------------------------------------
-# Send pacing (core/scheduler.py) — the minimum gap between two outbound
-# emails across the whole pool. Receivers rate-limit on *burst*, not on the
-# daily total: Gmail answers an unusual sending rate with a 421 4.7.0 deferral
+# Send pacing (emails/steps/send.py) — the minimum gap between two *first*
+# emails from one mailbox. Replies are exempt: a reply is not cold volume, and
+# answering someone who wrote to you within minutes is more human, not less.
+# Receivers rate-limit on *burst*, not on the daily total: Gmail answers an unusual sending rate with a 421 4.7.0 deferral
 # regardless of how far below the daily quota you are. Measured against a real
 # box, an unpaced daemon drains a day's openers back-to-back at its own loop
 # time (~11s apart, 40 messages inside one hour) — a machine signature, and
@@ -69,6 +60,10 @@ QUOTA_WINDOW_DAYS = 30
 # The floor is the low end of the 3–8 minute band the cold-email field
 # converges on; the jitter spans the rest of it. Jitter is not decoration: a
 # send exactly every 180s is as machine-shaped as no spacing at all.
+#
+# Per box rather than pool-wide (``Mailbox.next_send_at``): the daily ceiling is
+# already per box, two mailboxes are two sending identities, and one receiver's
+# rhythm says nothing about the other's.
 #
 # This bounds the *rate*, and the rate sets the day: a daemon that never stops
 # and never sends twice inside one interval cannot exceed a day divided by the
@@ -139,24 +134,6 @@ COLLECT_BACKOFF_MAX_S = 30 * 24 * 3600
 # so ``flush_find_email_queue`` stops counting it against today's send headroom —
 # otherwise deals parked in a long backoff would slowly wedge the submit drain.
 COLLECT_TODAY_HORIZON_S = 24 * 3600
-
-# ----------------------------------------------------------------------
-# Opener floor — the share of today's send headroom follow-ups may not take.
-#
-# Follow-ups sit outside the quota and outrank openers on claim, and ``reconcile``
-# reserves every due one off the top of the opener budget. That is right in the
-# small (a reply owed to a human beats a cold open) and wrong in the large: a
-# campaign accumulates open threads faster than it closes them, so the due count
-# grows without bound and eventually consumes every send. Measured on a live
-# install: 106 open threads produced 102 follow-ups and 1 opener in a week, and
-# because the same budget also gates ``flush_find_email_queue``, the starvation
-# compounds — no address is bought today, so there is no opener to send tomorrow.
-#
-# The floor is *work-conserving*: it is only held back when openers actually exist
-# to use it (``_opener_reserve``), so an install with nothing ready still spends
-# its whole box on replies.
-# ----------------------------------------------------------------------
-OPENER_FLOOR_FRACTION = 0.25
 
 # ----------------------------------------------------------------------
 # Campaign config (timing + ML defaults — hardcoded, no YAML)

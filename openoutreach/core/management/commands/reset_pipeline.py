@@ -77,7 +77,7 @@ class Command(BaseCommand):
     def _plan(self, campaigns, *, full: bool) -> dict[str, int]:
         """What the reset would remove, counted before anything is touched."""
         from openoutreach.chat.models import ChatMessage
-        from openoutreach.core.models import Keyword, QueryNode, Task
+        from openoutreach.core.models import Keyword, QueryNode
         from openoutreach.crm.models import Deal, Lead
 
         nodes = QueryNode.objects.filter(campaign__in=campaigns)
@@ -95,7 +95,6 @@ class Command(BaseCommand):
         deals = Deal.objects.filter(campaign__in=campaigns)
         counts["deals"] = deals.count()
         counts["chat messages"] = ChatMessage.objects.filter(deal__in=deals).count()
-        counts["tasks"] = Task.objects.count()
         # Leads are campaign-agnostic (keyed on profile_url), so a partial reset leaves
         # them alone rather than deleting rows another campaign is still working.
         if self._resetting_everything(campaigns):
@@ -134,7 +133,7 @@ class Command(BaseCommand):
 
     def _reset(self, campaigns, *, full: bool) -> None:
         from openoutreach.chat.models import ChatMessage
-        from openoutreach.core.models import Keyword, QueryNode, Task
+        from openoutreach.core.models import Keyword, QueryNode
         from openoutreach.crm.models import Deal, Lead
 
         everything = self._resetting_everything(campaigns)
@@ -143,7 +142,6 @@ class Command(BaseCommand):
             deals = Deal.objects.filter(campaign__in=campaigns)
             ChatMessage.objects.filter(deal__in=deals).delete()
             deals.delete()
-            Task.objects.all().delete()
             if everything:
                 Lead.objects.all().delete()
 

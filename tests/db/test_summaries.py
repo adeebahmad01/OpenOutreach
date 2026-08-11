@@ -39,9 +39,9 @@ def _capturing_function_model(captured: dict, output: dict) -> FunctionModel:
 
 
 @pytest.fixture
-def deal_with_lead(db, fake_session):
+def deal_with_lead(db, campaign):
     lead = LeadFactory(profile_url="https://www.linkedin.com/in/alice/")
-    return DealFactory(lead=lead, campaign=fake_session.campaign)
+    return DealFactory(lead=lead, campaign=campaign)
 
 
 class TestExtractFacts:
@@ -87,11 +87,11 @@ class TestMaterializeProfileSummary:
         deal_with_lead.save(update_fields=["profile_summary"])
 
         with patch("openoutreach.core.db.summaries.extract_facts") as mock_extract:
-            materialize_profile_summary_if_missing(deal_with_lead, None)
+            materialize_profile_summary_if_missing(deal_with_lead)
 
         mock_extract.assert_not_called()
 
-    def test_builds_from_profile_text_and_persists(self, db, fake_session, deal_with_lead):
+    def test_builds_from_profile_text_and_persists(self, db, campaign, deal_with_lead):
         from openoutreach.core.db.summaries import materialize_profile_summary_if_missing
 
         deal_with_lead.lead.profile_text = "senior engineer at acme"
@@ -99,7 +99,7 @@ class TestMaterializeProfileSummary:
 
         with patch("openoutreach.core.db.summaries.extract_facts",
                    return_value=["Senior Engineer at Acme.", "URN ABC123."]) as mock_extract:
-            materialize_profile_summary_if_missing(deal_with_lead, fake_session)
+            materialize_profile_summary_if_missing(deal_with_lead)
 
         mock_extract.assert_called_once()
         # Facts are extracted from the stored profile_text — no re-scrape.
@@ -109,14 +109,14 @@ class TestMaterializeProfileSummary:
             "facts": ["Senior Engineer at Acme.", "URN ABC123."]
         }
 
-    def test_no_profile_text_logs_and_skips(self, db, fake_session, deal_with_lead, caplog):
+    def test_no_profile_text_logs_and_skips(self, db, campaign, deal_with_lead, caplog):
         from openoutreach.core.db.summaries import materialize_profile_summary_if_missing
 
         deal_with_lead.lead.profile_text = ""
         deal_with_lead.lead.save(update_fields=["profile_text"])
 
         with patch("openoutreach.core.db.summaries.extract_facts") as mock_extract:
-            materialize_profile_summary_if_missing(deal_with_lead, fake_session)
+            materialize_profile_summary_if_missing(deal_with_lead)
 
         mock_extract.assert_not_called()
         deal_with_lead.refresh_from_db()

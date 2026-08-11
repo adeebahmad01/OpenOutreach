@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
-    help = "Run the OpenOutreach daemon (onboard, validate, start task queue)."
+    help = "Run the OpenOutreach daemon (onboard, validate, start the cycle)."
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -23,10 +23,10 @@ class Command(BaseCommand):
         self._configure_logging(options.get("log_level"), options["verbosity"])
         self._ensure_db()
         self._ensure_onboarded()
-        session = self._create_session()
+        self._validate_operator()
 
-        from openoutreach.core.daemon import run_daemon
-        run_daemon(session)
+        from openoutreach.core.cycle import run_daemon
+        run_daemon()
 
     # -- Steps ---------------------------------------------------------------
 
@@ -65,24 +65,19 @@ class Command(BaseCommand):
             )
             sys.exit(1)
 
-    def _create_session(self):
+    def _validate_operator(self):
+        """Fail loudly on the three things the cycle cannot run without."""
         from openoutreach.core.models import SiteConfig
-        from openoutreach.core.session import get_active_user, get_or_create_session
+        from openoutreach.core.operator import campaigns, get_active_user
 
         if not SiteConfig.load().llm_api_key:
             logger.error("LLM_API_KEY is required. Set it in Site Configuration (Django Admin).")
             sys.exit(1)
 
-        user = get_active_user()
-        if user is None:
+        if get_active_user() is None:
             logger.error("No active operator account found.")
             sys.exit(1)
 
-        session = get_or_create_session(user)
-
-        if not session.campaigns:
+        if not campaigns():
             logger.error("No campaigns found for this operator.")
             sys.exit(1)
-        session.campaign = session.campaigns[0]
-
-        return session

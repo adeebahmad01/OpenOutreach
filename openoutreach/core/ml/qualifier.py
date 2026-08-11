@@ -664,3 +664,49 @@ class KitQualifier:
         gp_mean = float(mean[0])
         p_above = float(_prob_above_half(mean, std)[0])
         return f"mean={gp_mean:.3f}, P(f>0.5)={p_above:.3f}"
+
+
+# ── On-demand construction ────────────────────────────────────────
+
+
+def qualifier_for(campaign):
+    """Build this campaign's qualifier, ready to score. May return None.
+
+    Built where it is needed and dropped when the caller is done with it, rather
+    than warm-started once at boot and held for the life of the process. A resident
+    model is a model that silently goes stale: the daemon used to fit every
+    campaign's GP at startup, so a label written an hour later did not move the
+    posterior until the next restart. Building here costs one fit over the
+    campaign's labels — tens to low hundreds of rows — and is always current.
+
+    Freemium campaigns score with the pre-trained kit model (downloaded once per
+    process) rather than a GP of their own; ``None`` means the kit is unavailable,
+    which is the one case where a freemium campaign simply has no way to rank.
+    """
+    from openoutreach.core.conf import CAMPAIGN_CONFIG
+    from openoutreach.core.ml.hub import fetch_kit
+    from openoutreach.core.pipeline.icp import ensure_anchors, stored_anchors
+    from openoutreach.crm.models import Lead
+
+    if campaign.is_freemium:
+        kit = fetch_kit()
+        return KitQualifier(kit["model"]) if kit else None
+
+    qualifier = BayesianQualifier(
+        seed=42,
+        n_mc_samples=CAMPAIGN_CONFIG["qualification_n_mc_samples"],
+        campaign=campaign,
+    )
+    X, y = Lead.get_labeled_arrays(campaign)
+    if len(X) > 0:
+        qualifier.warm_start(X, y)
+
+    # Cold phase — the positive class is still partly invented. With no acceptance at
+    # all the labels are one class and the GP cannot fit, so generate the anchors;
+    # once real positives have started arriving, restore whatever survived their
+    # retirement (``_retire_anchors``) but never invent more — the padding only ever
+    # shrinks from there.
+    anchors = stored_anchors(campaign) if qualifier.has_real_positive else ensure_anchors(campaign)
+    if anchors is not None:
+        qualifier.set_anchors(anchors)
+    return qualifier

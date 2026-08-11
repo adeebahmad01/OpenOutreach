@@ -72,7 +72,7 @@ def unsubscribe_address(from_address: str) -> str:
 
     Plus-addressing means no second mailbox, no DNS and no web surface: the alias
     delivers to the same INBOX the daemon already reads over IMAP, so the opt-out
-    path is the box's own mail. ``scan_unsubscribes`` matches on this exact string.
+    path is the box's own mail. The mail pass matches on this exact string.
 
     **This assumes the provider routes ``+`` tags to the base mailbox.** Gmail and
     Google Workspace do, and they are both the documented default (``smtp.gmail.com``

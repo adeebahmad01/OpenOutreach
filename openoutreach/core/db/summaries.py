@@ -14,6 +14,7 @@ from typing import Iterable
 
 from pydantic import BaseModel, Field
 
+from openoutreach.core import operator
 from openoutreach.core.vendor.mem0.configs.prompts import get_update_memory_messages
 from openoutreach.core.vendor.mem0.memory.utils import extract_json, remove_code_blocks
 
@@ -60,12 +61,6 @@ def _build_identity_binding(seller_name: str) -> str:
         f"- When a [Lead] message mentions `{seller_name}`, that is a reference "
         f"to [Me] — never attribute it as a fact about the lead."
     )
-
-
-def seller_name_from(session) -> str:
-    """Return the seller's first name as known to the LLM, with a username fallback."""
-    sp = session.self_profile
-    return (sp.get("first_name") or "").strip() or session.django_user.username
 
 
 class FactList(BaseModel):
@@ -128,7 +123,7 @@ def extract_facts(
 
 # ── Profile summary ──
 
-def materialize_profile_summary_if_missing(deal, session) -> None:
+def materialize_profile_summary_if_missing(deal) -> None:
     """Build `deal.profile_summary` lazily on first follow-up touch.
 
     Extracts facts from the lead's stored firmographic ``profile_text`` (captured
@@ -157,7 +152,7 @@ def materialize_profile_summary_if_missing(deal, session) -> None:
 
     facts = extract_facts(
         lead.profile_text,
-        seller_name=seller_name_from(session),
+        seller_name=operator.seller_name(),
         context=context,
     )
     deal.profile_summary = {"facts": facts}

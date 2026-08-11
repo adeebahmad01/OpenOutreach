@@ -4,10 +4,9 @@ from io import StringIO
 
 import pytest
 from django.core.management import CommandError, call_command
-from django.utils import timezone
 
 from openoutreach.chat.models import ChatMessage
-from openoutreach.core.models import Campaign, Keyword, QueryNode, SiteConfig, Task
+from openoutreach.core.models import Campaign, Keyword, QueryNode, SiteConfig
 from openoutreach.core.pipeline.select import token_key
 from openoutreach.crm.models import Deal, DealState, Lead
 
@@ -27,8 +26,6 @@ def _populate(campaign):
         profile_url=f"https://x/{Lead.objects.count()}", profile_text="founder ai")
     deal = Deal.objects.create(lead=lead, campaign=campaign, state=DealState.QUALIFIED)
     ChatMessage.objects.create(deal=deal, content="hi")
-    Task.objects.create(task_type=Task.TaskType.FIND_EMAIL, scheduled_at=timezone.now(),
-                        payload={"campaign_id": campaign.pk})
     return node, lead, deal
 
 
@@ -77,7 +74,7 @@ class TestFullScope:
 
         assert (QueryNode.objects.count(), Keyword.objects.count()) == (0, 0)
         assert (Lead.objects.count(), Deal.objects.count()) == (0, 0)
-        assert (ChatMessage.objects.count(), Task.objects.count()) == (0, 0)
+        assert ChatMessage.objects.count() == 0
         c.refresh_from_db()
         assert c.anchor_profiles == []
         assert c.anchor_embeddings is None

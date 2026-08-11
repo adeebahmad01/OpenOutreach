@@ -9,11 +9,11 @@ from tests.factories import LeadFactory, DealFactory
 
 
 @pytest.fixture
-def deal_with_summaries(db, fake_session):
+def deal_with_summaries(db, campaign):
     lead = LeadFactory()
     return DealFactory(
         lead=lead,
-        campaign=fake_session.campaign,
+        campaign=campaign,
         email_message_id="<root@corp.com>",
         profile_summary={"facts": [
             "Senior engineer at Acme Corp.",
@@ -41,13 +41,13 @@ def _self_profile(session):
 
 
 class TestRenderSystemPrompt:
-    def test_in_thread_includes_three_summary_blocks(self, db, fake_session, deal_with_summaries):
+    def test_in_thread_includes_three_summary_blocks(self, db, campaign, deal_with_summaries):
         from openoutreach.core.agents.outreach import _render_system_prompt
 
-        _self_profile(fake_session)
+        _self_profile(campaign)
 
         recent = [_msg("Hi, what do you do?", is_outgoing=True), _msg("Sales tooling.", is_outgoing=False)]
-        prompt = _render_system_prompt(fake_session, deal_with_summaries, recent, is_first_touch=False)
+        prompt = _render_system_prompt(deal_with_summaries, recent, is_first_touch=False)
 
         # Profile facts appear under the lead-knowledge block.
         assert "Senior engineer at Acme Corp." in prompt
@@ -61,22 +61,27 @@ class TestRenderSystemPrompt:
         assert "Headline:" not in prompt
         assert "Company:" not in prompt
 
-    def test_in_thread_offers_all_three_actions(self, db, fake_session, deal_with_summaries):
+    def test_in_thread_offers_the_three_reply_actions(self, db, campaign, deal_with_summaries):
+        """In-thread choices are reply / suppress / complete. There is no `wait`:
+        the agent only ever runs on a thread that has an unanswered reply, and
+        silence is the absence of work rather than a decision."""
         from openoutreach.core.agents.outreach import _render_system_prompt
 
-        _self_profile(fake_session)
-        prompt = _render_system_prompt(fake_session, deal_with_summaries, [], is_first_touch=False)
+        _self_profile(campaign)
+        prompt = _render_system_prompt(deal_with_summaries, [], is_first_touch=False)
 
-        assert "**wait**" in prompt
+        assert "**send_message**" in prompt
+        assert "**suppress**" in prompt
         assert "**mark_completed**" in prompt
+        assert "**wait**" not in prompt
         assert "having an email conversation" in prompt
 
-    def test_first_touch_drops_the_conversation_blocks(self, db, fake_session, deal_with_summaries):
-        """No thread yet — no chat summary, no transcript, and no wait/complete choice."""
+    def test_first_touch_drops_the_conversation_blocks(self, db, campaign, deal_with_summaries):
+        """No thread yet — no chat summary, no transcript, and no complete/suppress choice."""
         from openoutreach.core.agents.outreach import _render_system_prompt
 
-        _self_profile(fake_session)
-        prompt = _render_system_prompt(fake_session, deal_with_summaries, [], is_first_touch=True)
+        _self_profile(campaign)
+        prompt = _render_system_prompt(deal_with_summaries, [], is_first_touch=True)
 
         # Lead facts still there; conversation facts are not.
         assert "Senior engineer at Acme Corp." in prompt
@@ -87,13 +92,13 @@ class TestRenderSystemPrompt:
         assert "`subject`" in prompt
         assert "**mark_completed**" not in prompt
 
-    def test_both_ends_carry_the_research_framing(self, db, fake_session, deal_with_summaries):
+    def test_both_ends_carry_the_research_framing(self, db, campaign, deal_with_summaries):
         from openoutreach.core.agents.outreach import _render_system_prompt
 
-        _self_profile(fake_session)
+        _self_profile(campaign)
         for first_touch in (True, False):
             prompt = _render_system_prompt(
-                fake_session, deal_with_summaries, [], is_first_touch=first_touch,
+                deal_with_summaries, [], is_first_touch=first_touch,
             )
             assert "You follow the Mom Test method." in prompt
             # Discovery is the default mode; pitching only on an explicit pull.
@@ -101,14 +106,14 @@ class TestRenderSystemPrompt:
             assert "### Pitching (only when the lead pulls you there)" in prompt
             assert "Never volunteer the product" in prompt
 
-    def test_handles_missing_summaries_gracefully(self, db, fake_session):
+    def test_handles_missing_summaries_gracefully(self, db, campaign):
         from openoutreach.core.agents.outreach import _render_system_prompt
 
         lead = LeadFactory()
-        deal = DealFactory(lead=lead, campaign=fake_session.campaign, email_message_id="<root@corp.com>")
-        _self_profile(fake_session)
+        deal = DealFactory(lead=lead, campaign=campaign, email_message_id="<root@corp.com>")
+        _self_profile(campaign)
 
-        prompt = _render_system_prompt(fake_session, deal, [], is_first_touch=False)
+        prompt = _render_system_prompt(deal, [], is_first_touch=False)
 
         # Renders without crashing and shows the empty placeholders.
         assert "(none yet)" in prompt
@@ -119,14 +124,14 @@ class TestValidateOpener:
     def test_rejects_an_opener_without_a_subject(self):
         from openoutreach.core.agents.outreach import OutreachDecision, _validate_opener
 
-        decision = OutreachDecision(action="send_message", message="Hi.", follow_up_hours=48)
+        decision = OutreachDecision(action="send_message", message="Hi.")
         with pytest.raises(ValueError, match="no subject"):
             _validate_opener(decision, "lead@corp.com")
 
     def test_rejects_an_opener_that_does_not_send(self):
         from openoutreach.core.agents.outreach import OutreachDecision, _validate_opener
 
-        decision = OutreachDecision(action="wait", follow_up_hours=48)
+        decision = OutreachDecision(action="mark_completed", outcome="not_interested")
         with pytest.raises(ValueError, match="must send_message"):
             _validate_opener(decision, "lead@corp.com")
 
@@ -134,13 +139,13 @@ class TestValidateOpener:
         from openoutreach.core.agents.outreach import OutreachDecision, _validate_opener
 
         decision = OutreachDecision(
-            action="send_message", subject="quick question", message="Hi.", follow_up_hours=48,
+            action="send_message", subject="quick question", message="Hi.",
         )
         _validate_opener(decision, "lead@corp.com")
 
 
 class TestLoadRecentMessages:
-    def test_returns_last_n_in_chronological_order(self, db, fake_session):
+    def test_returns_last_n_in_chronological_order(self, db, campaign, operator):
         from openoutreach.chat.models import ChatMessage
         from django.utils import timezone
         from datetime import timedelta
@@ -148,7 +153,7 @@ class TestLoadRecentMessages:
         from openoutreach.core.agents.outreach import _load_recent_messages, RECENT_MESSAGES_WINDOW
 
         lead = LeadFactory()
-        deal = DealFactory(lead=lead, campaign=fake_session.campaign)
+        deal = DealFactory(lead=lead, campaign=campaign)
 
         base = timezone.now()
         for i in range(RECENT_MESSAGES_WINDOW + 3):
@@ -156,7 +161,7 @@ class TestLoadRecentMessages:
                 deal=deal,
                 content=f"msg-{i}",
                 is_outgoing=(i % 2 == 0),
-                owner=fake_session.django_user,
+                owner=operator,
                 external_id=f"urn:msg:{i}",
                 creation_date=base + timedelta(minutes=i),
             )

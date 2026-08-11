@@ -25,6 +25,10 @@ def repo(tmp_path, monkeypatch):
     _git(tmp_path, "config", "user.name", "t")
     (tmp_path / "app.py").write_text("x = 1\n")
     _git(tmp_path, "add", "app.py")
+    # Only the *author* date is pinned, and the committer date is deliberately left
+    # as "now": the CalVer must come from when the change was written, not from when
+    # a rebase last touched it, and reading ``%ct`` would make this assertion drift
+    # with the calendar.
     _git(tmp_path, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "first",
          "--date", "2026-08-07T10:00:00+00:00")
     monkeypatch.setattr(version, "REPO_ROOT", tmp_path)
