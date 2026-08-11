@@ -118,6 +118,17 @@ class TestUnansweredReplies:
 
         assert list(unanswered_replies(campaign)) == [waiting, fresh]
 
+    def test_the_query_does_not_group_by(self, campaign):
+        """The two timestamps must stay subqueries, never aggregates.
+
+        An aggregate groups by every selected column, and ``select_related`` puts the
+        campaign, lead and mailbox BLOBs (``model_blob`` above all) in that list — 6.5 GB
+        for one ``.first()`` on a live install, and the daemon's OOM kill.
+        """
+        sql = str(unanswered_replies(campaign).query).upper()
+
+        assert "GROUP BY" not in sql
+
 
 # ── answer_reply (the step) ───────────────────────────────────────
 

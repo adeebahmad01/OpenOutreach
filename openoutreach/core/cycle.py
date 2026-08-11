@@ -261,10 +261,33 @@ def unanswered_replies(campaign):
     mail pass writes inbound rows and the comparison between the two newest
     timestamps says whether the ball is in our court. Oldest reply first, so nobody
     waits behind a livelier thread.
-    """
-    from django.db.models import F, Max, Q
 
+    **The two timestamps are subqueries, not aggregates.** ``Max(...)`` over the joined
+    messages reads better and is what this asked for originally, but an aggregate makes
+    the query a GROUP BY over every selected column — and ``select_related`` puts the
+    campaign, lead and mailbox rows in that list. Grouping then carries the BLOBs:
+    ``Campaign.model_blob`` (the pickled GP, 10.5 MB once a campaign has ~1,350 labels),
+    ``Campaign.anchor_embeddings`` and ``Lead.embedding``, repeated per joined row. On a
+    live install that single ``.first()`` allocated **6.5 GB** and ran for ten seconds,
+    against 326 EMAILED deals — it climbed to ~3 GB on the 3.8 GB production VM, drove
+    the box into swap, and is what SIGKILLed the daemon. A campaign whose GP has few
+    labels has a small blob and shows nothing, so this scales with the operator's
+    success. Row 2 runs it every cycle and the idle pulse ``.count()``s it, so it is
+    also the hottest query in the loop. A correlated subquery per timestamp needs no
+    grouping at all and reads the same.
+    """
+    from django.db.models import F, OuterRef, Q, Subquery
+
+    from openoutreach.chat.models import ChatMessage
     from openoutreach.crm.models import Deal
+
+    def newest(*, is_outgoing: bool) -> Subquery:
+        return Subquery(
+            ChatMessage.objects
+            .filter(deal=OuterRef("pk"), is_outgoing=is_outgoing)
+            .order_by("-creation_date")
+            .values("creation_date")[:1]
+        )
 
     return (
         Deal.objects.filter(
@@ -274,8 +297,8 @@ def unanswered_replies(campaign):
             lead__disqualified=False,
         )
         .annotate(
-            last_in=Max("messages__creation_date", filter=Q(messages__is_outgoing=False)),
-            last_out=Max("messages__creation_date", filter=Q(messages__is_outgoing=True)),
+            last_in=newest(is_outgoing=False),
+            last_out=newest(is_outgoing=True),
         )
         .filter(last_in__isnull=False)
         .filter(Q(last_out__isnull=True) | Q(last_in__gt=F("last_out")))
