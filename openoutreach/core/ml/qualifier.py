@@ -27,10 +27,17 @@ class Qualifier(Protocol):
     Returns ``[]`` on cold start or when ranking is impossible.
 
     ``explain`` returns a human-readable scoring summary for a single profile.
+
+    ``predict_probs`` returns P(f > 0.5) per embedding, or ``None`` when the model
+    cannot score yet. It belongs here rather than on one implementation because the
+    cycle's promote gate (``ready_pool.promote_to_ready``) runs for **every**
+    campaign, freemium included — leaving it off the protocol is what let a
+    freemium campaign reach the gate with a qualifier that had no such method.
     """
 
     def rank_profiles(self, profiles: list) -> list: ...
     def explain(self, profile: dict) -> str: ...
+    def predict_probs(self, embeddings: np.ndarray) -> np.ndarray | None: ...
 
 
 def format_prediction(prob: float, entropy: float, std: float, n_obs: int) -> str:
@@ -651,6 +658,15 @@ class KitQualifier:
         if not profiles:
             return []
         return _rank_by_score(profiles, self._model, skip_missing=True)
+
+    def predict_probs(self, embeddings: np.ndarray) -> np.ndarray:
+        """Predicted probability P(f > 0.5) for each candidate.
+
+        Never ``None``: a kit ships fitted, so unlike the per-campaign GP there is no
+        cold start to report.
+        """
+        mean, std = _gpr_predict(self._model, embeddings)
+        return _prob_above_half(mean, std)
 
     def explain(self, profile: dict) -> str:
         """Human-readable compact scoring explanation."""

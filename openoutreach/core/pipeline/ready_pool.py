@@ -29,13 +29,13 @@ from openoutreach.core.db.deals import (
     get_ready_to_find_email_profiles,
     set_profile_state,
 )
-from openoutreach.core.ml.qualifier import BayesianQualifier
+from openoutreach.core.ml.qualifier import Qualifier
 from openoutreach.crm.models import DealState
 
 logger = logging.getLogger(__name__)
 
 
-def promote_to_ready(campaign, qualifier: BayesianQualifier) -> int:
+def promote_to_ready(campaign, qualifier: Qualifier) -> int:
     """Promote QUALIFIED profiles at or above the GP confidence gate to
     READY_TO_FIND_EMAIL.
 
@@ -79,7 +79,7 @@ def promote_to_ready(campaign, qualifier: BayesianQualifier) -> int:
     return promoted
 
 
-def find_ready_candidate(campaign, qualifier: BayesianQualifier) -> dict | None:
+def find_ready_candidate(campaign, qualifier: Qualifier) -> dict | None:
     """Return the top-ranked READY_TO_FIND_EMAIL profile, or None."""
     profiles = get_ready_to_find_email_profiles(campaign)
     if not profiles:
