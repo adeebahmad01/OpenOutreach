@@ -185,7 +185,21 @@ today's headroom or a handful of them wedge the pipeline shut for weeks.
 
 Row 4 is the only **per-campaign** step: building a qualifier dominates the cost of using it, so it
 scores the whole `QUALIFIED` pool in one pass and drops the model (`qualifier_for`). There is no
-`Lead.is_ranked` column — "worth paying for" is what `READY_TO_FIND_EMAIL` already means.
+`Lead.is_ranked` column — "worth paying for" is what `READY_TO_FIND_EMAIL` already means. It runs
+for **every** campaign, freemium included, so the gate calls `predict_probs` on a `KitQualifier` as
+readily as on a `BayesianQualifier` — which is why that method is on the `Qualifier` protocol and
+not on one implementation. `promote_to_ready` logs the promotion itself, carrying the score that
+justified it (`P(f>0.5)=0.997 ≥ 0.75`), and passes `log=False` so the transition is not printed
+twice; the score cannot ride in `reason`, which holds the LLM's qualification rationale.
+
+**The walk is also the daemon's time accounting.** `ROWS` pairs each row with a name, so every
+action logs which row fired and how long it took (`[Email Outreach] send first email — 2.3s`), and
+at `debug` every row logs its decision time even when it declines. The steps log what they *did*;
+without this a row that spends twenty seconds deciding it has nothing to do says so nowhere. When
+no row fires, `_log_idle` prints the pipeline counts against today's headroom at most once every
+`IDLE_LOG_INTERVAL_S` — idle is the normal state, so a line per cycle would bury everything else,
+and the counts separate *no work* from *work behind a gate*, which look identical from outside and
+are entirely different problems.
 
 Campaigns take turns (`_rotate`, re-read each lap so a campaign created after boot joins). There is
 no share, no weight and no allocation: with nothing minted in advance there is no budget to split,

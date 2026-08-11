@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 
 import numpy as np
+from termcolor import colored
 
 from openoutreach.core.conf import CAMPAIGN_CONFIG
 from openoutreach.core.db.deals import (
@@ -72,8 +73,16 @@ def promote_to_ready(campaign, qualifier: Qualifier) -> int:
     for prob, p in zip(probs, valid):
         if prob >= threshold:
             pid = p.get("profile_url", "?")
-            logger.info("%s READY_TO_FIND_EMAIL (P(f>0.5)=%.3f)", pid, prob)
-            set_profile_state(campaign, p["profile_url"], DealState.READY_TO_FIND_EMAIL.value)
+            # One line, carrying the score that justified the promotion. `log=False`
+            # because this *is* the spine line — `set_profile_state` would otherwise
+            # print the same transition again without the number. The score cannot
+            # ride in `reason`: that column holds the LLM's qualification rationale,
+            # and writing a probability over it would destroy why the lead qualified.
+            logger.info("%s %s (P(f>0.5)=%.3f ≥ %.2f)", pid,
+                        colored("READY_TO_FIND_EMAIL", "yellow", attrs=["bold"]),
+                        prob, threshold)
+            set_profile_state(campaign, p["profile_url"],
+                              DealState.READY_TO_FIND_EMAIL.value, log=False)
             promoted += 1
 
     return promoted
