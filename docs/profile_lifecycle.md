@@ -60,7 +60,7 @@ The submit leg only fires when there's mailbox send-headroom for the result toda
 
 **Where:** `emails/steps/send.py` → `core/agents/outreach.py`
 
-The oldest `READY_TO_EMAIL` deal is picked when a mailbox is free to send. The outreach agent opens the conversation (its first-touch branch: a Mom Test question, not a pitch), it goes out over SMTP (BCC to the operator's own address on their own campaigns, never on freemium — `emails.sender.operator_bcc`), the outgoing `ChatMessage` is recorded, and the deal parks at `EMAILED`.
+The oldest `READY_TO_EMAIL` deal is picked when a mailbox is free to send. The outreach agent opens the conversation (its first-touch branch: a Mom Test question, not a pitch), it goes out over SMTP (BCC to the operator's own address on their own campaigns, never on freemium — `emails.sender.operator_bcc`), the send is recorded in the mail log and the deal points at the thread it opened, and the deal parks at `EMAILED`.
 
 Three guards decide whether a box is free, all of them on **first emails only**:
 
@@ -76,7 +76,7 @@ Three guards decide whether a box is free, all of them on **first emails only**:
 
 **Full documentation:** [`docs/outreach_agent.md`](outreach_agent.md)
 
-Nothing is chased. The mail pass (`emails/inbox.py:read_mail`) threads inbound replies onto their deal; a deal whose newest message is inbound is what makes the agent run again. It folds the new messages into the conversation summary and returns an `OutreachDecision`:
+Nothing is chased. The mail pass (`emails/mail_pass.py:run_mail_pass`) mirrors inbound mail into the log and threads it; a deal whose newest **turn** is inbound is what makes the agent run again — a bounce or an out-of-office is in the thread and is not a turn. It folds the new turns into the conversation summary and returns an `OutreachDecision`:
 
 | Action | Effect |
 |--------|--------|

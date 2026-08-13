@@ -102,25 +102,45 @@ RECEIVER_RESPONSES = frozenset(r for r, p in POLICIES.items() if p.from_receiver
 _ENHANCED_STATUS = re.compile(rb"\b([2-5])\.(\d{1,3})\.(\d{1,3})\b")
 
 
-def classify(exc: Exception) -> tuple[str, int | None, str]:
-    """Classify a failed send as ``(Response, smtp_code, detail)``.
+@dataclass(frozen=True)
+class Verdict:
+    """One failed send, read: what the far end said and how we understand it."""
+
+    response: str
+    smtp_code: int | None
+    enhanced_status: str
+    detail: str
+
+
+def classify(exc: Exception) -> Verdict:
+    """Classify a failed send.
 
     ``smtp_code`` is None when the failure never produced an SMTP response,
     which is itself the signal that the failure carries no reputation meaning.
     """
     if isinstance(exc, smtplib.SMTPAuthenticationError):
-        return Response.AUTH_FAILED, exc.smtp_code, _detail(exc.smtp_error)
+        return _verdict(Response.AUTH_FAILED, exc.smtp_code, exc.smtp_error)
 
     if isinstance(exc, smtplib.SMTPRecipientsRefused):
         # Per-recipient dict rather than a single response; we send to one
         # recipient at a time, so the first entry is the whole story.
         code, error = next(iter(exc.recipients.values()), (None, b""))
-        return _from_code(code, error), code, _detail(error)
+        return _verdict(_from_code(code, error), code, error)
 
     if isinstance(exc, smtplib.SMTPResponseException):
-        return _from_code(exc.smtp_code, exc.smtp_error), exc.smtp_code, _detail(exc.smtp_error)
+        return _verdict(_from_code(exc.smtp_code, exc.smtp_error), exc.smtp_code, exc.smtp_error)
 
-    return Response.TRANSPORT, None, _detail(str(exc))
+    return _verdict(Response.TRANSPORT, None, str(exc))
+
+
+def _verdict(response: str, code: int | None, error) -> Verdict:
+    status = _enhanced_status(error)
+    return Verdict(
+        response=response,
+        smtp_code=code,
+        enhanced_status=".".join(str(part) for part in status) if status else "",
+        detail=_detail(error),
+    )
 
 
 def _from_code(code: int | None, error) -> str:
@@ -160,21 +180,71 @@ def _detail(error) -> str:
 # ── Recording ─────────────────────────────────────────────────────────
 
 
-def record_failure(mailbox, exc: Exception):
-    """Classify a failed send, persist the verdict, and return its ``Policy``.
+# How a ``Response`` shows up in the delivery log. The status is the *fact* — what
+# happened to this send — and the response is the reading of it; a rejection and a
+# refused password are one status apart and worlds apart in meaning, which is
+# exactly why both are stored.
+_STATUS_FOR = {
+    Response.DEFERRED: "deferred",
+    Response.QUOTA_EXCEEDED: "rejected",
+    Response.BLOCKED: "rejected",
+    Response.REFUSED: "rejected",
+    # Nothing reached the receiver, so nothing about delivery is known — that is a
+    # different fact from being turned down, and it is recorded as one.
+    Response.AUTH_FAILED: "error",
+    Response.TRANSPORT: "error",
+}
+
+
+def record_acceptance(message, smtp_code: int | None, response):
+    """Record the ``250`` — the receiver taking responsibility for this message.
+
+    A successful send used to be the *absence* of a row, which is why 590 of them
+    left nothing to count. Recording it is what makes a rate a rate: bounces over
+    accepted sends, rather than bounces over a number nobody kept.
+    """
+    from openoutreach.emails.models import DeliveryEvent
+
+    text = _detail(response)
+    return DeliveryEvent.objects.create(
+        message=message,
+        status=DeliveryEvent.Status.ACCEPTED,
+        smtp_code=smtp_code,
+        queue_id=_queue_id(text),
+        detail=text,
+    )
+
+
+def record_failure(message, exc: Exception):
+    """Classify a failed send, persist the event, and return its ``Policy``.
 
     The single entry point: callers hand over the exception and act on the
     policy, rather than each deciding for itself what a code means.
     """
-    from openoutreach.emails.models import SendVerdict
+    from openoutreach.emails.models import DeliveryEvent
 
-    response, code, detail = classify(exc)
-    SendVerdict.objects.create(
-        mailbox=mailbox, response=response, smtp_code=code, detail=detail,
+    verdict = classify(exc)
+    DeliveryEvent.objects.create(
+        message=message,
+        status=_STATUS_FOR[verdict.response],
+        response=verdict.response,
+        smtp_code=verdict.smtp_code,
+        enhanced_status=verdict.enhanced_status,
+        detail=verdict.detail,
     )
-    policy = policy_for(response)
+    policy = policy_for(verdict.response)
+    address = message.mailbox.from_address
     logger.warning("send verdict on %s: %s (code=%s) %s",
-                   mailbox.from_address, response, code, detail)
+                   address, verdict.response, verdict.smtp_code, verdict.detail)
     if policy.needs_operator:
-        logger.error("%s needs attention — %s: %s", mailbox.from_address, response, detail)
+        logger.error("%s needs attention — %s: %s", address, verdict.response, verdict.detail)
     return policy
+
+
+_QUEUE_ID = re.compile(r"\bOK\b[\s:]+(\S+)", re.IGNORECASE)
+
+
+def _queue_id(text: str) -> str:
+    """The receiver's queue id out of its acceptance line, or ""."""
+    match = _QUEUE_ID.search(text)
+    return match.group(1)[:128] if match else ""

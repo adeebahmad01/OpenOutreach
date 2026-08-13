@@ -4,7 +4,7 @@ Single LLM boundary for the lazy summary pipeline. Summaries are stored as
 JSON fact lists on `Deal.profile_summary` and `Deal.chat_summary`. Both are
 campaign-scoped derived caches: deleting them and re-running the lazy path
 rebuilds them from source (the lead's stored `profile_text` for
-`profile_summary`, `ChatMessage` rows for `chat_summary` — no re-scrape).
+`profile_summary`, mail-log turns for `chat_summary` — no re-scrape).
 """
 from __future__ import annotations
 
@@ -167,7 +167,7 @@ def materialize_profile_summary_if_missing(deal) -> None:
 # ── Chat summary ──
 
 def _format_messages_for_extraction(messages: Iterable) -> str:
-    """Render ChatMessages as a labeled transcript for fact extraction.
+    """Render conversation turns as a labeled transcript for fact extraction.
 
     Both sides are included so the LLM can disambiguate anaphoric lead
     replies ("yes", "that sounds good") using the preceding outgoing
@@ -180,11 +180,11 @@ def _format_messages_for_extraction(messages: Iterable) -> str:
     lines: list[str] = []
     has_incoming = False
     for m in messages:
-        content = (m.content or "").strip()
+        content = (m.body_text or "").strip()
         if not content:
             continue
-        tag = "[Me]" if m.is_outgoing else "[Lead]"
-        if not m.is_outgoing:
+        tag = "[Me]" if m.is_outbound else "[Lead]"
+        if not m.is_outbound:
             has_incoming = True
         lines.append(f"{tag} {content}")
     if not has_incoming:
@@ -193,7 +193,7 @@ def _format_messages_for_extraction(messages: Iterable) -> str:
 
 
 def update_chat_summary(deal, new_messages, *, seller_name: str) -> None:
-    """Fold newly-synced ChatMessages into `deal.chat_summary` incrementally.
+    """Fold newly-read inbound turns into `deal.chat_summary` incrementally.
 
     Existing facts are preserved; only new messages are sent to the LLM.
     `seller_name` binds the [Me] tag during both extraction and

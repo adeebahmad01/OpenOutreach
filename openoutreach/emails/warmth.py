@@ -9,7 +9,7 @@ metrics below roughly 100 messages/day to Gmail, an order above where a safe
 cold sender operates, and seed-list placement tests measure a panel rather than
 the box.
 
-Reading the Sent folder (rather than counting our own ``ChatMessage`` rows) is
+Reading the Sent folder (rather than counting our own mail-log rows) is
 deliberate: the receiver counts *every* message the box emits — a human's mail,
 a provider's warmup traffic — and a ceiling derived from our own ledger alone
 would be blind to all of it.
@@ -34,6 +34,7 @@ from email.utils import parsedate_to_datetime
 from django.utils import timezone
 
 from openoutreach.core.conf import (
+    WARM_BOUNCE_TOLERANCE,
     WARM_CEILING_SENDS,
     WARM_FLOOR_SENDS,
     WARM_GROWTH_FACTOR,
@@ -83,7 +84,11 @@ def refresh_capacity(mailbox) -> int:
                        mailbox.from_address, exc, mailbox.daily_limit)
         return mailbox.daily_limit
 
-    capacity = capacity_from(history, clean=not _receiver_pushed_back(mailbox))
+    capacity = capacity_from(
+        history,
+        clean=not _receiver_pushed_back(mailbox),
+        bouncing=_is_bouncing(mailbox),
+    )
     mailbox.daily_limit = capacity
     mailbox.save(update_fields=["daily_limit"])
     logger.info("warmth: %s measured at %d/day (%d day(s) of history)",
@@ -94,12 +99,20 @@ def refresh_capacity(mailbox) -> int:
 # ── Measurement ───────────────────────────────────────────────────────
 
 
-def capacity_from(history: Counter, *, clean: bool) -> int:
+def capacity_from(history: Counter, *, clean: bool, bouncing: bool = False) -> int:
     """Daily capacity implied by a date → sends-that-day mapping.
 
     ``clean`` is the growth gate: with no failed send in the recent window the
     box may step above what it has sustained, otherwise it holds there. Empty
     history (a box that has never sent) yields the floor.
+
+    ``bouncing`` is the only rule here that points *downwards*. Holding volume
+    steady is the right answer to a receiver pacing us, and the wrong one to a
+    box mailing dead addresses: a bounce rate above the tolerance is the box
+    damaging itself, and it must send **less** without waiting for a human to
+    notice. Halving rather than stopping, because the same evidence at the same
+    rate halves it again tomorrow, and a box that stops sending stops producing
+    the evidence that would let it recover.
     """
     active_days = sorted(n for n in history.values() if n > 0)
     if not active_days:
@@ -107,6 +120,8 @@ def capacity_from(history: Counter, *, clean: bool) -> int:
 
     sustained = _percentile(active_days, 75)
     allowed = sustained * WARM_GROWTH_FACTOR if clean else sustained
+    if bouncing:
+        allowed = allowed / 2
     return int(max(WARM_FLOOR_SENDS, min(WARM_CEILING_SENDS, allowed)))
 
 
@@ -124,13 +139,32 @@ def _receiver_pushed_back(mailbox) -> bool:
     also fails a send, but neither is the receiver saying anything about this
     mailbox — letting them gate growth would mean a flaky network throttling a
     healthy box.
+
+    A **bounce** is such a verdict, and it is the one this could not previously
+    see: it arrives hours later as ordinary mail rather than as an exception, so
+    while delivery was recorded only from inside an exception handler the ramp
+    was blind to exactly the failure that matters most.
     """
     from openoutreach.emails.delivery_policy import RECEIVER_RESPONSES
+    from openoutreach.emails.models import DeliveryEvent
 
-    return mailbox.verdicts.filter(
+    return DeliveryEvent.objects.filter(
+        message__mailbox=mailbox,
         response__in=RECEIVER_RESPONSES,
-        created_at__gte=timezone.now() - timedelta(days=1),
+        occurred_at__gte=timezone.now() - timedelta(days=1),
     ).exists()
+
+
+def _is_bouncing(mailbox) -> bool:
+    """True when this box's bounce rate is above what a healthy sender runs at."""
+    from openoutreach.emails.report import bounce_rate
+
+    rate = bounce_rate(mailbox)
+    if rate <= WARM_BOUNCE_TOLERANCE:
+        return False
+    logger.warning("warmth: %s is bouncing at %.1f%% — halving its capacity",
+                   mailbox.from_address, rate * 100)
+    return True
 
 
 # ── IMAP transport ────────────────────────────────────────────────────

@@ -186,7 +186,7 @@ Configure behavior via Django Admin (`SiteConfig` + `Campaign`).
 │   ├── emails/                      # discovery/enrichment client, Mailbox + SMTP/IMAP,
 │   │                                #   sender, the mail pass, the pipeline steps
 │   ├── crm/                         # Lead + Deal models
-│   ├── chat/                        # ChatMessage (per-Deal conversation)
+│   ├── chat/                        # model-less migration anchor
 │   └── legacy/                      # model-less migration-history anchor (retired channel)
 ├── manage.py                         # Django management (no args defaults to rundaemon)
 ├── local.yml                        # Docker Compose

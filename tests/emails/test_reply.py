@@ -11,47 +11,45 @@ from unittest.mock import patch
 import pytest
 from django.utils import timezone
 
-from openoutreach.chat.models import ChatMessage
 from openoutreach.core.agents.outreach import OutreachDecision
 from openoutreach.core.cycle import unanswered_replies
 from openoutreach.crm.models import DealState
 from openoutreach.emails.models import Mailbox
 from openoutreach.emails.steps.reply import answer_reply
+from tests.emails import maillog
 from tests.factories import DealFactory, LeadFactory
 
 SENDER = "s@infra.com"
 
 
 def _box() -> Mailbox:
-    return Mailbox.objects.create(
-        username=SENDER, password="pw", from_address=SENDER, daily_limit=10,
-    )
+    return maillog.mailbox(SENDER, daily_limit=10)
 
 
-def _emailed(campaign, box, when=None):
-    """A deal we have emailed, with the first email recorded as the thread root."""
+def _emailed(campaign, box, when=None, email="p@corp.com", root="root@infra.com"):
+    """A deal we have emailed — a thread in the log with our opener in it."""
     when = when or timezone.now() - timedelta(days=3)
-    deal = DealFactory(
+    sent = maillog.outbound(box, to=email, message_id=root, body="The opener.",
+                            sent_at=when)
+    return DealFactory(
         campaign=campaign,
-        lead=LeadFactory(email="p@corp.com"),
+        lead=LeadFactory(email=email),
         state=DealState.EMAILED,
         mailbox=box,
         email_subject="Hi",
-        email_message_id="<root@infra.com>",
+        thread=sent.thread,
         email_sent_at=when,
     )
-    ChatMessage.objects.create(
-        deal=deal, external_id="<root@infra.com>", content="The opener.",
-        is_outgoing=True, creation_date=when,
-    )
-    return deal
 
 
 def _reply(deal, when=None, content="Sure, tell me more."):
-    return ChatMessage.objects.create(
-        deal=deal, external_id=f"<r{ChatMessage.objects.count()}@corp.com>",
-        content=content, is_outgoing=False, creation_date=when or timezone.now(),
-    )
+    return maillog.inbound(deal.thread.mailbox, thread=deal.thread, body=content,
+                           sent_at=when or timezone.now())
+
+
+def _our_answer(deal, when=None):
+    return maillog.outbound(deal.thread.mailbox, thread=deal.thread,
+                            body="Answered.", sent_at=when or timezone.now())
 
 
 # ── What makes a deal actionable ──────────────────────────────────
@@ -78,10 +76,7 @@ class TestUnansweredReplies:
         box = _box()
         deal = _emailed(campaign, box)
         _reply(deal, when=timezone.now() - timedelta(hours=2))
-        ChatMessage.objects.create(
-            deal=deal, external_id="<ours@infra.com>", content="Answered.",
-            is_outgoing=True, creation_date=timezone.now(),
-        )
+        _our_answer(deal)
 
         assert list(unanswered_replies(campaign)) == []
 
@@ -89,10 +84,7 @@ class TestUnansweredReplies:
         box = _box()
         deal = _emailed(campaign, box)
         _reply(deal, when=timezone.now() - timedelta(hours=2))
-        ChatMessage.objects.create(
-            deal=deal, external_id="<ours@infra.com>", content="Answered.",
-            is_outgoing=True, creation_date=timezone.now() - timedelta(hours=1),
-        )
+        _our_answer(deal, when=timezone.now() - timedelta(hours=1))
         _reply(deal, when=timezone.now())
 
         assert list(unanswered_replies(campaign)) == [deal]
@@ -110,10 +102,7 @@ class TestUnansweredReplies:
         box = _box()
         waiting = _emailed(campaign, box)
         _reply(waiting, when=timezone.now() - timedelta(hours=5))
-        fresh = DealFactory(
-            campaign=campaign, lead=LeadFactory(email="q@corp.com"),
-            state=DealState.EMAILED, mailbox=box, email_message_id="<root2@infra.com>",
-        )
+        fresh = _emailed(campaign, box, email="q@corp.com", root="root2@infra.com")
         _reply(fresh, when=timezone.now())
 
         assert list(unanswered_replies(campaign)) == [waiting, fresh]
@@ -140,7 +129,9 @@ class TestAnswerReply:
                    return_value=decision), \
                 patch("openoutreach.core.db.summaries.update_chat_summary"), \
                 patch("openoutreach.emails.sender.send_email",
-                      return_value="<sent@infra.com>") as send:
+                      side_effect=lambda box, *a, **kw: maillog.outbound(
+                          box, thread=kw.get("thread"),
+                          message_id="sent@infra.com")) as send:
             return send, answer_reply(deal)
 
     def test_a_reply_is_threaded_and_recorded(self, campaign):
@@ -153,10 +144,13 @@ class TestAnswerReply:
 
         assert next_state is None  # stays EMAILED
         kwargs = send.call_args.kwargs
-        assert kwargs["references"] == "<root@infra.com>"
+        # The whole chain, so a client threading on the root and one threading on
+        # the newest message both find their anchor.
+        assert "<root@infra.com>" in kwargs["references"]
+        assert kwargs["in_reply_to"] == kwargs["references"].split()[-1]
+        assert kwargs["thread"] == deal.thread
         assert send.call_args.args[2] == "Re: Hi"
-        assert ChatMessage.objects.filter(
-            deal=deal, is_outgoing=True, external_id="<sent@infra.com>").exists()
+        assert deal.thread.messages.filter(message_id="sent@infra.com").exists()
 
     def test_answering_makes_the_deal_quiet_again(self, campaign):
         box = _box()

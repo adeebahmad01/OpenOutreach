@@ -127,9 +127,10 @@ class TestUpdateChatSummary:
     BINDING = {"seller_name": "Diego"}
 
     def _msg(self, content, is_outgoing):
+        """A mail-log turn, as the reply step hands them over."""
         m = MagicMock()
-        m.content = content
-        m.is_outgoing = is_outgoing
+        m.body_text = content
+        m.is_outbound = is_outgoing
         return m
 
     def test_noop_on_empty_messages(self, db, deal_with_lead):

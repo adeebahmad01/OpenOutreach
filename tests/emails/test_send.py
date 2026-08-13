@@ -21,14 +21,14 @@ from openoutreach.emails.sender import (
     send_email,
     unsubscribe_address,
 )
+from openoutreach.emails.models import Thread
 from openoutreach.emails.steps.send import send_first_email
+from tests.emails import maillog
 from tests.factories import DealFactory, LeadFactory
 
 
 def _box(email="a@b.com", daily_limit=10):
-    return Mailbox.objects.create(
-        username=email, password="pw", from_address=email, daily_limit=daily_limit,
-    )
+    return maillog.mailbox(email, daily_limit=daily_limit)
 
 
 def _ready(campaign, email="lead@corp.com"):
@@ -41,30 +41,26 @@ def _ready(campaign, email="lead@corp.com"):
 
 
 def _record_send(deal, box, user, when=None):
-    """Register one first contact on a box — what the cap ledger counts."""
-    from openoutreach.chat.models import ChatMessage
+    """Register one first contact on a box — what the cap ledger counts.
 
+    The ledger reads the transport log, so this writes what a send writes: an
+    outbound message opening a thread, and a deal pointing at that thread.
+    """
     when = when or timezone.now()
+    thread = Thread.objects.create(mailbox=box)
+    maillog.outbound(box, thread=thread, to=deal.lead.email, sent_at=when)
     deal.mailbox = box
+    deal.thread = thread
     deal.state = DealState.EMAILED
     deal.email_sent_at = when
     deal.save()
-    ChatMessage.objects.create(
-        deal=deal, external_id=f"<m{deal.pk}@corp.com>", content="body",
-        is_outgoing=True, owner=user, creation_date=when,
-    )
     return deal
 
 
 def _record_reply_exchange(deal, box, user, when):
     """One inbound reply and our answer, both inside an existing thread."""
-    from openoutreach.chat.models import ChatMessage
-
-    for i, outgoing in enumerate((False, True)):
-        ChatMessage.objects.create(
-            deal=deal, external_id=f"<r{deal.pk}-{i}@corp.com>", content="body",
-            is_outgoing=outgoing, owner=user, creation_date=when,
-        )
+    maillog.inbound(box, thread=deal.thread, sent_at=when)
+    maillog.outbound(box, thread=deal.thread, to=deal.lead.email, sent_at=when)
 
 
 # ── Mailbox pacing ────────────────────────────────────────────────
@@ -152,17 +148,17 @@ class TestPickingABox:
         inside the window, so the cap would reset an hour before the day ends."""
         from zoneinfo import ZoneInfo
 
-        from openoutreach.emails.models import _local_midnight
+        from openoutreach.emails.models.mailbox import _local_midnight
 
         zone = ZoneInfo("America/New_York")
-        with patch("openoutreach.emails.models.operator_timezone", return_value=zone):
+        with patch("openoutreach.emails.models.mailbox.operator_timezone", return_value=zone):
             midnight = _local_midnight()
         assert midnight.astimezone(zone).hour == 0
 
     def test_no_box_is_free_outside_the_sending_window(self, campaign):
         """Out of hours nothing opens a conversation, however much headroom is left."""
         _box(daily_limit=10)
-        with patch("openoutreach.emails.models.within_sending_window", return_value=False):
+        with patch("openoutreach.emails.models.mailbox.within_sending_window", return_value=False):
             assert Mailbox.objects.free_for_first_email() is None
 
 
@@ -190,16 +186,17 @@ class TestEmailableDeals:
         assert list(get_emailable_deals(campaign)) == [first, second]
 
 
+@pytest.mark.django_db
 class TestSendEmailBcc:
     def test_bcc_header_set_when_address_given(self):
-        box = Mailbox(username="s@infra.com", password="pw", from_address="s@infra.com")
+        box = maillog.mailbox("s@infra.com")
         with patch("openoutreach.emails.sender._deliver") as deliver:
             send_email(box, "lead@corp.com", "Hi", "Body", bcc="me@mine.com")
         message = deliver.call_args.args[1]
         assert message["Bcc"] == "me@mine.com"
 
     def test_no_bcc_header_when_address_blank(self):
-        box = Mailbox(username="s@infra.com", password="pw", from_address="s@infra.com")
+        box = maillog.mailbox("s@infra.com")
         with patch("openoutreach.emails.sender._deliver") as deliver:
             send_email(box, "lead@corp.com", "Hi", "Body", bcc="")
         message = deliver.call_args.args[1]
@@ -211,8 +208,7 @@ class TestSentBodyLogging:
     """The message text is logged for the operator's own campaigns, never freemium."""
 
     def _send(self, campaign, caplog):
-        box = Mailbox(username="s@infra.com", password="pw",
-                      from_address="s@infra.com", signature="— Ercole")
+        box = maillog.mailbox("s@infra.com", signature="— Ercole")
         with caplog.at_level(logging.INFO, logger="openoutreach.emails.sender"), \
              patch("openoutreach.emails.sender._deliver"):
             send_email(box, "lead@corp.com", "Hi there", "How do you do discovery today?",
@@ -239,7 +235,7 @@ class TestSentBodyLogging:
 
     def test_no_campaign_logs_metadata_only(self, caplog):
         """The default stays metadata-only, so a new call site cannot leak by omission."""
-        box = Mailbox(username="s@infra.com", password="pw", from_address="s@infra.com")
+        box = maillog.mailbox("s@infra.com")
         with caplog.at_level(logging.INFO, logger="openoutreach.emails.sender"), \
              patch("openoutreach.emails.sender._deliver"):
             send_email(box, "lead@corp.com", "Hi there", "Secret body")
@@ -261,12 +257,10 @@ class TestOperatorBcc:
         assert operator_bcc(operator, campaign) is None
 
 
+@pytest.mark.django_db
 class TestSendEmailSignature:
     def _sent_body(self, signature: str | None) -> str:
-        box = Mailbox(
-            username="s@infra.com", password="pw", from_address="s@infra.com",
-            signature=signature,
-        )
+        box = maillog.mailbox("s@infra.com", signature=signature)
         with patch("openoutreach.emails.sender._deliver") as deliver:
             send_email(box, "lead@corp.com", "Hi", "Body")
         return deliver.call_args.args[1].get_content()
@@ -285,12 +279,10 @@ class TestSendEmailSignature:
         assert self._sent_body(None) == f"Body\n\n{OPT_OUT_LINE}\n\n{ATTRIBUTION}\n"
 
 
+@pytest.mark.django_db
 class TestSendEmailAttribution:
     def _box(self, signature=None):
-        return Mailbox(
-            username="s@infra.com", password="pw", from_address="s@infra.com",
-            signature=signature,
-        )
+        return maillog.mailbox("s@infra.com", signature=signature)
 
     def _sent_body(self, box, **kwargs) -> str:
         with patch("openoutreach.emails.sender._deliver") as deliver:
@@ -333,7 +325,9 @@ class TestSendFirstEmail:
             return_value=OutreachDecision(
                 action="send_message", subject=subject, message=message),
         ), patch(
-            "openoutreach.emails.sender.send_email", return_value="<mid@corp.com>",
+            "openoutreach.emails.sender.send_email",
+            side_effect=lambda mailbox, *a, **kw: maillog.outbound(
+                mailbox, message_id="mid@corp.com"),
         ) as send:
             next_state = send_first_email(deal, box)
         deal.save()
@@ -356,19 +350,20 @@ class TestSendFirstEmail:
         deal.refresh_from_db()
         assert deal.mailbox == box
         assert deal.email_subject == "Hi there"
-        assert deal.email_message_id == "<mid@corp.com>"
+        assert deal.thread is not None
         assert deal.email_sent_at is not None
 
-    def test_the_sent_email_is_recorded_as_the_thread_root(self, campaign, operator):
-        from openoutreach.chat.models import ChatMessage
-
+    def test_the_deal_points_at_the_thread_the_send_opened(self, campaign, operator):
+        """One record, not two: the deal borrows the log's thread rather than
+        keeping its own copy of the conversation to drift from it."""
         box = _box(daily_limit=10)
         deal = _ready(campaign, "lead@corp.com")
         self._run(deal, box)
 
-        message = ChatMessage.objects.get(deal=deal)
-        assert message.is_outgoing
-        assert message.external_id == "<mid@corp.com>"
+        deal.refresh_from_db()
+        message = deal.thread.messages.get()
+        assert message.is_outbound
+        assert message.message_id == "mid@corp.com"
 
     def test_no_follow_up_clock_is_armed(self, campaign, operator):
         """Nobody is chased, so a sent deal carries no schedule at all."""

@@ -12,18 +12,15 @@ import pytest
 from django.utils import timezone
 from pydantic_ai.exceptions import ModelHTTPError
 
-from openoutreach.chat.models import ChatMessage
 from openoutreach.core import cycle
 from openoutreach.crm.models import DealState
 from openoutreach.emails.models import Mailbox
+from tests.emails import maillog
 from tests.factories import DealFactory, LeadFactory
 
 
 def _box(daily_limit=10) -> Mailbox:
-    return Mailbox.objects.create(
-        username="s@infra.com", password="pw", from_address="s@infra.com",
-        daily_limit=daily_limit,
-    )
+    return maillog.mailbox("s@infra.com", daily_limit=daily_limit)
 
 
 def _deal(campaign, state, **kwargs):
@@ -85,10 +82,11 @@ class TestPriority:
     def test_a_reply_outranks_a_first_email(self, campaign, steps):
         """Someone who wrote back is owed an answer before a stranger is contacted."""
         box = _box()
-        replied = _deal(campaign, DealState.EMAILED, mailbox=box,
-                        email_message_id="<root@infra.com>", email="p@corp.com")
-        ChatMessage.objects.create(deal=replied, external_id="<r@corp.com>",
-                                   content="hi", is_outgoing=False)
+        sent = maillog.outbound(box, to="p@corp.com",
+                                sent_at=timezone.now() - timedelta(hours=1))
+        _deal(campaign, DealState.EMAILED, mailbox=box, thread=sent.thread,
+              email="p@corp.com")
+        maillog.inbound(box, thread=sent.thread, sender="p@corp.com")
         _deal(campaign, DealState.READY_TO_EMAIL, email="a@corp.com")
 
         cycle.run_one_action(campaign)

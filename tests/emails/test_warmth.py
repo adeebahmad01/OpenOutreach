@@ -9,13 +9,14 @@ import pytest
 from openoutreach.core.conf import WARM_CEILING_SENDS, WARM_FLOOR_SENDS
 from openoutreach.emails.delivery_policy import Response
 from openoutreach.emails import warmth
-from openoutreach.emails.models import Mailbox, SendVerdict
+from openoutreach.emails.models import DeliveryEvent, Mailbox
 from openoutreach.emails.warmth import (
     capacity_from,
     mark_measured,
     measurement_due,
     refresh_capacity,
 )
+from tests.emails import maillog
 
 
 def _history(*daily_counts: int) -> Counter:
@@ -33,8 +34,16 @@ def _clear_measurement_cache():
 
 
 def _box(**kwargs) -> Mailbox:
-    return Mailbox.objects.create(
-        username="a@b.com", password="pw", from_address="a@b.com", **kwargs,
+    return maillog.mailbox("a@b.com", **kwargs)
+
+
+def _verdict(box, response, smtp_code):
+    """One recorded refusal against a send from *box*."""
+    return DeliveryEvent.objects.create(
+        message=maillog.outbound(box),
+        status="deferred" if response == Response.DEFERRED else "error",
+        response=response,
+        smtp_code=smtp_code,
     )
 
 
@@ -94,10 +103,7 @@ class TestRefreshCapacity:
 
     def test_receiver_pushback_holds_capacity_at_demonstrated_volume(self):
         box = _box()
-        SendVerdict.objects.create(
-            mailbox=box, response=Response.DEFERRED, smtp_code=421,
-            detail="4.7.0 unusual rate of mail",
-        )
+        _verdict(box, Response.DEFERRED, 421)
         with patch("openoutreach.emails.warmth.read_sent_history",
                    return_value=_history(20, 20, 20)):
             assert refresh_capacity(box) == 20
@@ -106,23 +112,58 @@ class TestRefreshCapacity:
         # A dropped socket is not the receiver saying anything about this box;
         # a flaky network must not cost it capacity.
         box = _box()
-        SendVerdict.objects.create(
-            mailbox=box, response=Response.TRANSPORT, smtp_code=None,
-            detail="connection reset by peer",
-        )
+        _verdict(box, Response.TRANSPORT, None)
         with patch("openoutreach.emails.warmth.read_sent_history",
                    return_value=_history(20, 20, 20)):
             assert refresh_capacity(box) == 30
 
     def test_another_box_pushback_does_not_hold_this_one(self):
         box = _box()
-        other = Mailbox.objects.create(
-            username="c@d.com", password="pw", from_address="c@d.com",
-        )
-        SendVerdict.objects.create(mailbox=other, response=Response.DEFERRED, smtp_code=421)
+        other = maillog.mailbox("c@d.com")
+        _verdict(other, Response.DEFERRED, 421)
         with patch("openoutreach.emails.warmth.read_sent_history",
                    return_value=_history(20, 20, 20)):
             assert refresh_capacity(box) == 30
+
+
+@pytest.mark.django_db
+class TestBouncingBoxSendsLess:
+    """A box mailing dead addresses must send *less*, with nobody intervening.
+
+    This is the signal the ramp could not previously receive at all: a bounce
+    arrives hours later as ordinary mail, and delivery was only ever recorded from
+    inside an exception handler. 590 sends produced 0 rows while the domain
+    bounced itself onto a blocklist and capacity grew x1.5 a day.
+    """
+
+    def _box_with_bounces(self, sends: int, bounces: int) -> Mailbox:
+        box = _box()
+        for i in range(sends):
+            send = maillog.outbound(box, message_id=f"s{i}@corp.com")
+            maillog.accepted(send)
+            if i < bounces:
+                maillog.bounced(send)
+        return box
+
+    def test_a_clean_box_still_grows(self):
+        box = self._box_with_bounces(sends=20, bounces=0)
+        with patch("openoutreach.emails.warmth.read_sent_history",
+                   return_value=_history(20, 20, 20)):
+            assert refresh_capacity(box) == 30
+
+    def test_a_bouncing_box_is_cut_below_what_it_sustained(self):
+        box = self._box_with_bounces(sends=20, bounces=4)   # 20% — far over tolerance
+        with patch("openoutreach.emails.warmth.read_sent_history",
+                   return_value=_history(20, 20, 20)):
+            # Not 30 (growth), not even 20 (hold): a bouncing box goes down.
+            assert refresh_capacity(box) == 10
+
+    def test_a_bounce_is_receiver_pushback(self):
+        """Asynchronous failure reaches the growth gate, not just the cut."""
+        box = self._box_with_bounces(sends=100, bounces=1)  # 1% — under tolerance
+        with patch("openoutreach.emails.warmth.read_sent_history",
+                   return_value=_history(20, 20, 20)):
+            assert refresh_capacity(box) == 20
 
 
 class TestMeasurementCadence:

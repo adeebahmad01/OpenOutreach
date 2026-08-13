@@ -45,6 +45,13 @@ FASTEMBED_CACHE_DIR = ROOT_DIR / ".cache" / "fastembed"
 WARM_HISTORY_DAYS = 30      # trailing window of Sent history to measure
 WARM_GROWTH_FACTOR = 1.5    # step above demonstrated volume, when the window is clean
 WARM_FLOOR_SENDS = 5        # a box with no history still sends this much
+# The bounce rate above which a box is damaging itself and must send *less* — the
+# one rule in the measurement that points downwards. 5% is the line the major
+# receivers and every ESP draw between "some addresses go stale" and "this sender
+# does not know who it is mailing"; past it, reputation degrades on its own. It is
+# checkable at cold-outreach volume, unlike anything Postmaster Tools reports, and
+# it is only computable at all now that every accepted send leaves a row.
+WARM_BOUNCE_TOLERANCE = 0.05
 # WARM_CEILING_SENDS — derived from the pacing constants; see below.
 
 # ----------------------------------------------------------------------

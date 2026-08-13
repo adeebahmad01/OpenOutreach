@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import logging
 
-from django.utils import timezone
 from termcolor import colored
 
 from openoutreach.crm.models import DealState
@@ -56,26 +55,35 @@ def answer_reply(deal) -> DealState | None:
 
 
 def _fold_new_messages_into_summary(deal) -> None:
-    """Roll every unanswered inbound message into ``deal.chat_summary``.
+    """Roll every unanswered inbound turn into ``deal.chat_summary``.
 
-    "Unanswered" is exactly the set that made this deal actionable — inbound rows
+    "Unanswered" is exactly the set that made this deal actionable — inbound turns
     newer than our newest outgoing one — so nothing needs to remember which
     messages have already been folded.
+
+    **Turns only.** A non-delivery report is in the thread and is not one, so it
+    can never reach the summary, the agent's context, or a second apology to a
+    dead address. That is closed here by the schema rather than by a filter each
+    read site has to remember.
     """
-    from openoutreach.chat.models import ChatMessage
     from openoutreach.core.db.summaries import update_chat_summary
     from openoutreach.core.operator import seller_name
+    from openoutreach.emails.models import Direction
+
+    turns = deal.thread.turns() if deal.thread_id else None
+    if turns is None:
+        return
 
     last_outgoing = (
-        ChatMessage.objects.filter(deal=deal, is_outgoing=True)
-        .order_by("-creation_date", "-pk")
-        .values_list("creation_date", flat=True)
+        turns.filter(direction=Direction.OUTBOUND)
+        .order_by("-sent_at", "-pk")
+        .values_list("sent_at", flat=True)
         .first()
     )
-    unanswered = ChatMessage.objects.filter(deal=deal, is_outgoing=False)
+    unanswered = turns.filter(direction=Direction.INBOUND)
     if last_outgoing:
-        unanswered = unanswered.filter(creation_date__gt=last_outgoing)
-    new_messages = list(unanswered.order_by("creation_date", "pk"))
+        unanswered = unanswered.filter(sent_at__gt=last_outgoing)
+    new_messages = list(unanswered)
     if not new_messages:
         return
 
@@ -92,7 +100,6 @@ def _send_reply(deal, decision) -> DealState | None:
     No state change and no timer: writing the outgoing message is itself what makes
     the deal stop being actionable, because its newest message is ours again.
     """
-    from openoutreach.chat.models import ChatMessage
     from openoutreach.core.operator import get_active_user
     from openoutreach.emails.sender import operator_bcc, send_email, suppressed
 
@@ -103,23 +110,17 @@ def _send_reply(deal, decision) -> DealState | None:
 
     logger.info("[%s] reply to %s: %s",
                 deal.campaign, deal.lead.profile_url, decision.message)
-    message_id = send_email(
+    chain = _thread_ids(deal)
+    send_email(
         deal.mailbox,
         deal.lead.email,
         _reply_subject(deal.email_subject),
         decision.message,
         campaign=deal.campaign,
         bcc=operator_bcc(get_active_user(), deal.campaign),
-        in_reply_to=_latest_external_id(deal),
-        references=deal.email_message_id,
-    )
-    ChatMessage.objects.create(
-        deal=deal,
-        external_id=message_id,
-        content=decision.message,
-        is_outgoing=True,
-        owner=get_active_user(),
-        creation_date=timezone.now(),
+        in_reply_to=chain[-1] if chain else None,
+        references=" ".join(chain) or None,
+        thread=deal.thread,
     )
     return None
 
@@ -148,18 +149,18 @@ def _reply_subject(opener_subject: str) -> str:
     return subject if subject.lower().startswith("re:") else f"Re: {subject}"
 
 
-def _latest_external_id(deal) -> str:
-    """Message-ID of the newest message in the thread — the reply's ``In-Reply-To``.
+def _thread_ids(deal) -> list[str]:
+    """Every Message-ID in this conversation, oldest first, bracketed for a header.
 
-    Falls back to the thread root when the thread has no rows yet (shouldn't happen
-    on an EMAILED deal, whose first email is always recorded).
+    The whole chain, because that is what ``References`` is for: a client that
+    threads on the root and one that threads on the newest message both find their
+    anchor in it, and the last entry is the parent ``In-Reply-To`` names.
     """
-    from openoutreach.chat.models import ChatMessage
-
-    latest = (
-        ChatMessage.objects.filter(deal=deal)
-        .order_by("-creation_date", "-pk")
-        .values_list("external_id", flat=True)
-        .first()
-    )
-    return latest or deal.email_message_id
+    if not deal.thread_id:
+        return []
+    return [
+        f"<{message_id}>"
+        for message_id in deal.thread.messages.order_by("sent_at", "pk")
+        .values_list("message_id", flat=True)
+        if not message_id.startswith("sha256:")
+    ]

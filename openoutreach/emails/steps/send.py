@@ -38,7 +38,6 @@ def send_first_email(deal, mailbox) -> DealState | None:
     the lead was suppressed while the agent was writing — an unsubscribe can land in
     the seconds an LLM call takes, and this is the last gate before the message goes.
     """
-    from openoutreach.chat.models import ChatMessage
     from openoutreach.core.agents.outreach import run_outreach_agent
     from openoutreach.core.db.summaries import materialize_profile_summary_if_missing
     from openoutreach.core.operator import get_active_user
@@ -56,26 +55,20 @@ def send_first_email(deal, mailbox) -> DealState | None:
                        deal.campaign, deal.lead.profile_url)
         return None
 
-    message_id = send_email(
+    sent = send_email(
         mailbox, deal.lead.email, opener.subject, opener.message,
         campaign=deal.campaign,
         bcc=operator_bcc(get_active_user(), deal.campaign),
     )
 
-    now = timezone.now()
+    # The send wrote itself into the mail log and opened a thread; the deal just
+    # points at the conversation it started. Nothing about this message is stored
+    # twice, so nothing about it can disagree with itself later.
     deal.mailbox = mailbox
     deal.email_subject = opener.subject
-    deal.email_message_id = message_id
-    deal.email_sent_at = now
-    ChatMessage.objects.create(
-        deal=deal,
-        external_id=message_id,
-        content=opener.message,
-        is_outgoing=True,
-        owner=get_active_user(),
-        creation_date=now,
-    )
-    _space_out(mailbox, now)
+    deal.thread = sent.thread
+    deal.email_sent_at = sent.sent_at
+    _space_out(mailbox, timezone.now())
     return DealState.EMAILED
 
 

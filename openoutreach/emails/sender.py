@@ -12,6 +12,8 @@ import smtplib
 from email.message import EmailMessage
 from email.utils import make_msgid
 
+from django.utils import timezone
+
 logger = logging.getLogger(__name__)
 
 SMTP_TIMEOUT_SECONDS = 30
@@ -27,8 +29,9 @@ def send_email(
     bcc: str | None = None,
     in_reply_to: str | None = None,
     references: str | None = None,
-) -> str:
-    """Send ``body`` from ``mailbox`` to ``to_address``; return the Message-ID.
+    thread=None,
+):
+    """Send ``body`` from ``mailbox`` to ``to_address``; return its ``Message`` row.
 
     The mailbox's signature, the opt-out block and the product attribution line
     are appended to ``body`` here rather than at the call sites, so every send —
@@ -37,27 +40,35 @@ def send_email(
     same message: header and body line are two halves of one opt-out, and only
     building them together makes it impossible to ship one without the other.
 
+    **The send joins the mail log before it is attempted**, and what the receiver
+    answers is recorded against it: an ``accepted`` event carrying the SMTP queue
+    id, or a ``rejected``/``deferred``/``error`` one carrying the refusal. A send
+    that is never accepted therefore leaves a row saying so, which is what makes
+    "what is my bounce rate?" arithmetic rather than an opinion.
+
     ``bcc`` (when set) blind-copies the operator's own address so they keep a
     private record of every send; ``send_message`` strips the Bcc header before
     transmission, so the To recipient never sees it. Call sites get it from
     ``operator_bcc`` rather than deciding for themselves.
 
     ``in_reply_to``/``references`` thread a reply onto an existing email thread
-    (both are prior Message-IDs). The returned Message-ID is stored on the
-    outgoing ChatMessage so the next touch can thread onto it.
+    (both are prior Message-IDs); ``thread`` puts the row in that conversation
+    directly, rather than making the log re-derive what the caller already knows.
 
     ``campaign`` decides whether the message *text* is logged as well as its
     metadata — see ``_sent_block``. It is passed rather than inferred from ``bcc``,
     which is ``None`` both on freemium campaigns and on an operator who never set
     an address; keying off it would silently drop the log for the second.
     """
-    message = _build_message(mailbox, to_address, subject, body, bcc, in_reply_to, references)
-    _deliver(mailbox, message)
+    email_message = _build_message(
+        mailbox, to_address, subject, body, bcc, in_reply_to, references)
+    row = _record_send(mailbox, email_message, body, thread)
+    _deliver(mailbox, email_message, row)
     logger.info("email sent from %s to %s: %s [%s]",
-                mailbox.from_address, to_address, subject, message["Message-ID"])
+                mailbox.from_address, to_address, subject, email_message["Message-ID"])
     if campaign is not None and not campaign.is_freemium:
         logger.info("%s", _sent_block(subject, body))
-    return message["Message-ID"]
+    return row
 
 
 def suppressed(lead) -> bool:
@@ -213,21 +224,86 @@ def _mint_message_id(from_address: str) -> str:
 # ── Transport ─────────────────────────────────────────────────────
 
 
-def _deliver(mailbox, message: EmailMessage) -> None:
+def _record_send(mailbox, email_message: EmailMessage, body: str, thread):
+    """Write the outbound row *before* the transport runs, and thread it.
+
+    Outbound is authoritative in a way inbound never is: we composed the body, so
+    ``body_text`` holds what the agent wrote (before the signature, opt-out and
+    attribution, which are identical on every send) and only the headers are kept
+    as bytes. It is stored classified and processed — there is nothing to work out
+    later about a message we wrote ourselves.
+    """
+    from openoutreach.core.operator import get_active_user
+    from openoutreach.emails import parsing, threads
+    from openoutreach.emails.classify import CLASSIFIER_VERSION
+    from openoutreach.emails.models import Direction, Kind, Message
+
+    now = timezone.now()
+    row = Message.objects.create(
+        mailbox=mailbox,
+        thread=thread,
+        direction=Direction.OUTBOUND,
+        message_id=parsing.normalize_id(email_message["Message-ID"]),
+        from_address=(email_message["From"] or "").lower()[:320],
+        to_address=(email_message["To"] or "").lower()[:320],
+        subject=email_message["Subject"] or "",
+        in_reply_to=parsing.normalize_id(email_message["In-Reply-To"] or ""),
+        references_ids=parsing.referenced_ids(email_message),
+        raw=_headers_of(email_message),
+        body_text=body,
+        sent_at=now,
+        kind=Kind.OUTBOUND,
+        classified_at=now,
+        classifier_version=CLASSIFIER_VERSION,
+        processed_at=now,
+        owner=get_active_user(),
+    )
+    threads.assign(row)
+    return row
+
+
+def _headers_of(email_message: EmailMessage) -> bytes:
+    """The message's headers as bytes — everything above the body it already stores."""
+    header = EmailMessage()
+    for name, value in email_message.items():
+        header[name] = value
+    return header.as_bytes()
+
+
+def _deliver(mailbox, email_message: EmailMessage, row) -> None:
     """Log into the mailbox over SMTP+STARTTLS and send one message.
 
-    A failure is recorded as a ``SendVerdict`` on the way past and then re-raised
-    unchanged: the task still fails and is still retried, but the receiver's
-    answer — the one direct statement anyone makes about this mailbox's standing
-    — is kept instead of dying in the traceback.
+    Both answers are recorded against *row*: the ``250`` on the way out — with the
+    receiver's own queue id, which is the handle a provider asks for when a
+    delivery is disputed and which used to be thrown away — and any refusal on the
+    way past, before it is re-raised unchanged. The step still fails and is still
+    retried; what changes is that the receiver's word survives the traceback.
     """
-    from openoutreach.emails.delivery_policy import record_failure
+    from openoutreach.emails.delivery_policy import record_acceptance, record_failure
 
     try:
-        with smtplib.SMTP(mailbox.host, mailbox.port, timeout=SMTP_TIMEOUT_SECONDS) as smtp:
+        with _SMTP(mailbox.host, mailbox.port, timeout=SMTP_TIMEOUT_SECONDS) as smtp:
             smtp.starttls()
             smtp.login(mailbox.username, mailbox.password)
-            smtp.send_message(message)
+            smtp.send_message(email_message)
+            record_acceptance(row, *smtp.accepted_response)
     except (smtplib.SMTPException, OSError) as exc:
-        record_failure(mailbox, exc)
+        record_failure(row, exc)
         raise
+
+
+class _SMTP(smtplib.SMTP):
+    """``smtplib.SMTP`` that keeps the receiver's answer to DATA.
+
+    ``sendmail`` returns only the refused recipients and drops the final
+    ``250 2.0.0 OK <queue id>`` on the floor. That line is the receiver's own
+    handle on the message — the one a provider asks for when a delivery is
+    disputed — so the smallest possible override keeps it.
+    """
+
+    accepted_response: tuple[int | None, bytes] = (None, b"")
+
+    def data(self, msg):
+        code, response = super().data(msg)
+        self.accepted_response = (code, response)
+        return code, response

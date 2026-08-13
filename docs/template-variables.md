@@ -9,7 +9,7 @@ There is **no Voyager profile dict** — the browser/scraping channel was remove
 - **Campaign context** — `product_docs`, `campaign_target`, and `booking_link` from the `Campaign`.
 - **Seller identity** — the operator's name (`core/operator.py:seller_name()`, read from the Django `User` / `SiteConfig`, not scraped), used to keep the LLM from misattributing greetings in a reply.
 - **Lead facts** — the deal's `profile_summary`: a mem0-style JSON fact list materialized once from the lead's **stored `profile_text`** (headline, company description, title, seniority, industry, location). No positions/education/URNs — those came from the retired scrape and no longer exist.
-- **Conversation facts** (in thread only) — the deal's `chat_summary` (running fact list folded from IMAP-read replies) plus a recency window of verbatim `ChatMessage`s, `today`, and the unanswered-outgoing counters. Omitted entirely on a first touch.
+- **Conversation facts** (in thread only) — the deal's `chat_summary` (running fact list folded from IMAP-read replies) plus a recency window of verbatim turns from the mail log, `today`, and the unanswered-outgoing counters. Omitted entirely on a first touch.
 
 ## Output
 

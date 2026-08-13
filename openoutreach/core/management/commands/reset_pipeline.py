@@ -76,9 +76,9 @@ class Command(BaseCommand):
 
     def _plan(self, campaigns, *, full: bool) -> dict[str, int]:
         """What the reset would remove, counted before anything is touched."""
-        from openoutreach.chat.models import ChatMessage
         from openoutreach.core.models import Keyword, QueryNode
         from openoutreach.crm.models import Deal, Lead
+        from openoutreach.emails.models import Message, Thread
 
         nodes = QueryNode.objects.filter(campaign__in=campaigns)
         counts = {"query nodes": nodes.count()}
@@ -94,7 +94,9 @@ class Command(BaseCommand):
 
         deals = Deal.objects.filter(campaign__in=campaigns)
         counts["deals"] = deals.count()
-        counts["chat messages"] = ChatMessage.objects.filter(deal__in=deals).count()
+        threads = Thread.objects.filter(deals__in=deals).distinct()
+        counts["threads"] = threads.count()
+        counts["mail-log messages"] = Message.objects.filter(thread__in=threads).count()
         # Leads are campaign-agnostic (keyed on profile_url), so a partial reset leaves
         # them alone rather than deleting rows another campaign is still working.
         if self._resetting_everything(campaigns):
@@ -132,15 +134,22 @@ class Command(BaseCommand):
         self.stdout.write(f"  backup      {target}")
 
     def _reset(self, campaigns, *, full: bool) -> None:
-        from openoutreach.chat.models import ChatMessage
         from openoutreach.core.models import Keyword, QueryNode
         from openoutreach.crm.models import Deal, Lead
+        from openoutreach.emails.models import Message, Thread
 
         everything = self._resetting_everything(campaigns)
 
         if full:
             deals = Deal.objects.filter(campaign__in=campaigns)
-            ChatMessage.objects.filter(deal__in=deals).delete()
+            # The threads go with the deals, and their messages with them. The log
+            # is append-only in normal running; this command is the deliberate
+            # exception, and a mail-log row whose deal is gone is a record of
+            # nothing — so the messages are dropped explicitly rather than left
+            # behind by the thread's SET_NULL.
+            threads = Thread.objects.filter(deals__in=deals)
+            Message.objects.filter(thread__in=threads).delete()
+            threads.delete()
             deals.delete()
             if everything:
                 Lead.objects.all().delete()

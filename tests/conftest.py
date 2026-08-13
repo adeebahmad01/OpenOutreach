@@ -38,7 +38,7 @@ def _open_sending_window():
     the window's own rules are tested against explicit datetimes in
     ``tests/test_sending_window.py``.
     """
-    with patch("openoutreach.emails.models.within_sending_window", return_value=True):
+    with patch("openoutreach.emails.models.mailbox.within_sending_window", return_value=True):
         yield
 
 

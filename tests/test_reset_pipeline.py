@@ -5,10 +5,11 @@ from io import StringIO
 import pytest
 from django.core.management import CommandError, call_command
 
-from openoutreach.chat.models import ChatMessage
 from openoutreach.core.models import Campaign, Keyword, QueryNode, SiteConfig
 from openoutreach.core.pipeline.select import token_key
 from openoutreach.crm.models import Deal, DealState, Lead
+from openoutreach.emails.models import Mailbox, Message, Thread
+from tests.emails import maillog
 
 
 def _campaign(name="C", **kw):
@@ -25,7 +26,10 @@ def _populate(campaign):
     lead = Lead.objects.create(
         profile_url=f"https://x/{Lead.objects.count()}", profile_text="founder ai")
     deal = Deal.objects.create(lead=lead, campaign=campaign, state=DealState.QUALIFIED)
-    ChatMessage.objects.create(deal=deal, content="hi")
+    box = maillog.mailbox(f"box{Mailbox.objects.count()}@infra.com")
+    sent = maillog.outbound(box, to="lead@corp.com")
+    deal.thread = sent.thread
+    deal.save(update_fields=["thread"])
     return node, lead, deal
 
 
@@ -74,7 +78,9 @@ class TestFullScope:
 
         assert (QueryNode.objects.count(), Keyword.objects.count()) == (0, 0)
         assert (Lead.objects.count(), Deal.objects.count()) == (0, 0)
-        assert ChatMessage.objects.count() == 0
+        # The conversation goes with the deal: a mail-log thread whose deal is
+        # gone is a record of nothing.
+        assert (Thread.objects.count(), Message.objects.count()) == (0, 0)
         c.refresh_from_db()
         assert c.anchor_profiles == []
         assert c.anchor_embeddings is None

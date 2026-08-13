@@ -20,8 +20,8 @@ send_first_email(deal, mailbox)           answer_reply(deal)
         └─────── run_outreach_agent(deal) ────────┘
                  ← core/agents/outreach.py
 
-  emails/inbox.py:read_mail — the mail pass, on its own interval: walks each box by UID
-  cursor and threads replies onto their deal as inbound ChatMessages.
+  emails/mail_pass.py:run_mail_pass — on its own interval: sync mirrors each box into
+  the mail log, classify reads the stored bytes, project acts on the reading.
 ```
 
 Replies outrank openers, and are exempt from the daily cap, the spacing and the working-hours window.
@@ -32,7 +32,7 @@ Replies outrank openers, and are exempt from the daily cap, the spacing and the 
 
 | Action | Effect |
 |--------|--------|
-| `send_message` | **First touch:** the decision also carries a `subject`; the opener is sent, the thread root recorded, the deal moved to `EMAILED`. **In thread:** threaded reply via `emails/sender.py` (`In-Reply-To` = latest message, `References` = thread root), recorded as an outgoing `ChatMessage`. The deal stays `EMAILED` — writing our own message is what makes it stop being actionable. |
+| `send_message` | **First touch:** the decision also carries a `subject`; the opener is sent, the thread it opened recorded on the deal, the deal moved to `EMAILED`. **In thread:** threaded reply via `emails/sender.py` (`References` = every Message-ID in the thread, `In-Reply-To` = the last of them), recorded in the mail log as an outbound `Message` in the same thread. The deal stays `EMAILED` — writing our own message is what makes it stop being actionable. |
 | `mark_completed` | Close the Deal `COMPLETED` with the agent's `Outcome`. |
 | `suppress` | A worded unsubscribe: suppress the person account-wide (`Lead.disqualified`) and move the deal to `UNSUBSCRIBED`. No reply is sent. |
 

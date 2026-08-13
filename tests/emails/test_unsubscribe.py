@@ -25,7 +25,7 @@ from django.utils import timezone
 from openoutreach.core.agents.outreach import OutreachDecision
 from openoutreach.core.db.leads import suppress_email
 from openoutreach.crm.models import DealState, Lead, Outcome
-from openoutreach.emails.inbox import read_mail
+from openoutreach.emails.mail_pass import run_mail_pass
 from openoutreach.emails.models import Mailbox
 from openoutreach.emails.sender import (
     ATTRIBUTION,
@@ -36,6 +36,7 @@ from openoutreach.emails.sender import (
 )
 from openoutreach.emails.steps.reply import answer_reply
 from openoutreach.emails.steps.send import send_first_email
+from tests.emails import maillog
 from tests.emails.fake_imap import FakeIMAP, message
 from tests.factories import DealFactory, LeadFactory
 
@@ -44,14 +45,12 @@ ALIAS = "s+unsub@infra.com"
 
 
 def _box(**kwargs) -> Mailbox:
-    return Mailbox.objects.create(
-        username=SENDER, password="pw", from_address=SENDER, daily_limit=10, **kwargs,
-    )
+    return maillog.mailbox(SENDER, daily_limit=10, **kwargs)
 
 
 def _sent_message(**kwargs):
     """The assembled EmailMessage for one send, without touching SMTP."""
-    box = Mailbox(username=SENDER, password="pw", from_address=SENDER, signature="Eracle")
+    box = maillog.mailbox(SENDER, signature="Eracle")
     with patch("openoutreach.emails.sender._deliver") as deliver:
         send_email(box, "lead@corp.com", "Hi", "Body", **kwargs)
     return deliver.call_args.args[1]
@@ -168,9 +167,13 @@ class TestSuppressEmail:
 
 
 def _read(box, fake) -> int:
-    """Run one mail pass against *fake*; return the number of leads suppressed."""
-    with patch("openoutreach.emails.inbox.imaplib.IMAP4_SSL", return_value=fake):
-        return read_mail(box)[1]
+    """Run one mail pass against *fake*; return the leads suppressed by it."""
+    from openoutreach.crm.models import Lead
+
+    before = Lead.objects.filter(disqualified=True).count()
+    with patch("openoutreach.emails.sync._connect", return_value=fake):
+        run_mail_pass()
+    return Lead.objects.filter(disqualified=True).count() - before
 
 
 @pytest.mark.django_db
@@ -201,64 +204,43 @@ class TestAliasOptOut:
         to = f'"Unsubscribe" <{ALIAS}>'
         assert _read(_box(), FakeIMAP([message(7, to=to, sender="P@corp.com")])) == 1
 
-    def test_an_opt_out_body_is_never_fetched(self, campaign):
-        """The alias is decided from headers alone — no body is pulled for it."""
+    def test_the_opt_out_is_recorded_as_a_message_of_its_own(self, campaign):
+        """It is a fact about the box before it is a decision about a person."""
+        from openoutreach.emails.models import Kind, Message
+
         LeadFactory(email="p@corp.com")
-        fake = FakeIMAP([message(7, to=ALIAS, sender="p@corp.com")])
-        _read(_box(), fake)
-        assert fake.body_fetches == []
+        _read(_box(), FakeIMAP([message(7, to=ALIAS, sender="p@corp.com")]))
 
-    def test_the_cursor_advances_past_everything_examined(self, campaign):
-        box = _box()
-        _read(box, FakeIMAP([message(7, to=SENDER, sender="x@corp.com")]))
-        box.refresh_from_db()
-        assert box.unsub_scan_uid == 7
-        assert box.unsub_scan_uidvalidity == 1
-
-    def test_a_second_pass_resumes_above_the_cursor(self, campaign):
-        box = _box()
-        fake = FakeIMAP([message(7, to=ALIAS, sender="p@corp.com")])
-        _read(box, fake)
-        _read(box, fake)
-        assert fake.searched_ranges == ["1:*", "8:*"]
+        row = Message.objects.get(direction="in")
+        assert row.kind == Kind.OPT_OUT
+        assert row.processed_at is not None
 
     def test_rereading_the_same_message_changes_nothing(self, campaign):
-        """Re-reading a box must be free — suppression is written to the same
-        values, not accumulated."""
+        """Re-reading a box must be free — the log is keyed on the Message-ID."""
         lead = LeadFactory(email="p@corp.com")
         deal = DealFactory(campaign=campaign, lead=lead, state=DealState.EMAILED)
         box = _box()
         fake = FakeIMAP([message(7, to=ALIAS, sender="p@corp.com")])
 
         assert _read(box, fake) == 1
-        box.unsub_scan_uid = 0  # as a UIDVALIDITY change would leave it
-        assert _read(box, fake) == 1
+        coverage = box.coverage.get()
+        coverage.last_uid = 0            # as a UIDVALIDITY change would leave it
+        coverage.save(update_fields=["last_uid"])
+        assert _read(box, fake) == 0     # already stored, already honoured
 
         deal.refresh_from_db()
         assert deal.state == DealState.UNSUBSCRIBED
         assert Lead.objects.filter(disqualified=True).count() == 1
 
-    def test_a_changed_uidvalidity_restarts_the_walk(self, campaign):
-        """Reissued UIDs make the stored cursor point at unrelated mail; trusting
-        it would skip every opt-out — and now every reply — below it forever."""
-        box = _box()
-        _read(box, FakeIMAP([message(7, to=SENDER, sender="x@corp.com")], uidvalidity=1))
-        fake = FakeIMAP([message(3, to=ALIAS, sender="p@corp.com")], uidvalidity=2)
-        _read(box, fake)
-
-        assert fake.searched_ranges == ["1:*"]
-        box.refresh_from_db()
-        assert box.unsub_scan_uidvalidity == 2
-
-    def test_an_unreachable_box_keeps_its_cursor(self, campaign):
+    def test_an_unreachable_box_keeps_its_coverage(self, campaign):
         """A network fault is not evidence that there was no mail to read."""
-        box = _box(unsub_scan_uid=42, unsub_scan_uidvalidity=1)
+        box = _box()
+        _read(box, FakeIMAP([message(7, to=SENDER, sender="x@corp.com")]))
+
         fake = FakeIMAP([])
         fake.login = MagicMock(side_effect=OSError("connection reset"))
-
         assert _read(box, fake) == 0
-        box.refresh_from_db()
-        assert box.unsub_scan_uid == 42
+        assert box.coverage.get().last_uid == 7
 
 
 # ── Detection: the worded unsubscribe (the outreach agent) ────────
@@ -270,21 +252,20 @@ def _decision(action, **kwargs):
 
 def _replied_deal(campaign, email="p@corp.com"):
     """An EMAILED deal with an unanswered reply — what the reply step picks up."""
-    from openoutreach.chat.models import ChatMessage
+    from datetime import timedelta
 
-    deal = DealFactory(
+    box = _box()
+    sent = maillog.outbound(box, to=email, message_id="root@infra.com",
+                            sent_at=timezone.now() - timedelta(hours=2))
+    maillog.inbound(box, thread=sent.thread, sender=email, body="Please stop.")
+    return DealFactory(
         campaign=campaign,
         lead=LeadFactory(email=email),
         state=DealState.EMAILED,
-        mailbox=_box(),
+        mailbox=box,
         email_subject="Hi",
-        email_message_id="<root@infra.com>",
+        thread=sent.thread,
     )
-    ChatMessage.objects.create(
-        deal=deal, external_id="<reply@corp.com>", content="Please stop.",
-        is_outgoing=False, creation_date=timezone.now(),
-    )
-    return deal
 
 
 @pytest.mark.django_db

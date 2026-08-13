@@ -17,7 +17,7 @@ is not a decision the agent gets to make, it is simply the absence of work.
 
 ``suppress`` is the *worded* unsubscribe — "take me off your list", "stop
 emailing me". It threads like any other reply, so the box-wide alias scan in
-``emails/inbox.py`` can never see it, and the agent reading every reply already
+``emails/classify.py`` can never see it, and the agent reading every reply already
 can. It is a stronger statement than ``not_interested``: it ends the thread and
 suppresses the person account-wide, across every campaign.
 
@@ -92,7 +92,7 @@ def run_outreach_agent(deal) -> OutreachDecision:
     decision is validated to be a sendable opener with a subject.
     """
     public_id = deal.lead.profile_url
-    is_first_touch = not deal.email_message_id
+    is_first_touch = not deal.thread_id
 
     if not is_first_touch:
         _log_chat_facts(public_id, deal)
@@ -144,28 +144,29 @@ def _render_system_prompt(deal, recent_messages: list, is_first_touch: bool) -> 
 
 
 def _load_recent_messages(deal, limit: int = RECENT_MESSAGES_WINDOW) -> list:
-    """Last `limit` ChatMessages for `deal`, in chronological order.
+    """The thread's last `limit` **turns**, in chronological order.
 
     The recency window of verbatim turns the agent sees alongside the rolling
-    ``chat_summary`` — the opener plus any replies read from the mailbox.
+    ``chat_summary`` — the opener plus any replies read from the mailbox. Turns
+    only, so a non-delivery report cannot reach the agent's reasoning and be
+    answered as though a person had written it.
     """
-    from openoutreach.chat.models import ChatMessage
-
-    qs = ChatMessage.objects.filter(deal=deal).order_by("-creation_date", "-pk")[:limit]
-    return list(reversed(list(qs)))
+    if not deal.thread_id:
+        return []
+    return list(reversed(list(deal.thread.turns().order_by("-sent_at", "-pk")[:limit])))
 
 
 def _format_recent_messages(messages: list, now: datetime) -> str:
-    """Render the last few ChatMessage rows as a timestamped transcript."""
+    """Render the last few turns as a timestamped transcript."""
     if not messages:
         return "No recent messages."
     lines = []
     for m in messages:
-        content = (m.content or "").strip()
+        content = (m.body_text or "").strip()
         if not content:
             continue
-        speaker = "Me" if m.is_outgoing else "Lead"
-        prefix = f"{speaker} ({_humanize_age(m.creation_date, now)})" if m.creation_date else speaker
+        speaker = "Me" if m.is_outbound else "Lead"
+        prefix = f"{speaker} ({_humanize_age(m.sent_at, now)})" if m.sent_at else speaker
         lines.append(f"{prefix}: {content}")
     return "\n".join(lines) or "No recent messages."
 
@@ -186,7 +187,7 @@ def _business_days_since_last_outgoing(messages: list, now: datetime) -> int | N
     Weekends don't count — a Friday send read on Monday is one working day old,
     which is the gap the agent should pace against.
     """
-    timestamps = [m.creation_date for m in messages if m.is_outgoing and m.creation_date]
+    timestamps = [m.sent_at for m in messages if m.is_outbound and m.sent_at]
     if not timestamps:
         return None
     return business_days_between(max(timestamps), now)

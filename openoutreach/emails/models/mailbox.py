@@ -1,4 +1,4 @@
-# openoutreach/emails/models.py
+# openoutreach/emails/models/mailbox.py
 """Mailbox: one SMTP sending inbox, imported from the provider's creds export."""
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ from django.utils import timezone
 
 from openoutreach.core.conf import WARM_FLOOR_SENDS
 from openoutreach.core.sending_window import operator_timezone, within_sending_window
-from openoutreach.emails.delivery_policy import Response
 
 
 def _local_midnight():
@@ -114,7 +113,7 @@ class Mailbox(models.Model):
     host = models.CharField(max_length=255, default="smtp.gmail.com")
     port = models.PositiveIntegerField(default=587)
     # IMAP read side, for the agentic follow-up loop's reply-reader
-    # (emails/inbox.py); authenticates with the same address + app password as SMTP.
+    # (emails/sync.py); authenticates with the same address + app password as SMTP.
     imap_host = models.CharField(max_length=255, default="imap.gmail.com")
     imap_port = models.PositiveIntegerField(default=993)
     # The SMTP login — always the address itself (a mailbox you own logs in as
@@ -140,17 +139,6 @@ class Mailbox(models.Model):
     # working volume: it applies only to a box that has never been measured, and
     # an unmeasured box is one we know nothing about.
     daily_limit = models.PositiveIntegerField(default=WARM_FLOOR_SENDS)
-    # Resume point for the box-wide unsubscribe scan (``emails/inbox.py``): the
-    # highest INBOX UID already examined. A UID, not a date — dates are coarse and
-    # a resume from "yesterday" either re-reads a day of mail or skips the seam.
-    # ``unsub_scan_uidvalidity`` is the server's declared UID epoch: when it
-    # changes the server has reissued UIDs, so the stored cursor now points at
-    # unrelated mail and the scan restarts from 0 rather than silently skipping
-    # everything before it. Both are a cache like ``daily_limit``, not state to
-    # protect — resetting them to 0 costs one full rescan, and the scan is
-    # idempotent, so nothing is lost.
-    unsub_scan_uid = models.PositiveBigIntegerField(default=0)
-    unsub_scan_uidvalidity = models.PositiveBigIntegerField(default=0)
     # The earliest this box may send its next *first* email — the send-spacing clock,
     # rewritten after every first contact as ``now + MIN_SEND_INTERVAL + jitter``.
     # Per box rather than pool-wide because the daily cap is per box too: two boxes
@@ -175,9 +163,12 @@ class Mailbox(models.Model):
         verdicts describe.
         """
         from openoutreach.emails.delivery_policy import PAUSING_RESPONSES
+        from openoutreach.emails.models.maillog import DeliveryEvent
 
-        return self.verdicts.filter(
-            created_at__gte=_local_midnight(), response__in=PAUSING_RESPONSES,
+        return DeliveryEvent.objects.filter(
+            message__mailbox=self,
+            occurred_at__gte=_local_midnight(),
+            response__in=PAUSING_RESPONSES,
         ).exists()
 
     def sent_today(self) -> int:
@@ -189,23 +180,30 @@ class Mailbox(models.Model):
         counts once.
 
         Cold volume is what a receiver punishes, and answering someone who wrote to
-        you is not cold volume — replying within minutes is more human, not less. The
-        ledger is derived from the message log rather than a counter, so there is
-        nothing to drift after a crash. Pre-pivot ChatMessages never carry a mailbox
-        (``deal.mailbox`` is null), so they are naturally excluded.
+        you is not cold volume — replying within minutes is more human, not less.
+
+        It counts the **transport log**, not the conversation: a send-cap ledger is a
+        statement about what left the box, so it belongs on the record of what left
+        the box. Derived rather than incremented, so there is nothing to drift after
+        a crash.
         """
         from django.db.models import Min
 
-        from openoutreach.chat.models import ChatMessage
+        from openoutreach.crm.models import Deal
+        from openoutreach.emails.models.maillog import Direction, Message
 
         opened_today = (
-            ChatMessage.objects
-            .filter(deal__mailbox=self, is_outgoing=True)
-            .values("deal_id", "deal__lead_id")
-            .annotate(first_sent=Min("creation_date"))
+            Message.objects
+            .filter(mailbox=self, direction=Direction.OUTBOUND, thread__isnull=False)
+            .values("thread_id")
+            .annotate(first_sent=Min("sent_at"))
             .filter(first_sent__gte=_local_midnight())
+            .values_list("thread_id", flat=True)
         )
-        return len({row["deal__lead_id"] for row in opened_today})
+        return (
+            Deal.objects.filter(thread_id__in=list(opened_today))
+            .values("lead_id").distinct().count()
+        )
 
     def headroom_today(self) -> int:
         """Sends this box has left today before hitting its measured capacity.
@@ -215,35 +213,6 @@ class Mailbox(models.Model):
         if self.paused_today():
             return 0
         return max(0, self.daily_limit - self.sent_today())
-
-
-class SendVerdict(models.Model):
-    """One receiving server's answer to one send attempt.
-
-    The only record of what the far end actually said about this mailbox. It has
-    to be stored because it is evidence that exists nowhere else and does not
-    survive: the SMTP response lives for the duration of one exception, and
-    nothing in the CRM can reconstruct it afterwards. Everything derived *from*
-    these rows — whether a box is paused, whether capacity may grow — is computed
-    at read time, never stored.
-
-    Written only on failure. A successful send is the absence of a verdict, so
-    the table stays small and every row means something.
-    """
-
-    mailbox = models.ForeignKey(Mailbox, on_delete=models.CASCADE, related_name="verdicts")
-    response = models.CharField(max_length=20, choices=Response.choices)
-    # None when the failure never produced an SMTP response at all — which is
-    # itself the signal that it carries no meaning about reputation.
-    smtp_code = models.PositiveSmallIntegerField(null=True, blank=True)
-    detail = models.CharField(max_length=255, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        indexes = [models.Index(fields=["mailbox", "created_at"])]
-
-    def __str__(self):
-        return f"{self.mailbox.from_address}: {self.response} ({self.smtp_code})"
 
 
 def has_mailbox() -> bool:

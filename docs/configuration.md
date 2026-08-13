@@ -49,7 +49,7 @@ Each `Mailbox` is one SMTP/IMAP box you own. Boxes are added during onboarding b
 | `signature` | text | Per-box sign-off appended to every send. Asked once per box at onboarding; a declined `""` sticks (the NULL is what means "never asked"). | (asked once) |
 | `next_send_at` | datetime | When this box may send its next *first* email — rewritten after each one. | (null) |
 
-Sending is raw `smtplib` (`emails/sender.py`); reply-reading is IMAP (`emails/inbox.py`). First emails are gated three ways — the sending window, the per-box spacing, and the measured daily cap. Replies are exempt from all three.
+Sending is raw `smtplib` (`emails/sender.py`); reply-reading is IMAP (`emails/sync.py`, via the mail log). First emails are gated three ways — the sending window, the per-box spacing, and the measured daily cap. Replies are exempt from all three.
 
 ## Newsletter jurisdiction default
 

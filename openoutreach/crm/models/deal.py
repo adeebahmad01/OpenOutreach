@@ -37,9 +37,9 @@ class DealState(models.TextChoices):
       *ungated* FIFO send-queue paced only by the per-box daily cap and spacing.
     - **EMAILED** — the first email has been sent. **Nobody is ever chased.** The
       deal becomes actionable again only when the recipient replies: the per-mailbox
-      mail pass (``emails/inbox.py``) writes inbound ChatMessages, and a deal whose
-      newest inbound message is newer than its newest outgoing one is the queue the
-      outreach agent serves. No reply means no further email, ever — so EMAILED is
+      mail pass (``emails/mail_pass.py``) mirrors inbound mail into the log, and a
+      deal whose thread's newest inbound turn is newer than its newest outgoing one
+      is the queue the outreach agent serves. No reply means no further email, ever — so EMAILED is
       where most deals come to rest, and resting there costs nothing because nothing
       iterates them.
 
@@ -124,8 +124,8 @@ class Deal(models.Model):
     )
     reason = models.TextField(blank=True, default="")
     # Email channel. The mailbox that sent the opener, bound to the deal: it's the
-    # per-box-cap counting key (ChatMessage.filter(deal__mailbox=box)), the reply
-    # anchor, and the sticky thread box for the agentic follow-up loop.
+    # reply anchor and the sticky thread box for the agentic follow-up loop. (The
+    # per-box cap counts the transport log, not this field — see Mailbox.sent_today.)
     mailbox = models.ForeignKey(
         "emails.Mailbox", null=True, blank=True, on_delete=models.SET_NULL,
         related_name="deals",
@@ -134,16 +134,22 @@ class Deal(models.Model):
     # it as "Re: …" on every threaded reply.
     email_subject = models.CharField(max_length=300, blank=True, default="")
     # When the opener was sent — the audit timestamp (the per-box daily cap counts
-    # outgoing ChatMessages, not this field; see Mailbox.sent_today). Null until sent.
+    # outgoing messages in the log, not this field; see Mailbox.sent_today). Null
+    # until sent.
     email_sent_at = models.DateTimeField(null=True, blank=True, db_index=True)
-    # RFC-5322 Message-ID of the opener — the immutable thread root. A reply's
-    # In-Reply-To/References carries it, so the IMAP reader matches replies back to
-    # this exact campaign/deal (the disambiguator when one lead is emailed across
-    # two campaigns). Null until sent.
-    # Indexed because the mail pass looks every inbound message up by it: the walk
-    # reads the box, not the deals, so this is the join back from a reply's
-    # References header to the thread it belongs to.
-    email_message_id = models.CharField(max_length=300, blank=True, default="", db_index=True)
+    # The conversation, in the mail log (``emails/models/maillog.py``). A deal has
+    # one thread; a thread can exist without a deal, because someone cold-mailing
+    # the box is a conversation too and not a special case.
+    #
+    # This replaces an ``email_message_id`` holding the *opener's* Message-ID, and
+    # the root-matching it forced: a reply carrying only ``In-Reply-To`` points at
+    # the newest message in the chain, not at the root, so it matched nothing and
+    # was dropped. Threading is now a graph over every id in the log, and the deal
+    # simply points at the thread it produced. Null until the opener is sent.
+    thread = models.ForeignKey(
+        "emails.Thread", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="deals",
+    )
     # "Do not touch this deal before this time" — the only schedule a deal carries,
     # and it gates *this row alone*. Null means always eligible. Written by the two
     # steps that need to wait: the lookup poll's backoff (``check_lookup``) and a

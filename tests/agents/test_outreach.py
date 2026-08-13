@@ -5,6 +5,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from openoutreach.emails.models import Thread
+from tests.emails import maillog
 from tests.factories import LeadFactory, DealFactory
 
 
@@ -14,7 +16,7 @@ def deal_with_summaries(db, campaign):
     return DealFactory(
         lead=lead,
         campaign=campaign,
-        email_message_id="<root@corp.com>",
+        thread=Thread.objects.create(mailbox=maillog.mailbox()),
         profile_summary={"facts": [
             "Senior engineer at Acme Corp.",
             "Based in Berlin, Germany.",
@@ -29,9 +31,9 @@ def deal_with_summaries(db, campaign):
 
 def _msg(content, is_outgoing):
     m = MagicMock()
-    m.content = content
-    m.is_outgoing = is_outgoing
-    m.creation_date = None
+    m.body_text = content
+    m.is_outbound = is_outgoing
+    m.sent_at = None
     return m
 
 
@@ -110,7 +112,8 @@ class TestRenderSystemPrompt:
         from openoutreach.core.agents.outreach import _render_system_prompt
 
         lead = LeadFactory()
-        deal = DealFactory(lead=lead, campaign=campaign, email_message_id="<root@corp.com>")
+        deal = DealFactory(lead=lead, campaign=campaign,
+                           thread=Thread.objects.create(mailbox=maillog.mailbox()))
         _self_profile(campaign)
 
         prompt = _render_system_prompt(deal, [], is_first_touch=False)
@@ -146,31 +149,28 @@ class TestValidateOpener:
 
 class TestLoadRecentMessages:
     def test_returns_last_n_in_chronological_order(self, db, campaign, operator):
-        from openoutreach.chat.models import ChatMessage
         from django.utils import timezone
         from datetime import timedelta
 
         from openoutreach.core.agents.outreach import _load_recent_messages, RECENT_MESSAGES_WINDOW
 
-        lead = LeadFactory()
-        deal = DealFactory(lead=lead, campaign=campaign)
+        box = maillog.mailbox()
+        thread = Thread.objects.create(mailbox=box)
+        deal = DealFactory(lead=LeadFactory(), campaign=campaign, thread=thread)
 
         base = timezone.now()
         for i in range(RECENT_MESSAGES_WINDOW + 3):
-            ChatMessage.objects.create(
-                deal=deal,
-                content=f"msg-{i}",
-                is_outgoing=(i % 2 == 0),
-                owner=operator,
-                external_id=f"urn:msg:{i}",
-                creation_date=base + timedelta(minutes=i),
-            )
+            when = base + timedelta(minutes=i)
+            if i % 2 == 0:
+                maillog.outbound(box, thread=thread, body=f"msg-{i}", sent_at=when)
+            else:
+                maillog.inbound(box, thread=thread, body=f"msg-{i}", sent_at=when)
 
         recent = _load_recent_messages(deal)
 
         # Window respected and chronological order preserved.
         assert len(recent) == RECENT_MESSAGES_WINDOW
-        contents = [m.content for m in recent]
+        contents = [m.body_text for m in recent]
         assert contents == sorted(contents, key=lambda c: int(c.split("-")[1]))
         # Returned the *latest* messages.
         assert contents[-1] == f"msg-{RECENT_MESSAGES_WINDOW + 2}"

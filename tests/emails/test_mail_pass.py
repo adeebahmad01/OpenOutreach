@@ -1,145 +1,153 @@
 # tests/emails/test_mail_pass.py
-"""The mail pass — one IMAP walk per box, matching replies back to their threads.
+"""The three jobs end to end: a reply arrives and the deal becomes actionable.
 
-The opt-out half of the same walk is covered in ``test_unsubscribe.py``; this file
-is about the reply half: a message reaches its deal by ``References``/``In-Reply-To``
-carrying the first email's Message-ID, and nothing else does.
+Everything here goes through ``run_mail_pass`` rather than the jobs individually,
+because the property under test spans them — mail lands, is read, and only then
+means something. The opt-out half of the same pass is in ``test_unsubscribe.py``.
 """
+from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
 
-from openoutreach.chat.models import ChatMessage
+from openoutreach.core.cycle import unanswered_replies
 from openoutreach.crm.models import DealState
-from openoutreach.emails.inbox import read_mail
-from openoutreach.emails.models import Mailbox
-from tests.emails.fake_imap import FakeIMAP, message
+from openoutreach.emails.mail_pass import run_mail_pass
+from openoutreach.emails.models import Kind, Message
+from tests.emails import maillog
+from tests.emails.fake_imap import RECEIVED_AT, FakeIMAP, auto_reply, bounce, message
 from tests.factories import DealFactory, LeadFactory
 
 SENDER = "s@infra.com"
-ROOT = "<root@infra.com>"
-
-
-def _box(**kwargs) -> Mailbox:
-    return Mailbox.objects.create(
-        username=SENDER, password="pw", from_address=SENDER, daily_limit=10, **kwargs,
-    )
+ROOT = "root@infra.com"
 
 
 def _emailed(campaign, box, email="p@corp.com", root=ROOT):
+    """A deal whose opener has gone out — the state a reply arrives into.
+
+    Sent the day before the fake inbox's mail, so "their newest is newer than
+    ours" is a fact about the thread rather than about test timing.
+    """
+    sent = maillog.outbound(box, to=email, message_id=root,
+                            sent_at=RECEIVED_AT - timedelta(days=1))
     return DealFactory(
         campaign=campaign,
         lead=LeadFactory(email=email),
         state=DealState.EMAILED,
         mailbox=box,
         email_subject="Hi",
-        email_message_id=root,
+        thread=sent.thread,
     )
 
 
-def _read(box, fake) -> int:
-    """Run one mail pass; return the number of replies stored."""
-    with patch("openoutreach.emails.inbox.imaplib.IMAP4_SSL", return_value=fake):
-        return read_mail(box)[0]
+def _pass(box, *rows):
+    with patch("openoutreach.emails.sync._connect", return_value=FakeIMAP(list(rows))):
+        return run_mail_pass()
 
 
 @pytest.mark.django_db
-class TestReplyThreading:
-    def test_a_reply_lands_on_its_deal(self, campaign):
-        box = _box()
+class TestAReplyReachesItsDeal:
+    def test_by_references(self, campaign):
+        box = maillog.mailbox(SENDER)
         deal = _emailed(campaign, box)
 
-        stored = _read(box, FakeIMAP([
-            message(7, to=SENDER, sender="p@corp.com", references=ROOT,
-                    body="Sure, happy to chat."),
-        ]))
+        _pass(box, message(7, to=SENDER, sender="p@corp.com", references=f"<{ROOT}>",
+                           body="Sure, happy to chat."))
 
-        assert stored == 1
-        row = ChatMessage.objects.get(deal=deal, is_outgoing=False)
-        assert "happy to chat" in row.content
+        assert list(unanswered_replies(campaign)) == [deal]
+        reply = Message.objects.get(direction="in")
+        assert reply.kind == Kind.HUMAN_REPLY
+        assert "happy to chat" in reply.body_text
 
-    def test_in_reply_to_alone_is_enough(self, campaign):
-        """Clients differ on which threading header they populate."""
-        box = _box()
+    def test_by_in_reply_to_alone(self, campaign):
+        """A client that fills only ``In-Reply-To`` points at the newest message,
+        not the root — the reply root-matching dropped on the floor."""
+        box = maillog.mailbox(SENDER)
         deal = _emailed(campaign, box)
+        maillog.outbound(box, thread=deal.thread, to="p@corp.com",
+                         message_id="second@infra.com",
+                         sent_at=RECEIVED_AT - timedelta(hours=1))
 
-        assert _read(box, FakeIMAP([
-            message(7, to=SENDER, sender="p@corp.com", in_reply_to=ROOT),
-        ])) == 1
-        assert ChatMessage.objects.filter(deal=deal, is_outgoing=False).count() == 1
+        _pass(box, message(7, to=SENDER, sender="p@corp.com",
+                           in_reply_to="<second@infra.com>"))
 
-    def test_a_bare_message_id_matches_a_stored_root_with_brackets(self, campaign):
-        """What we stored is whatever SMTP handed back; servers differ on brackets."""
-        box = _box()
-        _emailed(campaign, box, root="root@infra.com")
+        assert list(unanswered_replies(campaign)) == [deal]
 
-        assert _read(box, FakeIMAP([
-            message(7, to=SENDER, sender="p@corp.com", references=ROOT),
-        ])) == 1
-
-    def test_unrelated_mail_is_ignored(self, campaign):
-        box = _box()
+    def test_a_stranger_is_not_stored_and_makes_nothing_actionable(self, campaign):
+        """The operator's own mail stays theirs: it is not our conversation."""
+        box = maillog.mailbox(SENDER)
         _emailed(campaign, box)
 
-        assert _read(box, FakeIMAP([
-            message(7, to=SENDER, sender="newsletter@x.com"),
-        ])) == 0
+        _pass(box, message(7, to=SENDER, sender="newsletter@x.com"))
+
+        assert list(unanswered_replies(campaign)) == []
+        assert Message.objects.filter(direction="in").count() == 0
 
     def test_a_thread_from_another_box_is_not_folded_in(self, campaign):
-        """Scoped to the box's own deals, so a quoted id we sent elsewhere can't
-        attach a reply to the wrong thread."""
-        box = _box()
-        other = Mailbox.objects.create(
-            username="o@infra.com", password="pw", from_address="o@infra.com")
+        """An id we sent from a different box cannot attach a reply to that thread."""
+        from openoutreach.emails.classify import classify_pending
+        from openoutreach.emails.project import project_pending
+        from openoutreach.emails.sync import mirror
+
+        box = maillog.mailbox(SENDER)
+        other = maillog.mailbox("o@infra.com")
         _emailed(campaign, other)
 
-        assert _read(box, FakeIMAP([
-            message(7, to=SENDER, sender="p@corp.com", references=ROOT),
-        ])) == 0
+        reply = FakeIMAP([message(7, to=SENDER, sender="p@corp.com",
+                                  references=f"<{ROOT}>")])
+        with patch("openoutreach.emails.sync._connect", return_value=reply):
+            mirror(box)          # only this box sees the message
+        classify_pending()
+        project_pending()
 
-    def test_our_own_copy_of_the_thread_is_not_stored_as_a_reply(self, campaign):
-        box = _box()
+        assert list(unanswered_replies(campaign)) == []
+
+    def test_rereading_the_box_creates_no_duplicate(self, campaign):
+        box = maillog.mailbox(SENDER)
+        _emailed(campaign, box)
+        reply = message(7, to=SENDER, sender="p@corp.com", references=f"<{ROOT}>")
+
+        _pass(box, reply)
+        coverage = box.coverage.get()
+        coverage.last_uid = 0            # as a UIDVALIDITY change would leave it
+        coverage.save(update_fields=["last_uid"])
+        _pass(box, reply)
+
+        assert Message.objects.filter(direction="in").count() == 1
+
+
+@pytest.mark.django_db
+class TestWhatIsNotAReply:
+    def test_a_bounce_does_not_make_the_deal_actionable(self, campaign):
+        """It arrives, it threads, and the agent is never handed it."""
+        box = maillog.mailbox(SENDER)
         _emailed(campaign, box)
 
-        assert _read(box, FakeIMAP([
-            message(7, to="p@corp.com", sender=SENDER, references=ROOT),
-        ])) == 0
+        _pass(box, bounce(7, to=SENDER, original=f"<{ROOT}>"))
 
-    def test_rereading_the_same_reply_creates_no_duplicate(self, campaign):
-        """Dedup is on ``(deal, Message-ID)``, so a restarted walk is free."""
-        box = _box()
-        deal = _emailed(campaign, box)
-        fake = FakeIMAP([message(7, to=SENDER, sender="p@corp.com", references=ROOT)])
+        assert list(unanswered_replies(campaign)) == []
 
-        assert _read(box, fake) == 1
-        box.unsub_scan_uid = 0  # as a UIDVALIDITY change would leave it
-        assert _read(box, fake) == 0  # upserted, not created again
-
-        assert ChatMessage.objects.filter(deal=deal, is_outgoing=False).count() == 1
-
-    def test_quoted_history_is_stripped(self, campaign):
-        box = _box()
-        deal = _emailed(campaign, box)
-
-        _read(box, FakeIMAP([
-            message(7, to=SENDER, sender="p@corp.com", references=ROOT,
-                    body="My answer.\r\n\r\nOn Mon, Eracle wrote:\r\n> the opener"),
-        ]))
-
-        row = ChatMessage.objects.get(deal=deal, is_outgoing=False)
-        assert row.content == "My answer."
-        assert "the opener" not in row.content
-
-    def test_a_body_is_fetched_only_for_a_message_we_track(self, campaign):
-        """Most of a real inbox is neither a reply nor an opt-out; paying for those
-        bodies is what would make walking the whole box expensive."""
-        box = _box()
+    def test_an_out_of_office_does_not_make_the_deal_actionable(self, campaign):
+        box = maillog.mailbox(SENDER)
         _emailed(campaign, box)
-        fake = FakeIMAP([
-            message(7, to=SENDER, sender="stranger@x.com"),
-            message(8, to=SENDER, sender="p@corp.com", references=ROOT),
-        ])
 
-        _read(box, fake)
+        _pass(box, auto_reply(7, to=SENDER, sender="p@corp.com", original=f"<{ROOT}>"))
 
-        assert fake.body_fetches == [8]
+        assert list(unanswered_replies(campaign)) == []
+
+
+@pytest.mark.django_db
+class TestTheJobsAreIndependent:
+    def test_an_unreachable_box_still_classifies_what_is_already_stored(self, campaign):
+        """An outage delays reading the mail, not interpreting it."""
+        box = maillog.mailbox(SENDER)
+        deal = _emailed(campaign, box)
+        _pass(box, message(7, to=SENDER, sender="p@corp.com", references=f"<{ROOT}>"))
+
+        Message.objects.filter(direction="in").update(
+            kind="", classifier_version=0, processed_at=None)
+        with patch("openoutreach.emails.sync._connect", side_effect=OSError("no route")):
+            mirrored, classified, projected = run_mail_pass()
+
+        assert (mirrored, classified, projected) == (0, 1, 1)
+        assert list(unanswered_replies(campaign)) == [deal]

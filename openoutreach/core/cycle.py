@@ -259,12 +259,17 @@ def _answer_replies(campaign) -> bool:
 
 
 def unanswered_replies(campaign):
-    """EMAILED deals whose newest inbound message is newer than our newest outgoing one.
+    """EMAILED deals whose newest inbound turn is newer than our newest outgoing one.
 
     This is the entire follow-up trigger. No timer, no flag, no bookkeeping: the
     mail pass writes inbound rows and the comparison between the two newest
     timestamps says whether the ball is in our court. Oldest reply first, so nobody
     waits behind a livelier thread.
+
+    **Turns, not messages.** A bounce and an out-of-office are in the thread and
+    are not somebody writing back, so neither can make a deal actionable — the
+    loop that apologised twice to a dead address is closed by the same rule that
+    keeps NDRs out of the summary.
 
     **The two timestamps are subqueries, not aggregates.** ``Max(...)`` over the joined
     messages reads better and is what this asked for originally, but an aggregate makes
@@ -282,15 +287,16 @@ def unanswered_replies(campaign):
     """
     from django.db.models import F, OuterRef, Q, Subquery
 
-    from openoutreach.chat.models import ChatMessage
     from openoutreach.crm.models import Deal
+    from openoutreach.emails.models import Direction, Message
+    from openoutreach.emails.models.maillog import TURN_KINDS
 
-    def newest(*, is_outgoing: bool) -> Subquery:
+    def newest(direction: str) -> Subquery:
         return Subquery(
-            ChatMessage.objects
-            .filter(deal=OuterRef("pk"), is_outgoing=is_outgoing)
-            .order_by("-creation_date")
-            .values("creation_date")[:1]
+            Message.objects
+            .filter(thread=OuterRef("thread_id"), direction=direction, kind__in=TURN_KINDS)
+            .order_by("-sent_at")
+            .values("sent_at")[:1]
         )
 
     return (
@@ -299,10 +305,11 @@ def unanswered_replies(campaign):
             state=DealState.EMAILED,
             outcome="",
             lead__disqualified=False,
+            thread__isnull=False,
         )
         .annotate(
-            last_in=newest(is_outgoing=False),
-            last_out=newest(is_outgoing=True),
+            last_in=newest(Direction.INBOUND),
+            last_out=newest(Direction.OUTBOUND),
         )
         .filter(last_in__isnull=False)
         .filter(Q(last_out__isnull=True) | Q(last_in__gt=F("last_out")))
@@ -458,16 +465,12 @@ def read_mail_if_due() -> None:
     not stop the others being read.
     """
     global _mail_read_at
-    from openoutreach.emails.inbox import read_mail
-    from openoutreach.emails.models import Mailbox
+    from openoutreach.emails.mail_pass import run_mail_pass
 
     now = timezone.now()
     if _mail_read_at and (now - _mail_read_at).total_seconds() < MAIL_PASS_INTERVAL_S:
         return
-    boxes = list(Mailbox.objects.all())
-    logger.info("mail pass: reading %d mailbox(es)", len(boxes))
-    for box in boxes:
-        read_mail(box)
+    run_mail_pass()
     _mail_read_at = now
 
 
