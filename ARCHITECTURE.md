@@ -305,7 +305,26 @@ fetched stops the walk in front of it rather than being stepped over, and `synce
 only on a walk that finished. A changed `UIDVALIDITY` means the server reissued its UIDs, so
 the walk restarts from 0. On a folder's **first** sight it starts at `UIDNEXT - 1` instead: a
 connected mailbox is a real one, and mirroring years of somebody's personal mail to look for
-replies to messages we have not sent yet is a large cost for no information. It runs every
+replies to messages we have not sent yet is a large cost for no information.
+
+**The accepted cost of that rule is a one-time blind spot below the first cursor**, and it is
+real rather than theoretical: identity is the Message-ID but *reachability* is the UID
+high-water mark, so whether a reply can ever be seen depends on a number that has nothing to do
+with the message. A box connected **mid-campaign** — which is what an upgrade onto the mail log
+is, since `0008_backfill_mail_log` rebuilds the sends but no mirror ever ran — starts above
+every reply those sends earned. On this project's own install that silently cost a real "no
+thanks" (2026-08-14, first pass at UID 35 over 729 backfilled sends). It was left unfixed
+deliberately: steady state is complete, because new inbound always lands above the cursor. What
+does **not** follow is any reading of pre-mirror engagement — a thread with no inbound row is
+"not mirrored", not "not answered", and the log cannot tell those apart before its first pass.
+A migration cannot repair it either (migrations run before the first pass, so there is no
+coverage row to rewrite, and the real `UIDVALIDITY` needs a network call); the operator-side
+repair is `FolderCoverage.last_uid = 0`, which costs one re-walk and stores nothing new. The
+code-side fix, if it is ever wanted, is to make first sight *ask the server for our
+conversation* (`HEADER REFERENCES` per minted id, `FROM` per address written to) instead of
+skipping, or simply to walk from 0 when the box already has outbound rows in the log.
+
+It runs every
 `MAIL_PASS_INTERVAL_S` off the cycle (a process-held timestamp, like warmth's daily stamp): the cycle fires every few seconds under
 send pacing, so a login per pass would be hundreds a day per box, while a *daily* cadence would
 let a full day of sends go out after someone asked us to stop. An unreachable box keeps its
@@ -464,7 +483,8 @@ from an address this box has written to, or is a non-delivery report. Everything
 costs one header read and is skipped, counted in the pass's log. The
 *address-we-wrote-to* rule is what keeps the repair property: a reply we mis-thread is
 still stored, so a corrected rule recovers it. A folder's first walk starts at
-`UIDNEXT - 1`, so connecting a box with years of history mirrors none of it.
+`UIDNEXT - 1`, so connecting a box with years of history mirrors none of it — including,
+accepted knowingly, replies to sends that predate the mirror. See the resume rules above.
 
 ### Threading is a graph
 
