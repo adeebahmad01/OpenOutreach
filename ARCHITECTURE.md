@@ -413,7 +413,7 @@ rather than pinned to a single hallucination.
 ## Django Apps
 
 - **`core`** — Engine: `SiteConfig`, `Campaign` models; the cycle, operator lookup, LLM factory, onboarding, the ML/discovery/qualify pipeline, the two agents, geo, vendored mem0.
-- **`emails`** — The email channel. `bettercontact.py` (paid finder: the two-leg `submit(query)→request_id` + `poll_once(request_id)→PollOutcome`, the shared blocking `submit_and_poll` transport used by discovery, `is_configured`, `BetterContactQuery`/`Result`/`PollOutcome`/`Unavailable`); `models/` (`mailbox.py`: `Mailbox` + the per-box capacity pacing manager; `maillog.py`: `Thread`/`Message`/`DeliveryEvent`/`FolderCoverage` — **the mail log** + `has_mailbox()` + `Mailbox.objects.create_verified`, which auth-checks an app password over SMTP before storing it — the provider has no health API, so the login *is* the gate, and onboarding is the only caller); `smtp.py` (`verify_auth`); `steps/` (`lookup.py`: `buy_address`/`check_lookup`/`reclaim_lookup`, `send.py`: `send_first_email`, `reply.py`: `answer_reply` — one entity in, the next `DealState` or `None` out); `sender.py` (`send_email` over SMTP+STARTTLS, threading headers, the `List-Unsubscribe` header + `unsubscribe_address`, `suppressed` — the last send-time gate, `operator_bcc` — the BCC-the-operator policy, own campaigns only, mailbox signature then the opt-out block then the `ATTRIBUTION` line appended to the body; the send is written into the log *before* it is attempted, the `250` (with the receiver's queue id) and any refusal are recorded against it, and the refusal is re-raised unchanged); `delivery_policy.py` (what the receiver's answer means — `classify(exc)` → `Verdict`, the `POLICIES` table, `record_acceptance`/`record_failure`); `warmth.py` (`refresh_capacity` / `read_sent_history` / `capacity_from` — the measured per-box daily ceiling); `sync.py`/`classify.py`/`project.py` + `mail_pass.py` (**the three jobs**: mirror the box, read the bytes, act on the reading); `threads.py` (union-find threading); `parsing.py` (pure RFC-5322 reading); `report.py` + `management/commands/mailreport.py` (backlog, per-kind counts, bounce rate, coverage); `newsletter.py` (`subscribe_to_newsletter`, Brevo); `steps/` (the four steps: `lookup.buy_address`/`check_lookup`, `send.send_first_email`, `reply.answer_reply`).
+- **`emails`** — The email channel. `bettercontact.py` (paid finder: the two-leg `submit(query)→request_id` + `poll_once(request_id)→PollOutcome`, the shared blocking `submit_and_poll` transport used by discovery, `is_configured`, `BetterContactQuery`/`Result`/`PollOutcome`/`Unavailable`); `models/` (`mailbox.py`: `Mailbox` + the per-box capacity pacing manager; `maillog.py`: `Thread`/`Message`/`DeliveryEvent`/`FolderCoverage` — **the mail log** + `has_mailbox()` + `Mailbox.objects.create_verified`, which auth-checks an app password over SMTP before storing it — the provider has no health API, so the login *is* the gate, and onboarding is the only caller); `smtp.py` (`verify_auth`); `steps/` (`lookup.py`: `buy_address`/`check_lookup`/`reclaim_lookup`, `send.py`: `send_first_email`, `reply.py`: `answer_reply` — one entity in, the next `DealState` or `None` out); `sender.py` (`send_email` over SMTP+STARTTLS, threading headers, the `List-Unsubscribe` header + `unsubscribe_address`, `suppressed` — the last send-time gate, `operator_bcc` — the BCC-the-operator policy, own campaigns only, mailbox signature then the opt-out block then the `ATTRIBUTION` line appended to the body; the send is written into the log *before* it is attempted, the `250` (with the receiver's queue id) and any refusal are recorded against it, and the refusal is re-raised unchanged); `delivery_policy.py` (what the receiver's answer means — `classify(exc)` → `Verdict`, the `POLICIES` table, `record_acceptance`/`record_failure`); `warmth.py` (`refresh_capacity` / `read_sent_history` / `capacity_from` — the measured per-box daily ceiling); `sync.py`/`classify.py`/`project.py` + `mail_pass.py` (**the three jobs**: mirror the box, read the bytes, act on the reading); `threads.py` (union-find threading); `parsing.py` (pure RFC-5322 reading); `report.py` (`bounce_rate`); `newsletter.py` (`subscribe_to_newsletter`, Brevo); `steps/` (the four steps: `lookup.buy_address`/`check_lookup`, `send.send_first_email`, `reply.answer_reply`).
 - **`crm`** — `Lead` (identity + embedding + email) and `Deal` (`crm/models/lead.py`, `crm/models/deal.py`); also defines `DealState` and `Outcome`.
 - **`chat`** — model-less; a migration-history anchor. `ChatMessage` was absorbed into `emails.Message`: in an email-only product a turn *is* a message, so a second table only meant dual-writing a conversation and a transport record that could disagree.
 - **`legacy`** — model-less; migration-history anchor only (see Project Layout).
@@ -482,13 +482,17 @@ A bounce is a `Message` with `kind=bounce` plus a `DeliveryEvent` against the se
 killed — a fact about delivery, not something anybody said. The two-apology loop is
 closed structurally rather than by a filter each read site must remember.
 
-### Answering the two questions
+### Answering the delivery question
 
-`emails/report.py` (and `manage.py mailreport`): *how many inbound messages have I
-processed against how many exist?* is `processed_at IS NOT NULL` over the log, and
-*what is my bounce rate?* is bounced over accepted `DeliveryEvent`s. Neither was
-answerable before — the first had no denominator, the second no numerator. `warmth.py`
-reads the rate back: over `WARM_BOUNCE_TOLERANCE`, the box's capacity is halved.
+`emails/report.py`: *what is my bounce rate?* is bounced over accepted
+`DeliveryEvent`s. It was not answerable before — delivery was recorded only inside an
+exception path, and a hard bounce is not an exception, so there was no numerator.
+`warmth.py` reads the rate back: over `WARM_BOUNCE_TOLERANCE`, the box's capacity is
+halved.
+
+The log's other question — *how many inbound messages have I processed against how
+many exist?* — is `processed_at IS NOT NULL` over `Message`, and the schema answers it
+whenever something asks; no reporting helper is kept standing for it.
 
 ## CRM Data Model
 

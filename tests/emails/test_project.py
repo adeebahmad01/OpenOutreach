@@ -106,26 +106,7 @@ class TestPendingIsAState:
 
 @pytest.mark.django_db
 class TestReporting:
-    """The two questions that were previously answerable only over live IMAP."""
-
-    def test_the_backlog_counts_what_is_held_against_what_is_done(self):
-        from openoutreach.emails.report import inbound_backlog
-
-        box = _box()
-        maillog.outbound(box, to="x@y.com")
-        maillog.outbound(box, to="z@y.com")
-        with patch("openoutreach.emails.sync._connect",
-                   return_value=FakeIMAP([message(7, to=SENDER, sender="x@y.com"),
-                                          message(8, to=SENDER, sender="z@y.com")])):
-            mirror(box)
-
-        assert inbound_backlog(box) == {
-            "stored": 2, "classified": 0, "processed": 0, "pending": 2,
-        }
-
-        classify_pending()
-        project_pending()
-        assert inbound_backlog(box)["pending"] == 0
+    """The delivery question that was previously answerable only over live IMAP."""
 
     def test_bounce_rate_is_bounces_over_accepted_sends(self):
         from openoutreach.emails.report import bounce_rate
