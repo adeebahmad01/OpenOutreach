@@ -4,13 +4,13 @@
 Three things are worth pinning down. The **column names are other people's**: Instantly
 and Smartlead require ``email``/``first_name``/``last_name`` and recognise ``company``/
 ``title``/``website``/``linkedin_url``, so a file this writes imports without mapping,
-and a rename here silently breaks that. And **CSV is a flattening of the JSON record**,
-never a second schema — both come from ``RECORD_FIELDS``. And it is a **pure database
-read**: no GP fit, no LLM call, nothing mutated.
+and a rename here silently breaks that. A **Deal is not an endorsement** — both
+rejections (`FAILED`, and `Lead.disqualified`) have to be filtered, and missing one
+shipped rejected leads to production. And it is a **pure database read**: no GP fit, no
+LLM call, nothing mutated.
 """
 import csv
 import io
-import json
 from unittest.mock import patch
 
 import pytest
@@ -79,20 +79,28 @@ class TestLeadRecord:
 
 @pytest.mark.django_db
 class TestLeadRecords:
-    def test_disqualified_leads_are_left_out_by_default(self, campaign):
+    def test_a_lead_the_qualifier_rejected_is_never_exported(self, campaign):
+        """The bug the live install exposed: a Deal is not an endorsement.
+
+        An LLM rejection is `FAILED` + `wrong_fit`, campaign-scoped — it does **not**
+        set `Lead.disqualified`, which is the permanent account-level exclusion. Filtering
+        on `disqualified` alone exported 1,944 rows from a campaign where most deals were
+        rejections, with `reason` reading "does not align well with the target market".
+        """
+        _deal(campaign)
+        DealFactory(campaign=campaign, lead=_lead(), state=DealState.FAILED,
+                    outcome="wrong_fit", reason="does not align with the target market")
+
+        records = list(export.lead_records(campaign))
+
+        assert len(records) == 1
+        assert "does not align" not in records[0]["reason"]
+
+    def test_an_opted_out_lead_is_never_exported(self, campaign):
         _deal(campaign)
         _deal(campaign, disqualified=True)
 
         assert len(list(export.lead_records(campaign))) == 1
-        assert len(list(export.lead_records(campaign, include_disqualified=True))) == 2
-
-    def test_a_state_filter_narrows_the_export(self, campaign):
-        _deal(campaign)
-        DealFactory(campaign=campaign, lead=_lead(), state=DealState.QUALIFIED)
-
-        records = list(export.lead_records(campaign, states=[DealState.READY_TO_EMAIL]))
-
-        assert len(records) == 1
 
     def test_the_export_never_touches_the_qualifier(self, campaign):
         """A read-only export must not fit a GP, and must not spend an LLM call.
@@ -138,24 +146,8 @@ class TestWriters:
         stream.seek(0)
         assert next(csv.DictReader(stream))["first_name"] == ""
 
-    def test_jsonl_writes_one_object_per_line_keeping_nulls(self, campaign):
-        _deal(campaign, first_name=None)
-        stream = io.StringIO()
-
-        count = export.write_jsonl(export.lead_records(campaign), stream)
-
-        lines = stream.getvalue().strip().splitlines()
-        assert count == 1 and len(lines) == 1
-        assert json.loads(lines[0])["first_name"] is None
-
-    def test_both_serialisations_carry_the_same_fields(self, campaign):
+    def test_the_row_count_is_reported(self, campaign):
         _deal(campaign)
-        records = list(export.lead_records(campaign))
-        csv_stream, json_stream = io.StringIO(), io.StringIO()
+        _deal(campaign, email="second@acme.com")
 
-        export.write_csv(records, csv_stream)
-        export.write_jsonl(records, json_stream)
-
-        csv_stream.seek(0)
-        assert set(next(csv.DictReader(csv_stream))) == set(
-            json.loads(json_stream.getvalue().strip()))
+        assert export.write_csv(export.lead_records(campaign), io.StringIO()) == 2

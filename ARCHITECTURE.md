@@ -65,7 +65,7 @@ Docker's `start` script `exec`s `python manage.py rundaemon` (no Xvfb/VNC — th
 - `migrate` — **overridden** (`management/commands/migrate.py` + `core/migration_compat.py`): before Django's migration-consistency check runs, it relabels any `linkedin` rows in `django_migrations` to `legacy`, so a pre-pivot DB upgrades with a plain `migrate` (no manual SQL, no `--fake`). Idempotent no-op on fresh installs.
 - `setup_crm` — idempotent CRM bootstrap (default Site).
 - `reset_data` — wipe pipeline data for a fresh run.
-- `export_leads` — **the lead export** (`--campaign`, `--format csv|jsonl`, `-o`, `--state`, `--include-disqualified`). Writes a campaign's qualified leads to stdout or a file, best-scoring first; the record lives in `core/export.py`. See *The Lead Export* below.
+- `export_leads --campaign NAME` — **the lead export**. One argument; CSV on stdout, redirect for a file. The record lives in `core/export.py`. See *The Lead Export* below.
 
 ## Onboarding (`core/onboarding.py`)
 
@@ -556,8 +556,16 @@ custom variables in their webhooks and an address can change under us.
   straight to the writer.
 - **The Deal is the unit, not the Lead** — the qualification `reason` is per-campaign, and the
   same person can be a lead in two campaigns with two different verdicts.
-- **Disqualified leads are excluded by default** — the common case is handing rows to a sender,
-  and those are exactly the people who must not be contacted.
+- **A Deal is not an endorsement**, and this is the trap the live install exposed. There are *two*
+  rejections and they live in different columns: `DealState.FAILED` (+ `wrong_fit`) is the LLM's
+  own campaign-scoped rejection, and `Lead.disqualified` is the permanent account-level exclusion
+  (an opt-out). The first shipped version filtered only on `disqualified`, so it exported **1,944
+  rows** from a campaign where most deals were rejections — rows whose `reason` read *"does not
+  align well with the target market"*. Both are now excluded, always; there is no flag to include
+  them.
+- **No options.** One required `--campaign`, CSV on stdout, shell redirection for a file. A format
+  switch, an output path, a state filter and a rejected-leads escape hatch were all removed as
+  answers to questions nobody had asked.
 
 ## CRM Data Model
 

@@ -1,5 +1,5 @@
 # openoutreach/core/export.py
-"""The lead export contract — one record shape, two serialisations.
+"""The lead export contract — one record shape, one command, no options.
 
 This is the finder's **public output**: what leaves OpenOutreach and reaches whatever
 the operator actually sends with. The boundary card
@@ -15,8 +15,9 @@ variable. So the record uses those names exactly — ``company``, not ``company_
 Everything we might like to ship but they do not know (state, campaign, country,
 discovery provenance) is left out rather than dumped in as noise variables.
 
-CSV is a flattening of the JSON record, never a second schema: both are generated from
-``RECORD_FIELDS``, so a field cannot appear in one and be forgotten in the other.
+``RECORD_FIELDS`` is the record, in one place. CSV is the only serialisation today because
+it is the only one with a consumer; when the webhook of Flow 2 arrives it serialises the
+same tuple, so the two cannot drift into separate schemas.
 
 **There is no score column, deliberately.** An earlier version exported the GP's
 ``P(f>0.5)``. That was a category error: ``core/pipeline/ready_pool.py`` defines
@@ -36,10 +37,9 @@ database.
 from __future__ import annotations
 
 import csv
-import json
 from typing import IO, Iterable
 
-# The record, in order. The one definition both serialisations read.
+# The record, in order.
 #
 # Required by Instantly + Smartlead: email, first_name, last_name.
 # Standard-mapped by both: company, title, website, linkedin_url.
@@ -83,32 +83,34 @@ def lead_record(deal) -> dict:
     }
 
 
-def lead_records(campaign, states: Iterable[str] | None = None,
-                 include_disqualified: bool = False) -> Iterable[dict]:
-    """Every judged lead in ``campaign``, as export records, oldest first.
+def lead_records(campaign) -> Iterable[dict]:
+    """Every lead in ``campaign`` the qualifier **accepted**, as records, oldest first.
 
     A lead is judged once it has a Deal — that is where the LLM's ``reason`` lives, so
-    an unqualified lead has nothing to say in a contract whose selling point is *why
-    this lead*.
+    an unjudged lead has nothing to say in a contract whose selling point is *why this
+    lead*. But a Deal is not an endorsement: the two rejections are separate columns and
+    both have to be excluded, which is the trap this filter exists to close.
 
-    Disqualified leads are excluded by default: they are the ones the operator must not
-    contact, and the common case for this command is handing rows to a sender.
+    - **`FAILED`** is the LLM's own rejection, campaign-scoped (`FAILED` + `wrong_fit`).
+      The `reason` on those rows reads *"does not align well with the target market"* —
+      exporting them hands a sender the people the model explicitly said no to.
+    - **`Lead.disqualified`** is the permanent, account-level exclusion (an opt-out).
+
+    Filtering only on `disqualified` catches the second and misses the first, which is
+    what shipped and what the live install exposed: 1,944 rows exported from a campaign
+    where most deals were rejections.
 
     Lazy on purpose: one indexed query streamed straight to the writer, so a campaign
     with thousands of deals never materialises twice.
     """
-    from openoutreach.crm.models import Deal
+    from openoutreach.crm.models import Deal, DealState
 
     deals = (
-        Deal.objects.filter(campaign=campaign)
+        Deal.objects.filter(campaign=campaign, lead__disqualified=False)
+        .exclude(state=DealState.FAILED)
         .select_related("lead", "lead__company")
         .order_by("lead__creation_date")
     )
-    if not include_disqualified:
-        deals = deals.filter(lead__disqualified=False)
-    if states:
-        deals = deals.filter(state__in=list(states))
-
     return (lead_record(deal) for deal in deals.iterator())
 
 
@@ -127,15 +129,3 @@ def write_csv(records: Iterable[dict], stream: IO[str]) -> int:
         writer.writerow(record)
         count += 1
     return count
-
-
-def write_jsonl(records: Iterable[dict], stream: IO[str]) -> int:
-    """Write records as newline-delimited JSON. Returns the row count."""
-    count = 0
-    for record in records:
-        stream.write(json.dumps({key: record[key] for key in RECORD_FIELDS}) + "\n")
-        count += 1
-    return count
-
-
-WRITERS = {"csv": write_csv, "jsonl": write_jsonl}
