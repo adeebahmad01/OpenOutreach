@@ -32,6 +32,25 @@ class Lead(models.Model):
     # Empty for leads discovered before this existed. They still count toward every
     # node's a/b (that reads ``profile_text``); they just cannot contribute vocabulary.
     source_fields = models.JSONField(default=dict, blank=True)
+    # Who this person is and where they work — the record the product accumulates, and
+    # what the lead export hands to whatever the operator sends with. Deliberately
+    # absent from ``profile_text`` and the embedding: a name carries no ICP signal, and
+    # vectorising it would give the GP noise to learn on.
+    #
+    # **Null means we were never told**, and nothing here is inferred. Discovery reports
+    # one ``contact_full_name``; the paid enrichment response reports the real
+    # ``contact_first_name``/``contact_last_name`` (``emails/steps/lookup.py`` writes
+    # them). A lead resolved from the free hub cache never reaches that provider, so its
+    # name parts stay null rather than being split in-house — they feed a sequencer's
+    # ``{{first_name}}`` merge tag, where a guess shows up in someone's cold email.
+    full_name = models.CharField(max_length=200, null=True, blank=True, default=None)
+    first_name = models.CharField(max_length=100, null=True, blank=True, default=None)
+    last_name = models.CharField(max_length=100, null=True, blank=True, default=None)
+    job_title = models.CharField(max_length=200, null=True, blank=True, default=None)
+    company = models.ForeignKey(
+        "Company", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="leads",
+    )
     # Work email from the enrichment API (BetterContact); null = not found / not yet
     # resolved. Written by the find-email leg once the lead is rank-gated.
     email = models.EmailField(null=True, blank=True, default=None)

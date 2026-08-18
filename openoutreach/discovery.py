@@ -153,6 +153,53 @@ def source_fields_for(row: dict) -> dict:
     return {key: str(row[key]) for key in wanted if row.get(key)}
 
 
+# Who the row is about, as opposed to the firmographic *text* the qualifier reads.
+# Verified against a live Lead Finder response (2026-06-30 probe, 0 credits): discovery
+# reports one ``contact_full_name``, never a first/last pair — those arrive later, from
+# the paid enrichment leg's own response (``emails/bettercontact.py``), so nothing here
+# ever splits a name.
+#
+# Stored as named ``Lead`` columns rather than folded into ``profile_text`` because the
+# export hands them to another tool as *fields*, and because they are the record the
+# product keeps. Deliberately out of the embedding — a person's name carries no ICP
+# signal, and vectorising it would give the GP noise to learn on.
+PERSON_FIELDS = {
+    "full_name": "contact_full_name",
+    "job_title": "contact_job_title",
+}
+
+# The employer, which becomes a ``crm.Company`` row rather than two columns on the
+# Lead — many leads in one ICP share an employer, and the company record is worth
+# keeping in its own right.
+#
+# Handle with care downstream: the provider *fuzzy-matches* this record (see the
+# ``TEXT_FIELDS`` note above — a boutique law firm's founder comes back as Meta), so a
+# Company row is what the provider said, not verified truth.
+COMPANY_FIELDS = {
+    "name": "company_name",
+    "domain": "company_domain",
+}
+
+
+def person_for(row: dict) -> dict:
+    """The row's person fields as ``Lead`` column values, ``None`` where unreported."""
+    return {field: _clean(row.get(key)) for field, key in PERSON_FIELDS.items()}
+
+
+def company_for(row: dict):
+    """The row's employer as a ``crm.Company``, created on first sight. ``None`` if unnamed."""
+    from openoutreach.crm.models import Company
+
+    return Company.from_row(**{field: _clean(row.get(key))
+                               for field, key in COMPANY_FIELDS.items()})
+
+
+def _clean(value) -> str | None:
+    """A provider string, or ``None`` — which is what "they didn't tell us" means."""
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
+
 def describe_node(keywords) -> str:
     """``(field, token)`` keywords → ``"2 keyword(s): title founder cto"``.
 

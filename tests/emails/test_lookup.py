@@ -117,6 +117,52 @@ class TestCheckLookup:
         assert deal.not_before is None
         assert deal.lookup_request_id == ""
 
+    def test_a_hit_also_stores_the_name_the_provider_resolved(self, campaign):
+        """First/last arrive with the address, at no extra call or credit.
+
+        This is why nothing in the codebase splits a full name: discovery only ever
+        knows one, and the enrichment waterfall knows the real parts.
+        """
+        deal = _in_flight(campaign)
+
+        with patch("openoutreach.emails.bettercontact.poll_once",
+                   return_value=PollOutcome(
+                       running=False, email="elon@tesla.com",
+                       first_name="Elon", last_name="Musk")), \
+                patch("openoutreach.contacts.service.contribute"):
+            assert check_lookup(deal) == DealState.READY_TO_EMAIL
+
+        deal.lead.refresh_from_db()
+        assert (deal.lead.first_name, deal.lead.last_name) == ("Elon", "Musk")
+
+    def test_a_title_stamped_at_discovery_survives_the_lookup(self, campaign):
+        """The qualifier judged the lead on the discovered title; the lookup leaves it."""
+        deal = DealFactory(
+            campaign=campaign,
+            lead=LeadFactory(job_title="Founder"),
+            state=DealState.FINDING_EMAIL,
+            lookup_request_id="req1",
+        )
+
+        with patch("openoutreach.emails.bettercontact.poll_once",
+                   return_value=PollOutcome(running=False, email="a@b.com")), \
+                patch("openoutreach.contacts.service.contribute"):
+            check_lookup(deal)
+
+        deal.lead.refresh_from_db()
+        assert deal.lead.job_title == "Founder"
+
+    def test_a_hub_cache_hit_leaves_the_name_parts_null(self, campaign):
+        """The free hub resolves an address only — no identity, and none invented."""
+        deal = _ready_to_find(campaign)
+
+        with patch("openoutreach.contacts.service.resolve", return_value="hub@corp.com"):
+            assert buy_address(deal) == DealState.READY_TO_EMAIL
+
+        deal.lead.refresh_from_db()
+        assert deal.lead.email == "hub@corp.com"
+        assert deal.lead.first_name is None and deal.lead.last_name is None
+
     def test_a_miss_is_its_own_terminal(self, campaign):
         """Reachability failed, not fit — the ML labeler keeps the lead positive."""
         deal = _in_flight(campaign)

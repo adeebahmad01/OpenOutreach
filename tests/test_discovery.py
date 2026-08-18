@@ -109,6 +109,54 @@ class TestProfileTextFor:
         assert discovery.profile_text_for(row) == "founder"
 
 
+class TestPersonFor:
+    """The row's identity, kept as columns for the export rather than as text.
+
+    Discovery knows one ``contact_full_name`` and nothing finer — first/last arrive
+    later from the enrichment provider's own response, never from a split here.
+    """
+
+    def test_reads_the_name_and_title_the_provider_reports(self):
+        row = {"contact_full_name": "Ada Lovelace", "contact_job_title": "CTO"}
+        assert discovery.person_for(row) == {"full_name": "Ada Lovelace", "job_title": "CTO"}
+
+    def test_an_unreported_field_is_none_not_an_empty_string(self):
+        # One representation of "they didn't tell us", so the column never holds both.
+        assert discovery.person_for({}) == {"full_name": None, "job_title": None}
+
+    def test_null_and_empty_and_padded_values_all_normalise(self):
+        row = {"contact_full_name": "  Ada Lovelace  ", "contact_job_title": ""}
+        assert discovery.person_for(row) == {"full_name": "Ada Lovelace", "job_title": None}
+
+    def test_no_first_or_last_name_is_invented(self):
+        # The whole point: a split here would end up in a sequencer's {{first_name}}.
+        assert set(discovery.person_for({"contact_full_name": "Ada Lovelace"})) == {
+            "full_name", "job_title"}
+
+
+@pytest.mark.django_db
+class TestCompanyFor:
+    def test_creates_the_company_and_keys_it_on_the_domain(self):
+        company = discovery.company_for({"company_name": "Acme", "company_domain": "acme.com"})
+
+        assert (company.name, company.domain, company.key) == ("Acme", "acme.com", "acme.com")
+
+    def test_two_leads_at_one_firm_share_a_row(self):
+        first = discovery.company_for({"company_name": "Acme", "company_domain": "Acme.com"})
+        second = discovery.company_for({"company_name": "Acme", "company_domain": "acme.com"})
+
+        assert first.pk == second.pk  # the key lowercases, so casing cannot fork the row
+
+    def test_a_company_with_no_domain_keys_on_its_name(self):
+        company = discovery.company_for({"company_name": "Acme"})
+
+        assert company.key == "name:acme"
+
+    def test_a_row_naming_no_company_stores_nothing(self):
+        assert discovery.company_for({"contact_job_title": "CTO"}) is None
+        assert discovery.company_for({"company_name": "", "company_domain": None}) is None
+
+
 class TestEmbedProfile:
     def test_appends_query_terms_to_profile_text(self):
         # The keyword injection: a lead is embedded as its firmographic text PLUS its

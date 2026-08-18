@@ -111,6 +111,35 @@ class TestPollOnce:
             outcome = bettercontact.poll_once("req1")
         assert outcome.hit and outcome.email == "alice@acme.com"
 
+    def test_a_hit_carries_the_identity_the_waterfall_resolved(self, keyed):
+        """The provider derives the contact from the URL and echoes back who it is.
+
+        Same call, same credit — so first/last name come from the provider and nothing
+        in this codebase ever splits a full name into parts.
+        """
+        get = MagicMock(return_value=_response({
+            "status": "terminated",
+            "data": [{
+                "contact_email_address": "elon@tesla.com",
+                "contact_email_address_status": "deliverable",
+                "contact_first_name": "Elon",
+                "contact_last_name": "Musk",
+            }],
+        }))
+        with _patch_session(get=get):
+            outcome = bettercontact.poll_once("req1")
+
+        assert outcome.hit
+        assert (outcome.first_name, outcome.last_name) == ("Elon", "Musk")
+
+    def test_a_hit_without_name_fields_is_still_a_hit(self, keyed):
+        get = MagicMock(return_value=_terminal("alice@acme.com", "valid"))
+        with _patch_session(get=get):
+            outcome = bettercontact.poll_once("req1")
+
+        assert outcome.hit
+        assert outcome.first_name is None and outcome.last_name is None
+
     def test_terminal_no_usable_email_is_miss(self, keyed):
         get = MagicMock(return_value=_terminal(None, "not_found"))
         with _patch_session(get=get):

@@ -57,8 +57,17 @@ class BetterContactQuery:
 
 @dataclass(frozen=True)
 class BetterContactResult:
+    """One terminated lookup: the address, and the identity the provider resolved.
+
+    The waterfall derives the contact from the URL internally and echoes back who it
+    decided the person is. Those fields cost nothing extra — same call, same credit —
+    and they are the *provider's* first/last name rather than a split of ours, which is
+    why nothing in this codebase guesses at name parts. ``None`` where unreported.
+    """
     email: str
     status: str
+    first_name: str | None = None
+    last_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -68,9 +77,14 @@ class PollOutcome:
     ``running`` — the job hasn't terminated; the collect leg backs off and polls
     again. ``hit`` — terminated with a usable email (``email`` set). ``miss`` —
     terminated with no usable email (a genuine, terminal miss).
+
+    A hit also carries the name parts the provider resolved, for the collect leg to
+    persist alongside the address.
     """
     running: bool
     email: str = ""
+    first_name: str | None = None
+    last_name: str | None = None
 
     @property
     def hit(self) -> bool:
@@ -127,7 +141,14 @@ def poll_once(request_id: str) -> PollOutcome:
         return PollOutcome(running=True)
     rows = body.get("data") or []
     result = _row_to_result(rows[0]) if rows else None
-    return PollOutcome(running=False, email=result.email if result else "")
+    if result is None:
+        return PollOutcome(running=False)
+    return PollOutcome(
+        running=False,
+        email=result.email,
+        first_name=result.first_name,
+        last_name=result.last_name,
+    )
 
 
 def _require_key() -> str:
@@ -213,5 +234,10 @@ def _row_to_result(row: dict) -> BetterContactResult | None:
     email = row.get("contact_email_address")
     status = row.get("contact_email_address_status")
     if email and status in _USABLE_STATUSES:
-        return BetterContactResult(email=email, status=status)
+        return BetterContactResult(
+            email=email,
+            status=status,
+            first_name=row.get("contact_first_name") or None,
+            last_name=row.get("contact_last_name") or None,
+        )
     return None

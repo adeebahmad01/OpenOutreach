@@ -73,6 +73,12 @@ def _submit(deal) -> DealState | None:
 
     A couldn't-submit (no key, API down) leaves the deal where it is: no credit was
     spent and no handle exists to poll, so the next cycle simply tries again.
+
+    **Only the profile URL is sent.** The provider accepts name and company too and
+    resolves better with them, but the lookup is deliberately minimal: the less of a
+    lead's record leaves for a third party, the better, and URL-only is measured at
+    ~42% usable (2026-06-11, 45 real leads) which is enough. Do not widen this query
+    without a decision to widen it.
     """
     from openoutreach.emails import bettercontact
     from openoutreach.emails.bettercontact import BetterContactQuery, BetterContactUnavailable
@@ -162,11 +168,27 @@ def check_lookup(deal) -> DealState | None:
         return DealState.NO_EMAIL_BETTERCONTACT
 
     deal.lead.email = outcome.email
-    deal.lead.save(update_fields=["email"])
+    _store_identity(deal.lead, outcome)
     contacts.contribute(deal.lead, [outcome.email], contacts.ORIGIN_BETTERCONTACT)
     logger.info("%s", step_line(
         "hit", f"{outcome.email} → READY_TO_EMAIL", glyph="✓", color="green"))
     return DealState.READY_TO_EMAIL
+
+
+def _store_identity(lead, outcome) -> None:
+    """Write the address, and the name parts the provider resolved with it.
+
+    The waterfall derives the contact from the URL and echoes back
+    ``contact_first_name``/``contact_last_name`` in the same terminated response — no
+    extra call, no extra credit. Taking them from here is why nothing in this codebase
+    splits a full name: discovery only ever knows one, and the provider knows the parts.
+
+    The job title is *not* taken. Discovery already stamped one, and that is what the
+    qualifier judged the lead on.
+    """
+    lead.first_name = outcome.first_name
+    lead.last_name = outcome.last_name
+    lead.save(update_fields=["email", "first_name", "last_name"])
 
 
 # ── Backoff ───────────────────────────────────────────────────────

@@ -46,11 +46,18 @@ def create_lead(row: dict, country_code: str = "", discovered_by=None,
     touch (a profile another query already created keeps its original node). Its
     ``query_terms`` are folded into the **embedding only** — not ``profile_text`` — so
     the GP learns which query keywords surface good leads while the LLM judges the
-    person on firmographics alone. Returns True when a new Lead was created, False when
-    one already existed (idempotent re-discovery).
+    person on firmographics alone.
+
+    The row's person fields (``person_for``) land as named columns and its employer as a
+    shared ``Company`` row (``company_for``) — apart from both the text and the vector,
+    because the export hands them on as fields and a name would only add noise to the
+    embedding. Returns True when a new Lead was created, False when one already existed
+    (idempotent re-discovery).
     """
     from openoutreach.crm.models import Lead
-    from openoutreach.discovery import embed_profile, profile_text_for, source_fields_for
+    from openoutreach.discovery import (
+        company_for, embed_profile, person_for, profile_text_for, source_fields_for,
+    )
 
     profile_url = row.get("contact_linkedin_profile_url")
     if not profile_url:
@@ -66,6 +73,8 @@ def create_lead(row: dict, country_code: str = "", discovered_by=None,
             "source_fields": source_fields_for(row),
             "country_code": country_code,
             "discovered_by": discovered_by,
+            "company": company_for(row),
+            **person_for(row),
         },
     )
     return created
