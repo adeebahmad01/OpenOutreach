@@ -533,21 +533,27 @@ exported file imports without column mapping. The internal model keeps its own n
 match N importers, so the mapping is a function, not a migration.
 
 ```
-email, first_name, last_name, company, title, website, linkedin_url, score, reason, lead_id
+email, first_name, last_name, company, title, website, linkedin_url, reason, lead_id
 ```
 
-`score` and `reason` land as custom variables and are the reason the product exists. `lead_id`
-is the only column that is there for us: it is the join key for outcomes coming back, since
-sequencers echo custom variables in their webhooks and an address can change under us.
+`reason` lands as a custom variable and is the reason the product exists. `lead_id` is the only
+column that is there for us: it is the join key for outcomes coming back, since sequencers echo
+custom variables in their webhooks and an address can change under us.
 
 - **CSV is a flattening of the JSON record, never a second schema** — both are generated from
   `RECORD_FIELDS`, so a field cannot appear in one and be forgotten in the other. `None` writes
   as an empty cell, which is what an importer expects for a field we were never told.
-- **`score` is computed at export time, never stored.** `Lead` has no probability column on
-  purpose (see the note in `core/pipeline/ready_pool.py` on why it must not be written over
-  `Deal.reason`), so the export fits the campaign's GP once via `qualifier_for` and scores the
-  batch in one pass — the same call the promote gate makes. A campaign whose GP cannot fit yet
-  exports `score=None` rather than a fabricated number, and records sort best-scoring first.
+- **There is no score column, and the export is a pure database read.** An earlier version
+  exported the GP's `P(f>0.5)`; it was removed as a category error. `core/pipeline/ready_pool.py`
+  defines `min_gp_confidence` as "the paid-lookup spend gate **and nothing else**" — the GP decides
+  whether to spend a credit resolving an address, not whether a lead fits. The fit verdict is the
+  LLM's and it is already in the file as `reason`, in language a person reads; and since every
+  exported lead has a Deal, it has already passed the qualifier, so the number separated nothing.
+  It was also expensive and unsafe: scoring meant `qualifier_for`, an O(n³) fit over every label
+  (**minutes** on the live install's 2,538-deal campaign, against a docstring assuming "tens to low
+  hundreds"), which also calls `ensure_anchors` — so a cold campaign would have made **LLM calls and
+  mutated campaign state from a read-only export**. `lead_records` now streams one indexed query
+  straight to the writer.
 - **The Deal is the unit, not the Lead** — the qualification `reason` is per-campaign, and the
   same person can be a lead in two campaigns with two different verdicts.
 - **Disqualified leads are excluded by default** — the common case is handing rows to a sender,
