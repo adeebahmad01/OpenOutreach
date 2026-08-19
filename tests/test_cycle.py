@@ -146,52 +146,59 @@ class TestNotBefore:
         assert _called(steps) == {"send"}
 
 
-# ── The spend condition ───────────────────────────────────────────
+# ── Finding leads without a mailbox ───────────────────────────────
 
 
 @pytest.mark.django_db
-class TestRoomToSendToday:
-    def test_no_mailbox_means_no_room(self, campaign):
-        assert cycle.room_to_send_today(campaign) is False
+class TestTheFinderRunsWithoutAMailbox:
+    """The pivot, in tests: the product finds leads, and sending is a leg it may not have.
 
-    def test_an_empty_pipeline_has_room(self, campaign):
-        _box(daily_limit=3)
-        assert cycle.room_to_send_today(campaign) is True
+    These replace ``TestRoomToSendToday``. That gate — *never buy an address, and
+    never qualify a lead, for someone there is no room to email today* — was correct
+    while every lead ended in a send. It also meant an install with no ``Mailbox``
+    row had zero pool headroom, so discovery and qualification never ran at all: the
+    daemon looked alive and produced nothing, with no error and no log line saying
+    why. That silence is what these tests exist to break.
+    """
 
-    def test_a_full_pipeline_stops_spending(self, campaign):
-        """Never buy an address, or spend an LLM call, for someone there is no room
-        to email today."""
-        _box(daily_limit=2)
-        for i in range(2):
-            _deal(campaign, DealState.READY_TO_EMAIL, email=f"a{i}@corp.com")
+    def test_discovery_and_qualification_run_with_no_mailbox_at_all(
+            self, campaign, steps):
+        """The one that would have failed before: no boxes, and top-up still fires."""
+        assert Mailbox.objects.count() == 0
 
-        assert cycle.room_to_send_today(campaign) is False
+        cycle.run_one_action(campaign)
+        assert "top_up" in _called(steps)
 
-    def test_an_in_flight_lookup_holds_a_claim_on_today(self, campaign):
-        _box(daily_limit=1)
-        _deal(campaign, DealState.FINDING_EMAIL, lookup_request_id="req1",
-              not_before=timezone.now() + timedelta(minutes=5))
-
-        assert cycle.room_to_send_today(campaign) is False
-
-    def test_a_stalled_lookup_does_not_wedge_the_pipeline_shut(self, campaign):
-        """Its next poll is weeks out, so it cannot produce a send today and must
-        not keep claiming today's headroom."""
-        _box(daily_limit=1)
-        _deal(campaign, DealState.FINDING_EMAIL, lookup_request_id="req1",
-              not_before=timezone.now() + timedelta(days=14))
-
-        assert cycle.room_to_send_today(campaign) is True
-
-    def test_buying_stops_when_there_is_no_room(self, campaign, steps):
+    def test_a_full_send_queue_no_longer_stops_qualifying(self, campaign, steps):
+        """A backed-up mailbox says nothing about whether the next lead is worth
+        finding — the leads are the product, and they leave over a CSV."""
         _box(daily_limit=1)
         _deal(campaign, DealState.READY_TO_EMAIL, email="a@corp.com")
-        _deal(campaign, DealState.READY_TO_FIND_EMAIL)
-        # The box is spaced out, so the send step cannot run and hide the point.
+        # Box spaced out, so the send row cannot fire and hide the point.
         Mailbox.objects.update(next_send_at=timezone.now() + timedelta(minutes=5))
 
-        assert cycle.run_one_action(campaign) is False
-        assert _called(steps) == set()
+        cycle.run_one_action(campaign)
+        assert "top_up" in _called(steps)
+
+    def test_addresses_are_bought_with_no_mailbox(self, campaign, steps):
+        """Enrichment is the finder's own leg: a resolved address is a column in the
+        export, not a prerequisite for a send that may never happen."""
+        _deal(campaign, DealState.READY_TO_FIND_EMAIL)
+
+        with patch("openoutreach.emails.bettercontact.is_configured",
+                   return_value=True):
+            assert cycle.run_one_action(campaign) is True
+        assert _called(steps) == {"buy"}
+
+    def test_no_finder_key_means_no_buying(self, campaign, steps):
+        """The one gate left on the paid row, and it is about the provider, not the
+        pipeline: with no key there is nobody to submit the job to."""
+        _deal(campaign, DealState.READY_TO_FIND_EMAIL)
+
+        with patch("openoutreach.emails.bettercontact.is_configured",
+                   return_value=False):
+            cycle.run_one_action(campaign)
+        assert "buy" not in _called(steps)
 
 
 # ── Failure handling ──────────────────────────────────────────────

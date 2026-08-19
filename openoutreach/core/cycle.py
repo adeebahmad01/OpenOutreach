@@ -205,10 +205,11 @@ _WAITING_ON = (
 
 
 def _pipeline_summary(campaign) -> str:
-    """One line of counts: who is waiting on what, against today's send headroom."""
+    """One line of counts: who is waiting on what, and which gate is holding them."""
     from django.db.models import Count
 
     from openoutreach.crm.models import Deal
+    from openoutreach.emails import bettercontact
     from openoutreach.emails.models import Mailbox
 
     counts = dict(
@@ -220,15 +221,19 @@ def _pipeline_summary(campaign) -> str:
     waiting = [f"{counts.get(state, 0)} {phrase}" for state, phrase in _WAITING_ON]
     waiting.append(f"{unanswered_replies(campaign).count()} reply(ies) to answer")
 
+    # Each gate said as its consequence rather than as its name — "no finder key, so
+    # not buying addresses" tells you why a row declined; a boolean tells you nothing.
+    # Discovery and qualification have no gate to report any more: they always run.
+    gates = []
+    if not bettercontact.is_configured():
+        gates.append("no finder key, so not buying addresses")
     left = Mailbox.objects.remaining_today()
-    # The gate, said as its consequence rather than as its name: `room to spend=False`
-    # tells you a boolean, "not buying or qualifying" tells you why two rows declined.
-    spending = ("buying and qualifying as needed" if room_to_send_today(campaign)
-                else "no send headroom left, so not buying or qualifying")
-    # Same reasoning for the clock: a stocked queue and free headroom at 22:00 looks
-    # like a stuck daemon unless the line says which gate is holding it.
-    clock = "" if within_sending_window() else " · outside sending hours, so not emailing"
-    return f"{' · '.join(waiting)} · {left} send(s) left today · {spending}{clock}"
+    if not left:
+        gates.append("no send headroom, so not emailing")
+    elif not within_sending_window():
+        gates.append("outside sending hours, so not emailing")
+    held = f" · {' · '.join(gates)}" if gates else ""
+    return f"{' · '.join(waiting)} · {left} send(s) left today{held}"
 
 
 # ── 1. Check an in-flight lookup ──────────────────────────────────
@@ -392,10 +397,14 @@ def _pool_signature(campaign) -> tuple[int, int]:
 
 
 def _buy_addresses(campaign) -> bool:
-    from openoutreach.emails.models import has_mailbox
+    from openoutreach.emails import bettercontact
     from openoutreach.emails.steps.lookup import buy_address
 
-    if not has_mailbox() or not room_to_send_today(campaign):
+    # The only gate left on the one paid step: is there a provider to pay. What
+    # bounds the spend is the operator's own prepaid credit balance, which the
+    # provider enforces and we cannot see — see ``_top_up`` for why nothing here
+    # rations it on our side.
+    if not bettercontact.is_configured():
         return False
     deal = _due(campaign, DealState.READY_TO_FIND_EMAIL).filter(
         lead__disqualified=False).first()
@@ -408,50 +417,30 @@ def _buy_addresses(campaign) -> bool:
 
 
 def _top_up(campaign) -> bool:
-    from openoutreach.core.pipeline.top_up import top_up
-    from openoutreach.emails.models import has_mailbox
+    """Discover and qualify, always. This row has no gate, and that is the pivot.
 
-    if not has_mailbox() or not room_to_send_today(campaign):
-        return False
-    return top_up(campaign)
+    It used to have two — a mailbox had to exist and the campaign had to have send
+    headroom left today — because every lead ended in a send, so spending an LLM
+    call on someone there was no room to email was waste. Rows 5 and 6 shared that
+    one gate (``room_to_send_today``, now deleted): *never resolve an address, and
+    never qualify a lead, for someone there is no room to email today.*
 
+    **The product no longer sends, so neither clause survives.** The output is a
+    qualified lead with a written reason, handed over as CSV; whether a mailbox
+    exists says nothing about whether that lead is worth finding. Worse, the gate
+    made a mailbox-less install produce *nothing* — with no ``Mailbox`` rows the
+    pool headroom is 0, the comparison is never true, and discovery and
+    qualification both stop. Not degraded: silent and empty.
 
-def room_to_send_today(campaign) -> bool:
-    """True when this campaign has fewer people heading for a send than sends left today.
-
-    The gate on both spending money and spending LLM calls: never resolve an address,
-    and never qualify a lead, for someone there is no room to email today. Paid spend
-    rides on send capacity — there is no separate budget and no cap to tune.
-
-    Deliberately same-day and deliberately simple. It empties the pipeline at the end
-    of a day, so the first send after midnight waits on one qualification and one
-    provider lookup; sends are minutes apart anyway, and the alternative is a
-    stockpile of addresses bought against capacity that may never arrive.
-
-    "Heading for a send" is READY_TO_EMAIL plus the in-flight lookups that could
-    still land today. A lookup whose backoff has pushed its next poll past
-    ``COLLECT_TODAY_HORIZON_S`` cannot produce a send today, and counting it would
-    let a handful of stalled jobs wedge the pipeline shut for as long as they stay
-    stalled — the backoff is uncapped by design, so that is weeks.
+    Nothing replaces it, because there is nothing left to ration. Discovery is free
+    (``discovery.py``) and qualification costs one LLM call against a key the
+    operator already pays for directly. A daily cap would be a knob invented to
+    replace a gate that had a reason, and the loop is already rate-bounded the only
+    way that matters: one unit of work per cycle, forever.
     """
-    from datetime import timedelta
+    from openoutreach.core.pipeline.top_up import top_up
 
-    from django.db.models import Q
-
-    from openoutreach.core.conf import COLLECT_TODAY_HORIZON_S
-    from openoutreach.crm.models import Deal
-    from openoutreach.emails.models import Mailbox
-
-    horizon = timezone.now() + timedelta(seconds=COLLECT_TODAY_HORIZON_S)
-    heading_for_a_send = (
-        Deal.objects.filter(campaign=campaign, lead__disqualified=False)
-        .filter(
-            Q(state=DealState.READY_TO_EMAIL)
-            | Q(state=DealState.FINDING_EMAIL, not_before__lte=horizon),
-        )
-        .count()
-    )
-    return heading_for_a_send < Mailbox.objects.remaining_today()
+    return top_up(campaign)
 
 
 # ── Periodic side-effects ─────────────────────────────────────────
