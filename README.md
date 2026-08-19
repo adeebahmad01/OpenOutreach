@@ -67,11 +67,15 @@ The export is a **one-way boundary**. Leads leave; nothing comes back. There is 
 
 ---
 
-### 📧 It still sends email, for now
+### 📭 It does not send email
 
-The version in this repo also runs **agentic email outreach** from a mailbox you own — it resolves a work email, writes an opener, sends over SMTP, reads replies over IMAP and answers them. That half is being **handed off**, not developed: sending is a specialism, and a good lead list ruined by a bad opener reads to the buyer as a bad lead list.
+Earlier versions ran agentic email outreach from a mailbox you owned. That half has been **handed off** to [OpenEmailSequence](https://github.com/eracle/OpenEmailSequence), because sending is a specialism — and a good lead list ruined by a bad opener reads to the buyer as a bad lead list.
 
-So the mailbox is still required at setup and the sending pipeline still works, but the direction of the project is the finder. If you already run Instantly, Smartlead, Lemlist, HubSpot or anything that reads a CSV, use the export and ignore the mail leg.
+What that means for you, concretely:
+
+- **No mailbox to connect.** Setup asks for an LLM key, a lead-data key, and what you sell.
+- **Nothing gets sent from your identity.** Including, notably, the promotional campaign for OpenOutreach that older versions sent from your mailbox. It is gone.
+- **You send with what you already use.** Instantly, Smartlead, Lemlist, HubSpot, a spreadsheet — anything that reads a CSV. **Turn on your tool's import deduplication**; that is the one thing the split hands to you.
 
 ---
 
@@ -91,12 +95,9 @@ Every comparable tool that qualifies leads for you is paid SaaS. This one is GPL
 
 ## 💸 How OpenOutreach Stays Free
 
-While the sending leg still ships, OpenOutreach sends email from a mailbox **you own and control**, under your own sending identity. It sends **two kinds** of email, and you should know about both before you run it:
+**Affiliate links, and that is now the whole of it.** The one paid third-party service the tool relies on — the lead-data provider — is surfaced during onboarding through an affiliate link. Sign up through it and the project may earn a commission, **at no markup to you**. Sign up any other way if you prefer.
 
-- **Your outreach** — personalized emails to the leads *you* target, on your behalf, as part of your own campaigns.
-- **A promotion for OpenOutreach itself** — the tool ships with a **freemium** campaign that **advertises OpenOutreach**, sent from your mailbox **as if from you**, to recipients unrelated to your own leads. It takes its turn in the sending rotation alongside your own campaigns, so a share of the sending is the project's rather than yours. This is one of the ways the project funds itself for cold-start users, alongside affiliate links and sponsorships.
-
-Both kinds send from your mailbox under your identity, and both are your responsibility under anti-spam law. On an install you run yourself the promotion can be disabled by editing the source (the GPLv3 licence permits this), and it goes away entirely when the sending leg does. Full detail — how the rotation works, where the content comes from, what is and isn't logged, and your responsibilities — is in the **[Legal Notice](LEGAL_NOTICE.md)** (§4).
+Two other funding mechanisms have been **removed**, and it is worth saying so plainly because older versions had them: a promotional campaign for OpenOutreach that was sent from your own mailbox under your own identity, and a "Sent with OpenOutreach" line appended to every message. Both died with the sending leg. See the **[Legal Notice](LEGAL_NOTICE.md)** (§4).
 
 ---
 
@@ -107,11 +108,10 @@ Both kinds send from your mailbox under your identity, and both are your respons
 | 1 | **An LLM API key** | OpenAI, Anthropic, or any OpenAI-compatible endpoint |
 | 2 | **An email-finder API key** ([BetterContact](https://bettercontact.rocks?fpr=openoutreach)) | Powers **both** discovery (Lead Finder, free) and enrichment (work-email resolution, one credit per hit) |
 | 3 | **A product description + target market** | "We sell cloud cost optimization for DevOps teams at mid-market SaaS companies" |
-| 4 | **A sending mailbox** *(while the mail leg ships)* | An app password for a mailbox you own (Gmail / Workspace / own-domain SMTP), or cold-email infra like [IceMail](https://icemail.ai?via=openoutreach) |
 
-No social-network account, no spreadsheets, no lead databases, no scraping setup. The BetterContact key is required today because it drives discovery *and* enrichment — the account is the barrier, not the bill, since searching costs nothing.
+That's it. **No mailbox**, no social-network account, no spreadsheets, no lead databases, no scraping setup. The BetterContact key is required because it drives discovery *and* enrichment — note the barrier is an **account, not a bill**, since searching the index costs nothing and only resolving an address spends a credit.
 
-The BetterContact and IceMail links above are **affiliate links** — signing up through them supports OpenOutreach, at no markup to you. You can sign up for either service directly instead; IceMail in particular is only a suggestion, since any SMTP mailbox you own works.
+The BetterContact link above is an **affiliate link** — signing up through it supports OpenOutreach, at no markup to you.
 
 ---
 
@@ -123,7 +123,7 @@ Pre-built images are published to GitHub Container Registry.
 docker run --pull always -it -v ~/.openoutreach/data:/app/data ghcr.io/eracle/openoutreach:latest
 ```
 
-The interactive onboarding walks you through the inputs above on first run — product/objective → LLM key (live-verified) → mailbox (paste an app password → SMTP auth-check) → BetterContact key → your email → country → newsletter/legal. All data persists in `~/.openoutreach/data` on your host across restarts. The image is a slim Python runtime — **no browser, no VNC**.
+The interactive onboarding walks you through the inputs above on first run — product/objective → LLM key (live-verified) → BetterContact key → your email → country → newsletter/legal. Four steps. All data persists in `~/.openoutreach/data` on your host across restarts. The image is a slim Python runtime — **no browser, no VNC**.
 
 For Docker Compose, build-from-source, and more options see the **[Docker Guide](./docs/docker.md)**.
 
@@ -152,7 +152,7 @@ make setup
 ```bash
 make run
 ```
-The interactive onboarding prompts for your LLM key, mailbox, BetterContact key, and campaign details on first run. Fully resumable — stop/restart anytime without losing progress.
+The interactive onboarding prompts for your LLM key, BetterContact key, and campaign details on first run. Fully resumable — stop/restart anytime without losing progress.
 
 ### 3. Read the Verdicts (CRM Admin)
 
@@ -185,10 +185,9 @@ python manage.py export_leads --campaign "My Campaign" > leads.csv
 | 🔒 **Licensed Discovery**          | Firmographic profiles come from a licensed provider (BetterContact Lead Finder) — no scraping, no browser, no account. |
 | 🎯 **Pay Only For What Resolves**  | Search against the licensed source is free; a confidence gate rations the paid lookups, billed only on a verified hit. Cost scales with qualified leads, not with how much you searched. |
 | 📤 **Export That Just Imports**    | CSV in the exact column names Instantly and Smartlead expect, so a file imports without column mapping. One record schema, one translation layer, no privileged path for our own sender. |
-| 💾 **Built-in CRM**               | Django Admin — browse Leads, Companies, Deals and conversations. Everything is local and everything exports.        |
+| 💾 **Built-in CRM**               | Django Admin — browse Leads, Companies and Deals, and read every verdict. Everything is local and everything exports. |
 | 🔄 **Stateful Pipeline**          | Tracks deal states in a local DB — fully resumable, nothing scheduled in advance, no queue table.                   |
 | 🐳 **One-Command Deployment**      | Dockerized setup with interactive onboarding; a slim runtime with no browser and no VNC.                            |
-| 📧 **Agentic Email Outreach** *(being handed off)* | Sends an AI-written opener from your own mailbox over SMTP, then reads replies (IMAP) and answers them. Nobody is chased: it writes when they write back. Sends Mon–Fri, 08:00–20:00 your time, behind a per-mailbox daily cap measured from what that box already sends. |
 
 ---
 
@@ -198,16 +197,14 @@ The daemon runs a short cycle that asks the deals what they need — there is no
 
 | # | Step | What it does |
 |---|------|-------------|
-| 1 | **check a lookup** | Polls an in-flight work-email job: hit → `READY_TO_EMAIL`, miss → `NO_EMAIL_BETTERCONTACT`, still running → ask again later on the same job. |
-| 2 | **answer a reply** | Runs the AI agent over a deal whose newest message is inbound — replies, closes the deal, or honours an unsubscribe. |
-| 3 | **send a first email** | Sends one AI-written opener to a `READY_TO_EMAIL` lead, then parks the deal at `EMAILED`. |
-| 4 | **rank the pool** | Promotes the qualified leads the model is confident about. |
-| 5 | **buy an address** | Free hub-cache hit resolves immediately; otherwise fires a paid provider job and parks the deal at `FINDING_EMAIL`. |
-| 6 | **top up** | Discovers and qualifies more leads. |
+| 1 | **check a lookup** | Polls an in-flight work-email job: hit → `RESOLVED`, miss → `NO_EMAIL_BETTERCONTACT`, still running → ask again later on the same job. |
+| 2 | **rank the pool** | Promotes the qualified leads the model is confident about. |
+| 3 | **buy an address** | Free hub-cache hit resolves immediately; otherwise fires a paid provider job and parks the deal at `FINDING_EMAIL`. |
+| 4 | **top up** | Discovers and qualifies more leads. |
 
-Steps 5 and 6 share one gate: never spend money, and never spend an LLM call qualifying, for someone there is no room to email today.
+Only step 3 costs money, and its only gate is whether you configured a provider. **Steps 2 and 4 are ungated on purpose**: searching the index is free and qualifying costs one call against your own LLM key, so there is nothing to ration — the loop does one thing per cycle and that is the bound.
 
-**Discover → qualify → gate → find email → export.** One LLM pass turns your campaign into opening search keywords; from there the keyword vocabulary grows by counting the words that appear in profiles the LLM has accepted, and the walk keeps firing the most promising set. Qualification runs the GP + LLM loop over the stored firmographic text. The GP confidence gate promotes `QUALIFIED → READY_TO_FIND_EMAIL`, **rationing the paid lookup** so only the best-fit leads cost a credit. A miss ends the deal as `NO_EMAIL_BETTERCONTACT` with a blank outcome (so the labeler skips it — an unfindable address is not a fit signal).
+**Discover → qualify → gate → resolve → export.** One LLM pass turns your campaign into opening search keywords; from there the keyword vocabulary grows by counting the words that appear in profiles the LLM has accepted, and the walk keeps firing the most promising set. Qualification runs the GP + LLM loop over the stored firmographic text and writes the `reason`. The GP confidence gate promotes `QUALIFIED → READY_TO_FIND_EMAIL`, **rationing the paid lookup** so only the best-fit leads cost a credit. A miss ends the deal as `NO_EMAIL_BETTERCONTACT` with a blank outcome (so the labeler skips it — an unfindable address is not a fit signal).
 
 **The qualification loop in detail:**
 
@@ -227,17 +224,15 @@ Configure behavior via Django Admin (`SiteConfig` + `Campaign`).
 ## 📂 Project Structure
 
 ```
-├── docs/                             # architecture, configuration, docker, templating, testing
+├── docs/                             # architecture, configuration, docker, lifecycle, testing
 ├── openoutreach/                    # single source package; Django apps nested inside
 │   ├── settings.py                  # Django settings (SQLite at data/db.sqlite3)
 │   ├── core/                        # engine app: the daemon cycle, Campaign/SiteConfig,
 │   │                                #   LLM factory, onboarding, ML + discovery/qualify
-│   │                                #   pipeline, the lead export, the outreach agent
-│   ├── emails/                      # discovery/enrichment client, Mailbox + SMTP/IMAP,
-│   │                                #   sender, the mail pass, the pipeline steps
+│   │                                #   pipeline, the lead export
+│   ├── enrichment/                  # the one paid step: provider client + buy/check lookup
 │   ├── crm/                         # Lead + Company + Deal models
-│   ├── chat/                        # model-less migration anchor
-│   └── legacy/                      # model-less migration-history anchor (retired channel)
+│   └── contacts/                    # the shared contacts-store client (the hub)
 ├── manage.py                         # Django management (no args defaults to rundaemon)
 ├── local.yml                        # Docker Compose
 └── Makefile                         # Shortcuts (setup, run, admin, test)
@@ -250,8 +245,7 @@ Configure behavior via Django Admin (`SiteConfig` + `Campaign`).
 - [Architecture](./docs/architecture.md)
 - [Configuration](./docs/configuration.md)
 - [Docker Installation](./docs/docker.md)
-- [Follow-up Messaging](./docs/templating.md)
-- [Template Variables](./docs/template-variables.md)
+- [Lead & Deal Lifecycle](./docs/profile_lifecycle.md)
 - [Testing](./docs/testing.md)
 
 ---
@@ -306,7 +300,7 @@ This project is built in spare time to provide powerful, **free** open-source gr
 
 ## 📜 Legal Notice
 
-By using this software you accept the [Legal Notice](LEGAL_NOTICE.md). It covers the third-party services you connect (data provider, email-finder, mailbox), your responsibilities as data controller and sender under data-protection and anti-spam law, the optional freemium promotional campaign, automatic newsletter subscription for non-opt-in jurisdictions, the central contacts store, and liability disclaimers.
+By using this software you accept the [Legal Notice](LEGAL_NOTICE.md). It covers the third-party services you connect (data provider, email-finder), your responsibilities as data controller under data-protection law, what changes now that the tool no longer sends, automatic newsletter subscription for non-opt-in jurisdictions, the central contacts store, and liability disclaimers.
 
 **Use at your own risk — no liability assumed.**
 

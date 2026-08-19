@@ -10,7 +10,7 @@ Pre-built images are published to GitHub Container Registry.
 docker run --pull always -it -v ~/.openoutreach/data:/app/data ghcr.io/eracle/openoutreach:latest
 ```
 
-- `-it` is required so the **interactive onboarding** can prompt you on first run — product/objective → LLM key → mailbox (paste an app password) → BetterContact key → your email → country → newsletter/legal.
+- `-it` is required so the **interactive onboarding** can prompt you on first run — product/objective → LLM key → BetterContact key → your email → country → newsletter/legal.
 - `-v ~/.openoutreach/data:/app/data` persists everything (CRM database, model blobs, embeddings) on your host across restarts.
 
 There are **no ports to publish** — the daemon has no web server of its own and no browser to watch. (To browse your CRM, run the Django Admin separately; see below.)
