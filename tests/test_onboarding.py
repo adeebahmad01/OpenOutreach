@@ -120,7 +120,7 @@ def test_legal_notice_sections_are_read_verbatim():
     assert text.startswith("### 4. How the Project Is Funded")
     assert "### 6. Central Contacts Store" in text
     # Verbatim, not paraphrased — exact phrases (with markdown) from the notice survive.
-    assert "**Freemium promotional campaign.**" in text
+    assert "**affiliate links**" in text
     assert "No name, headline, company, title, phone, or profile text is sent." in text
     # Boundaries: the sections between/around §4 and §6 are excluded.
     assert "### 5." not in text

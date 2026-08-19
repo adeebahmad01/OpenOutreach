@@ -2,7 +2,9 @@
 
 **Effective upon use of this software**
 
-OpenOutreach is a self-hosted, open-source, **email-first** AI sales agent. It discovers B2B leads from a **licensed third-party data provider**, qualifies them on your own machine, resolves a work email for the best-fit leads through a **paid third-party email-finder**, and sends outreach email from **mailboxes you own and control**. It is **browserless: it does not use, log into, scrape, or automate any social network or professional-network account, and it stores no such credentials.** By running this software, you acknowledge and accept the following facts, risks, and terms.
+OpenOutreach is a self-hosted, open-source **lead finder**. It discovers B2B leads from a **licensed third-party data provider**, qualifies them against your described ICP on your own machine, optionally resolves a work email for the best-fit leads through a **paid third-party email-finder**, and hands the result to you as a file. It is **browserless: it does not use, log into, scrape, or automate any social network or professional-network account, and it stores no such credentials.** By running this software, you acknowledge and accept the following facts, risks, and terms.
+
+> **It no longer sends email.** Earlier versions ran cold outreach from mailboxes you owned, with an unsubscribe mechanism, a promotional campaign of the maintainer's own, and an attribution line on every message. All of it has been removed, and the obligations that came with it now sit with whatever tool you send with — see Sections 4 and 5.
 
 > This notice describes how the software behaves and is **not legal advice**. You are responsible for your own compliance; where the stakes warrant it, consult a lawyer. Material aspects of the data model below are still pending a formal legal review.
 
@@ -10,7 +12,7 @@ OpenOutreach is a self-hosted, open-source, **email-first** AI sales agent. It d
 OpenOutreach performs **no** automated access to any social or professional network — no login, no browser session, no bot, no scraping, no messaging on such a platform. Lead **discovery** comes from a licensed data provider (currently BetterContact **Lead Finder**), and **enrichment** (resolving a work email) comes from a paid email-finder — both third-party services **you** sign up for and configure with **your own** API key, used under **that provider's** terms.
 
 - **Profile URLs are identifiers, not fetch targets.** A discovered lead may carry a professional-network profile URL as an opaque identifier. OpenOutreach **stores it and never visits it** — it is a lookup/dedup key, nothing more.
-- **You accept the third-party terms.** You are responsible for using the data provider, email-finder, and sending services in line with each provider's terms of service and acceptable-use policy.
+- **You accept the third-party terms.** You are responsible for using the data provider and email-finder in line with each provider's terms of service and acceptable-use policy.
 
 ### 2. Newsletter Subscription (Asked at Onboarding, Default Set by Jurisdiction)
 During onboarding you enter the **country** your operation is based in, and you are then **asked** whether to subscribe the email address you provided to the OpenOutreach newsletter. The question is always asked; only its **default answer** depends on your jurisdiction.
@@ -26,22 +28,27 @@ OpenOutreach is provided **AS IS**, without warranties of any kind (express or i
 The developer(s):
 - Do not guarantee any results from using the tool
 - Are not responsible for account/domain/mailbox suspensions, deliverability harm, lost business, legal consequences, or other damages
-- Recommend you review the terms of every third-party service you connect (data provider, email-finder, mailbox/SMTP provider) before use
+- Recommend you review the terms of every third-party service you connect (data provider, email-finder) before use
 
-### 4. How the Project Is Funded (Affiliate + Optional Freemium Promotion)
-OpenOutreach is free and open-source. It sustains itself in two ways, both disclosed here:
+### 4. How the Project Is Funded (Affiliate Links)
+OpenOutreach is free and open-source. It sustains itself through **affiliate links**: the unavoidably-paid third-party service the tool relies on — the email-finder, which powers both lead discovery and address resolution — is surfaced during onboarding through an affiliate link. If you sign up through one, the project may earn a commission **at no markup to you**. You are free to sign up any other way.
 
-- **An attribution line on every message.** Every email the tool sends — yours as well as the promotional campaign below — ends with the fixed line **"Sent with OpenOutreach"**, appended after your mailbox signature and the opt-out line. It carries no link. This is not optional in the software as shipped; on an install you run yourself you may change or remove it by modifying the source, which the licence permits.
-- **Affiliate links (primary).** The unavoidably-paid third-party services the tool relies on — the email-finder and, optionally, cold-email sending infrastructure — are surfaced during onboarding through **affiliate links**. If you sign up through one, the project may earn a commission **at no markup to you**. You are free to sign up any other way.
-- **Freemium promotional campaign.** The tool **ships with a promotional campaign of its own** (the "freemium" campaign kit). It is imported when the daemon starts and **takes its turn in the sending rotation** alongside your own campaigns — one action per cycle, campaigns rotating — so a share of the tool's sending advertises **OpenOutreach**, run over **email from your own mailbox**, to recipients unrelated to your own targets. Your own qualified leads are never contacted by it. The campaign content is **retrieved from a remote server** controlled by the maintainer and may change between versions or runs without notice. Because that outreach is OpenOutreach's conversation rather than yours, these sends are **not** blind-copied to you and their message text is **not** written to the tool's send log — that log keeps metadata only (from, to, subject, Message-ID); the messages themselves are in your mailbox's Sent folder like any other mail you send. These sends appear as sent from **your** mailbox and are subject to the same anti-spam responsibilities as your own sends (Section 5). **On an install you run yourself**, this mechanism can be disabled only by modifying the source code, which the licence permits. Any hosted service operated by the maintainer is **not** covered by this notice and states its own terms at sign-up. *(The former connection-request promotion and the one-time connect-to-the-author action have been removed with the move off the browser channel.)*
+**Two funding mechanisms have been removed, and it matters that you know they are gone**, because earlier versions of this notice disclosed them and earlier installs still run them:
 
-### 5. Email Enrichment and Cold Email Outreach
-OpenOutreach resolves work email addresses for your qualified leads through a **third-party email-finder** (e.g. BetterContact) and sends outreach email from **sending infrastructure you own** (e.g. your own Gmail/Workspace/own-domain mailbox, or a cold-email provider such as IceMail). Both the finder and the sender are **paid third-party services you sign up for and configure yourself**. OpenOutreach **never sends email through its own servers on your behalf**: every message is sent from a mailbox **you** own and control, using **your** credentials.
+- **The freemium promotional campaign.** The tool used to ship with a promotional campaign of its own, imported when the daemon started, which took its turn in the sending rotation alongside your own campaigns — so a share of the tool's sending advertised **OpenOutreach**, from **your own mailbox**, to recipients unrelated to your targets. It is deleted.
+- **The attribution line.** Every message the tool sent ended with the fixed line "Sent with OpenOutreach". It is deleted with the code that appended it.
+
+Both went because OpenOutreach **no longer sends email at all** (Section 5). Any hosted service operated by the maintainer is **not** covered by this notice and states its own terms at sign-up.
+
+### 5. Lead Discovery and Email Enrichment
+**OpenOutreach does not send email.** It discovers leads, judges them against your described ICP, and writes the result to a file you export. Sending was removed from the project; whatever you use to contact the people it finds is a separate tool you choose, configure and are responsible for.
+
+Address resolution runs through a **third-party email-finder** (e.g. BetterContact) — a paid service you sign up for and configure yourself. It is optional: leads export with their qualification reason whether or not an address was resolved.
 
 - **Data protection**: resolving and storing a person's work email is processing of personal data. Where data-protection law applies (GDPR, UK GDPR, LGPD, etc.) **you are the data controller** and are responsible for a lawful basis, honouring access/erasure/objection requests, and any required disclosures. OpenOutreach provides the mechanism, not legal cover.
-- **Anti-spam law**: unsolicited commercial email is regulated — CAN-SPAM (US), GDPR/ePrivacy (EU/EEA), CASL (Canada), the Spam Act (Australia), and others. Requirements commonly include truthful sender and subject lines, a valid physical postal address, and a working, honoured opt-out. **You are solely responsible** for ensuring every email you send complies with the laws applicable to you and to each recipient.
-- **What the software does for the opt-out, and what it does not.** Every outgoing message carries two ways to leave: a `List-Unsubscribe` header pointing at a `+unsub` alias of your own sending address (this is what mail providers read, and what renders an unsubscribe button), and a visible plain-text line in the body inviting a reply. Opt-outs are detected both ways — by scanning your mailbox for mail to that alias, and by the agent recognising a worded request in a reply — and are enforced **permanently and across all campaigns** for that person. **Two limits you should know:** the alias assumes your provider routes `+` tags to the same mailbox (Gmail and Workspace do; a provider that rejects them would bounce the opt-out, and nothing verifies this at setup — **check it by hand on a non-Gmail mailbox**), and the software adds **no physical postal address**. If the law applicable to you requires one, put it in your mailbox signature yourself.
-- **Deliverability and account risk**: cold email can get your domains and mailboxes throttled, blacklisted, or suspended. Sending from **secondary/lookalike domains** and warming mailboxes mitigates but does not eliminate this. The risk is yours.
+- **Anti-spam law is now entirely on the tool you send with.** Unsolicited commercial email is regulated — CAN-SPAM (US), GDPR/ePrivacy (EU/EEA), CASL (Canada), the Spam Act (Australia), and others. Requirements commonly include truthful sender and subject lines, a valid physical postal address, and a working, honoured opt-out. **None of these are provided by this software any more**, because it emits no message in which to provide them.
+- **The opt-out mechanisms are gone from this project.** Earlier versions added a `List-Unsubscribe` header pointing at a `+unsub` alias of your sending address, a visible plain-text opt-out line in every body, a mailbox scan that detected client-generated unsubscribes, and an agent that recognised worded requests in replies — all enforced permanently across campaigns. **All of it moved out with the sending code.** Your sequencer is now the only thing that can honour an opt-out, because it is the only thing that makes contact. Instantly and Smartlead both block a suppressed address at import; confirm your own tool does the same before your first send.
+- **Turn on your sequencer's import deduplication.** Exporting the same lead twice can otherwise contact the same person twice. It is opt-in on Smartlead and undocumented on Instantly. This is the one duty the split hands to you that the software cannot do for you.
 - **Accuracy**: finder results may be wrong, stale, or belong to a different person. You are responsible for whom you contact and what you send.
 
 ### 6. Central Contacts Store (Contribution and Resolution)
@@ -60,10 +67,10 @@ OpenOutreach connects to an optional **central contacts store operated by the pr
 By downloading, installing, configuring, or running OpenOutreach, you:
 - Confirm you are of legal age and have authority to accept these terms
 - Agree to use the tool only in compliance with all applicable laws (data-protection/privacy law such as GDPR, anti-spam law such as CAN-SPAM/CASL) and with the terms of every third-party service you connect
-- Accept full responsibility for the emails you send and the contacts you process
-- Understand that modifying the code to disable the freemium promotional campaign, the attribution line, or the hub contribution is permitted under the licence, but remains your responsibility
+- Accept full responsibility for the contacts you process, and for any email you go on to send to them with another tool
+- Understand that modifying the code to disable the hub contribution is permitted under the licence, but remains your responsibility
 
-If you do **not** agree with any part of this notice — especially the freemium promotional campaign or the central contacts store — **do not use this software**. Delete it immediately.
+If you do **not** agree with any part of this notice — especially the central contacts store — **do not use this software**. Delete it immediately.
 
 Questions or concerns? Open an issue on the repository or contact the maintainer(s).
 
