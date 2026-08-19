@@ -166,15 +166,15 @@ def discover(campaign, qualifier=None) -> int:
     queries (§13), and the parameter stays only so the call sites in ``pools`` read the
     same for one release.
 
-    Gated as before: freemium campaigns seed from their kit, and a campaign with no finder
-    key or no product/target cannot be searched.
+    Two gates: a campaign with no finder key cannot reach the index, and one with no
+    product or target has nothing to build a query from. (A third stood here — the
+    freemium promo campaign never searched, because it fed on leads other campaigns
+    had already found. It is gone with that campaign.)
     """
     from openoutreach.core.pipeline import select
     from openoutreach.discovery import step_line
     from openoutreach.enrichment import bettercontact
 
-    if campaign.is_freemium:
-        return 0
     if not bettercontact.is_configured():
         return 0
     if not (campaign.product_docs or campaign.campaign_target):

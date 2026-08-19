@@ -31,9 +31,9 @@ crown jewel and it is ported verbatim:
   freeze the class balance and deadlock — discovery adds leads but never labels, so
   the GP would never learn what would lift its confidence past the gate.
 
-The freemium campaign runs none of it. Its leads are already in the account, found
-by other campaigns' discovery, and a pre-trained kit model ranks them — so its whole
-top-up is: pick the best embedded lead with no deal here yet, and create one.
+There used to be a second path here: the freemium promo campaign ran none of the
+above, because its leads were already in the account and a downloaded kit model
+ranked them. That campaign is gone, so every campaign now takes the one path.
 """
 from __future__ import annotations
 
@@ -53,14 +53,9 @@ def top_up(campaign) -> bool:
     """Spend one unit of work filling *campaign*'s pipeline. Returns whether it did.
 
     False means the campaign has nothing left to do: nothing worth labelling and
-    nothing left to discover (or, for freemium, no unclaimed lead in the account).
+    nothing left to discover.
     """
-    qualifier = qualifier_for(campaign)
-    if qualifier is None:
-        return False
-    if campaign.is_freemium:
-        return _claim_freemium_lead(campaign, qualifier)
-    return _advance(campaign, qualifier)
+    return _advance(campaign, qualifier_for(campaign))
 
 
 def _advance(campaign, qualifier: BayesianQualifier) -> bool:
@@ -109,15 +104,3 @@ def _consumable_candidates(qualifier: BayesianQualifier, candidates: list) -> li
         return []
     threshold = CAMPAIGN_CONFIG["min_gp_confidence"]
     return [c for c, p in zip(candidates, probs) if p >= threshold]
-
-
-def _claim_freemium_lead(campaign, qualifier) -> bool:
-    """Create a QUALIFIED deal for the best lead this campaign hasn't claimed yet."""
-    from openoutreach.core.db.deals import create_freemium_deal
-    from openoutreach.core.pipeline.freemium_pool import find_freemium_candidate
-
-    candidate = find_freemium_candidate(campaign, qualifier)
-    if candidate is None:
-        return False
-    create_freemium_deal(campaign, candidate["profile_url"])
-    return True

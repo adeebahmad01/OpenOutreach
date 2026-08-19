@@ -147,22 +147,9 @@ def create_disqualified_deal(campaign, profile_url: str, reason: str = ""):
     return deal
 
 
-def create_freemium_deal(campaign, profile_url: str):
-    """Create a QUALIFIED Deal in the freemium campaign for a candidate lead."""
-    lead, existing = _existing_deal_or_lead(profile_url, campaign)
-    if existing:
-        return existing
-    if not lead:
-        raise ValueError(f"No Lead for {profile_url}")
-
-    deal = _create_deal(
-        lead=lead,
-        campaign=campaign,
-        state=DealState.QUALIFIED,
-    )
-
-    logger.info("%s %s", profile_url, colored("FREEMIUM DEAL", "cyan", attrs=["bold"]))
-    return deal
+# ``create_freemium_deal`` lived here — it claimed a lead another campaign had already
+# discovered into the promo campaign, so the maintainer's own advertisement could be
+# sent to them from the operator's mailbox. Gone with that campaign.
 
 
 def _create_deal(

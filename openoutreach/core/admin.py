@@ -18,7 +18,7 @@ class SiteConfigAdmin(admin.ModelAdmin):
 
 @admin.register(Campaign)
 class CampaignAdmin(admin.ModelAdmin):
-    list_display = ("name", "booking_link", "is_freemium", "phase")
+    list_display = ("name", "phase")
     filter_horizontal = ("users",)
 
     @admin.display(description="phase")

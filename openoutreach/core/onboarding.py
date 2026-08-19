@@ -171,9 +171,9 @@ def _run_campaign() -> None:
     from openoutreach.core.models import Campaign
 
     print(
-        "\n  Campaign — describe what you sell and who you're selling to. This\n"
-        "  trains the qualifier (which leads are a fit) and briefs the email agent\n"
-        "  (how to pitch). Be specific — a vague target yields vague targeting."
+        "\n  Campaign — describe what you sell and who you're selling to. This is the\n"
+        "  whole input: it writes the opening search and trains the qualifier that\n"
+        "  decides which leads fit. Be specific — a vague target yields vague targeting."
     )
     Campaign.objects.create(
         name=DEFAULT_CAMPAIGN_NAME,
@@ -185,10 +185,6 @@ def _run_campaign() -> None:
         campaign_target=_required(wiz.multiline(
             "Campaign target — who you're going after and the outcome you want "
             "(e.g. 'book demos with CTOs at Series-A SaaS')"
-        )),
-        booking_link=_required(wiz.text(
-            "Booking link the email agent can share (e.g. https://cal.com/you) — optional",
-            required=False,
         )),
     )
     logger.info("Campaign '%s' created.", DEFAULT_CAMPAIGN_NAME)

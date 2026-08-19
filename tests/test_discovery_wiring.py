@@ -66,11 +66,9 @@ def _labelled(campaign, profile_text, qualified, source_fields=None):
 
 
 class TestGates:
-    def test_freemium_campaigns_never_search(self, db):
-        c = _campaign(is_freemium=True)
-        with patch.object(discover_mod, "_fetch") as fetch:
-            assert discover(c) == 0
-        fetch.assert_not_called()
+    # ``test_freemium_campaigns_never_search`` stood here — the promo campaign fed on
+    # leads other campaigns had found, so it was gated out of discovery. Both the
+    # campaign and its gate are gone.
 
     def test_no_finder_key_is_a_no_op(self, db):
         SiteConfig.objects.update(bettercontact_api_key="")

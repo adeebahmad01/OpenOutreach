@@ -32,8 +32,11 @@ class Qualifier(Protocol):
     ``predict_probs`` returns P(f > 0.5) per embedding, or ``None`` when the model
     cannot score yet. It belongs here rather than on one implementation because the
     cycle's promote gate (``ready_pool.promote_to_ready``) runs for **every**
-    campaign, freemium included — leaving it off the protocol is what let a
-    freemium campaign reach the gate with a qualifier that had no such method.
+    campaign — leaving it off the protocol once let a campaign reach the gate with a
+    qualifier that had no such method, and `AttributeError` every other cycle.
+
+    There is only one implementation today (``BayesianQualifier``); the protocol is
+    kept because the gate should keep depending on the interface rather than on it.
     """
 
     def rank_profiles(self, profiles: list) -> list: ...
@@ -651,54 +654,17 @@ class BayesianQualifier:
             self._fit_if_needed()
 
 
-# ---------------------------------------------------------------------------
-# KitQualifier  (pre-trained kit model for freemium campaigns)
-# ---------------------------------------------------------------------------
-
-class KitQualifier:
-    """Qualifier for freemium campaigns backed by a pre-trained GPR kit model.
-
-    Wraps a Pipeline(StandardScaler, GPR) loaded from a campaign kit.
-    Ranks by raw GP mean and exposes posterior stats for explanation.
-    """
-
-    def __init__(self, kit_model):
-        self._model = kit_model
-
-    def rank_profiles(self, profiles: list) -> list:
-        """Rank profiles by raw model score (descending), skipping missing embeddings."""
-        if not profiles:
-            return []
-        return _rank_by_score(profiles, self._model, skip_missing=True)
-
-    def predict_probs(self, embeddings: np.ndarray) -> np.ndarray:
-        """Predicted probability P(f > 0.5) for each candidate.
-
-        Never ``None``: a kit ships fitted, so unlike the per-campaign GP there is no
-        cold start to report.
-        """
-        mean, std = _gpr_predict(self._model, embeddings)
-        return _prob_above_half(mean, std)
-
-    def explain(self, profile: dict) -> str:
-        """Human-readable compact scoring explanation."""
-        from openoutreach.crm.models import Lead
-
-        lead = Lead.objects.filter(pk=profile.get("lead_id")).first()
-        emb = lead.embedding_array if lead else None
-        if emb is None:
-            return "No embedding found for profile"
-        mean, std = _gpr_predict(self._model, emb)
-        gp_mean = float(mean[0])
-        p_above = float(_prob_above_half(mean, std)[0])
-        return f"mean={gp_mean:.3f}, P(f>0.5)={p_above:.3f}"
+# ``KitQualifier`` stood here — a pre-trained GPR downloaded from HuggingFace, used
+# only by the freemium promo campaign, which had no labels of its own to fit on. It
+# went with that campaign; every qualifier is now a ``BayesianQualifier`` fitted on
+# the operator's own verdicts.
 
 
 # ── On-demand construction ────────────────────────────────────────
 
 
 def qualifier_for(campaign):
-    """Build this campaign's qualifier, ready to score. May return None.
+    """Build this campaign's qualifier, ready to score.
 
     Built where it is needed and dropped when the caller is done with it, rather
     than warm-started once at boot and held for the life of the process. A resident
@@ -707,18 +673,14 @@ def qualifier_for(campaign):
     posterior until the next restart. Building here costs one fit over the
     campaign's labels — tens to low hundreds of rows — and is always current.
 
-    Freemium campaigns score with the pre-trained kit model (downloaded once per
-    process) rather than a GP of their own; ``None`` means the kit is unavailable,
-    which is the one case where a freemium campaign simply has no way to rank.
+    It used to be able to return ``None``, for the one case where the freemium
+    campaign's downloaded kit was unavailable. With that campaign gone there is no
+    such case: every campaign fits on its own labels, and a campaign with none fits
+    on its anchors.
     """
     from openoutreach.core.conf import CAMPAIGN_CONFIG
-    from openoutreach.core.ml.hub import fetch_kit
     from openoutreach.core.pipeline.icp import ensure_anchors, stored_anchors
     from openoutreach.crm.models import Lead
-
-    if campaign.is_freemium:
-        kit = fetch_kit()
-        return KitQualifier(kit["model"]) if kit else None
 
     qualifier = BayesianQualifier(
         seed=42,

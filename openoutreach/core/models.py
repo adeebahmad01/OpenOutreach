@@ -65,9 +65,9 @@ class Campaign(models.Model):
     users = models.ManyToManyField(User, blank=True, related_name="campaigns")
     product_docs = models.TextField(blank=True)
     campaign_target = models.TextField(blank=True)
-    booking_link = models.URLField(max_length=500, blank=True)
-    is_freemium = models.BooleanField(default=False)
-    seed_public_ids = models.JSONField(default=list, blank=True)
+    # ``booking_link`` was here — a meeting URL the outreach agent offered when a lead
+    # asked for a call, and the only thing that ever read it was that agent's prompt.
+    # It left with the sender: a finder has nobody to offer a meeting to.
     model_blob = models.BinaryField(null=True, blank=True)
     # ISO-3166 alpha-2 target country for this campaign's leads — the contacts
     # geo-gate stamp put on every discovered Lead. A stable ICP attribute (one

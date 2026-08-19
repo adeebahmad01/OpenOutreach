@@ -97,8 +97,6 @@ def run_daemon() -> None:
     """Run the cycle until the process is stopped or a halting error is raised."""
     from openoutreach.core.operator import campaigns
 
-    _import_freemium_campaign()
-
     known = campaigns()
     if not known:
         logger.error("No campaigns found — cannot start daemon")
@@ -126,9 +124,9 @@ def run_daemon() -> None:
 def _rotate():
     """Endless round-robin over the operator's campaigns, re-read each lap.
 
-    Re-reading matters on a fresh install: the freemium campaign is imported at
-    startup and a first campaign is created during onboarding, so a rotation frozen
-    at boot would run one campaign forever.
+    Re-reading matters on a fresh install: the first campaign is created during
+    onboarding, so a rotation frozen at boot would find none and never notice one
+    arriving.
     """
     from openoutreach.core.operator import campaigns
 
@@ -390,20 +388,20 @@ def _apply(deal, next_state) -> bool:
     return True
 
 
-def _import_freemium_campaign() -> None:
-    """Pull the published kit once at startup and mirror it into a local campaign.
-
-    Config import, not model loading: the kit's *model* is fetched on demand by
-    ``qualifier_for``. Seeds are imported here too, though the published seed list is
-    empty in practice — the freemium campaign feeds on leads other campaigns have
-    already discovered.
-    """
-    from openoutreach.core.ml.hub import fetch_kit
-    from openoutreach.core.setup.freemium import import_freemium_campaign, seed_profiles
-
-    kit = fetch_kit()
-    if not kit:
-        return
-    campaign = import_freemium_campaign(kit["config"])
-    if campaign:
-        seed_profiles(campaign, kit["config"])
+# ``_import_freemium_campaign`` ran here at every daemon start: fetch the published
+# kit from HuggingFace, mirror it into a local campaign flagged ``is_freemium``, seed
+# its leads. That campaign existed to send **OpenOutreach's own promotional email from
+# the operator's mailbox, under their identity**, taking its turn in the rotation
+# alongside the operator's real campaigns. It is gone, and so is everything that
+# served it — the kit download, ``KitQualifier``, the freemium pool, the flag.
+#
+# It went for two reasons, and only the first is the obvious one. With no sending leg
+# it could do nothing but mint QUALIFIED deals nobody would ever contact. But it was
+# also **one of the largest install deterrents this project had**: the legal notice
+# told every prospective operator, before they had seen a single lead, that the tool
+# would send the maintainer's ads from their own mailbox. It was counted as the viral
+# growth loop and was simultaneously suppressing the installs that loop needed.
+#
+# What replaces it is on this side of the boundary: install → enrichment resolves
+# addresses → the hub contacts store grows → we market to the store. Removing the
+# promo campaign raises the input to the loop that replaces it.
