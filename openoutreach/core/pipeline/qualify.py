@@ -103,11 +103,11 @@ def _save_qualification_result(campaign, qualifier: BayesianQualifier, profile_u
     # LLM rejections are tracked as FAILED Deals with "Disqualified" closing reason
     # (campaign-scoped), not as Lead.disqualified (permanent account-level exclusion).
     #
-    # A hit leaves the Deal QUALIFIED. The GP rank gate (ready_pool) then promotes
-    # it to READY_TO_FIND_EMAIL, where the find_email leg spends a BetterContact
-    # credit and routes a hit onward to READY_TO_EMAIL. Enrichment is no longer
-    # inline at qualification — it sits behind the rank gate, so a credit is only
-    # ever spent on a ranked lead.
+    # A hit leaves the Deal QUALIFIED, and QUALIFIED is already exportable — the
+    # reason written here is the product. The GP rank gate (ready_pool) then
+    # promotes it to READY_TO_FIND_EMAIL, where the enrichment leg spends a
+    # BetterContact credit and routes a hit onward to RESOLVED. Enrichment sits
+    # behind the rank gate, so a credit is only ever spent on a ranked lead.
     from openoutreach.core.db.deals import create_disqualified_deal
     from openoutreach.core.db.leads import promote_lead_to_deal
 

@@ -1,4 +1,4 @@
-# openoutreach/emails/newsletter.py
+# openoutreach/core/newsletter.py
 """OpenOutreach newsletter subscription — a plain Brevo form POST.
 
 Subscribes the operator's own email (their connected mailbox address) to the

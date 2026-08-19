@@ -11,17 +11,12 @@ logger = logging.getLogger(__name__)
 # entry here, or set_profile_state falls back to a red "ERROR" label (see below).
 # NO_EMAIL_BETTERCONTACT is an enrichment miss (provider found no address) — an
 # expected terminal, not an operational error, so it renders muted yellow.
-# UNSUBSCRIBED is the same kind of event one step later (the recipient ended the
-# reachability rather than the provider) and renders the same way.
 _STATE_LOG_STYLE = {
     DealState.QUALIFIED: ("QUALIFIED", "green", []),
     DealState.READY_TO_FIND_EMAIL: ("READY_TO_FIND_EMAIL", "yellow", ["bold"]),
     DealState.FINDING_EMAIL: ("FINDING_EMAIL", "cyan", []),
-    DealState.READY_TO_EMAIL: ("READY_TO_EMAIL", "blue", ["bold"]),
-    DealState.EMAILED: ("EMAILED", "blue", []),
+    DealState.RESOLVED: ("RESOLVED", "green", ["bold"]),
     DealState.NO_EMAIL_BETTERCONTACT: ("NO EMAIL", "yellow", []),
-    DealState.UNSUBSCRIBED: ("UNSUBSCRIBED", "yellow", []),
-    DealState.COMPLETED: ("COMPLETED", "green", ["bold"]),
     DealState.FAILED: ("FAILED", "red", ["bold"]),
 }
 
@@ -118,29 +113,6 @@ def get_qualified_profiles(campaign) -> list:
 
 def get_ready_to_find_email_profiles(campaign) -> list:
     return _deals_at_state(campaign, DealState.READY_TO_FIND_EMAIL)
-
-
-def get_emailable_deals(campaign):
-    """The email pool — Deals queued for their single Layer-1 email, oldest first.
-
-    Symmetric with the connect pools above: each reads exactly one FSM state. The
-    state alone is the eligibility — the qualify router reaches READY_TO_EMAIL only
-    on a finder hit (so ``Lead.email`` is set), and the send moves it to EMAILED
-    (so it is never-emailed). Returns ``Deal`` rows (not profile dicts — the EMAIL
-    task acts on the Deal directly). ``disqualified`` guards a post-qualification
-    do-not-contact, matching the follow_up pool.
-    """
-    from openoutreach.crm.models import Deal
-
-    return (
-        Deal.objects.filter(
-            campaign=campaign,
-            state=DealState.READY_TO_EMAIL,
-            lead__disqualified=False,
-        )
-        .select_related("lead", "mailbox")
-        .order_by("creation_date")
-    )
 
 
 # ── Deal creation ──

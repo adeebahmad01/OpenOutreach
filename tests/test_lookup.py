@@ -1,4 +1,4 @@
-# tests/emails/test_lookup.py
+# tests/test_lookup.py
 """The paid lookup, in two steps: buy the address, then check on it.
 
 The backoff is the part worth pinning down. It lives on the deal now
@@ -13,8 +13,8 @@ import pytest
 from django.utils import timezone
 
 from openoutreach.crm.models import DealState
-from openoutreach.emails.bettercontact import BetterContactUnavailable, PollOutcome
-from openoutreach.emails.steps.lookup import buy_address, check_lookup, reclaim_lookup
+from openoutreach.enrichment.bettercontact import BetterContactUnavailable, PollOutcome
+from openoutreach.enrichment.lookup import buy_address, check_lookup, reclaim_lookup
 from tests.factories import DealFactory, LeadFactory
 
 
@@ -45,8 +45,8 @@ class TestBuyAddress:
         deal = _ready_to_find(campaign, email="known@corp.com")
 
         with patch("openoutreach.contacts.service.resolve") as resolve, \
-                patch("openoutreach.emails.bettercontact.submit") as submit:
-            assert buy_address(deal) == DealState.READY_TO_EMAIL
+                patch("openoutreach.enrichment.bettercontact.submit") as submit:
+            assert buy_address(deal) == DealState.RESOLVED
 
         resolve.assert_not_called()
         submit.assert_not_called()
@@ -55,8 +55,8 @@ class TestBuyAddress:
         deal = _ready_to_find(campaign)
 
         with patch("openoutreach.contacts.service.resolve", return_value="hub@corp.com"), \
-                patch("openoutreach.emails.bettercontact.submit") as submit:
-            assert buy_address(deal) == DealState.READY_TO_EMAIL
+                patch("openoutreach.enrichment.bettercontact.submit") as submit:
+            assert buy_address(deal) == DealState.RESOLVED
 
         submit.assert_not_called()
         deal.lead.refresh_from_db()
@@ -66,8 +66,8 @@ class TestBuyAddress:
         deal = _ready_to_find(campaign)
 
         with patch("openoutreach.contacts.service.resolve", return_value=None), \
-                patch("openoutreach.emails.bettercontact.is_configured", return_value=True), \
-                patch("openoutreach.emails.bettercontact.submit", return_value="req-42"):
+                patch("openoutreach.enrichment.bettercontact.is_configured", return_value=True), \
+                patch("openoutreach.enrichment.bettercontact.submit", return_value="req-42"):
             assert buy_address(deal) == DealState.FINDING_EMAIL
 
         assert deal.lookup_request_id == "req-42"
@@ -78,8 +78,8 @@ class TestBuyAddress:
         deal = _ready_to_find(campaign)
 
         with patch("openoutreach.contacts.service.resolve", return_value=None), \
-                patch("openoutreach.emails.bettercontact.is_configured", return_value=False), \
-                patch("openoutreach.emails.bettercontact.submit") as submit:
+                patch("openoutreach.enrichment.bettercontact.is_configured", return_value=False), \
+                patch("openoutreach.enrichment.bettercontact.submit") as submit:
             assert buy_address(deal) is None
 
         submit.assert_not_called()
@@ -90,8 +90,8 @@ class TestBuyAddress:
         deal = _ready_to_find(campaign)
 
         with patch("openoutreach.contacts.service.resolve", return_value=None), \
-                patch("openoutreach.emails.bettercontact.is_configured", return_value=True), \
-                patch("openoutreach.emails.bettercontact.submit",
+                patch("openoutreach.enrichment.bettercontact.is_configured", return_value=True), \
+                patch("openoutreach.enrichment.bettercontact.submit",
                       side_effect=BetterContactUnavailable("503")):
             assert buy_address(deal) is None
 
@@ -106,10 +106,10 @@ class TestCheckLookup:
     def test_a_hit_stores_the_address_and_gives_it_back(self, campaign):
         deal = _in_flight(campaign)
 
-        with patch("openoutreach.emails.bettercontact.poll_once",
+        with patch("openoutreach.enrichment.bettercontact.poll_once",
                    return_value=PollOutcome(running=False, email="found@corp.com")), \
                 patch("openoutreach.contacts.service.contribute") as contribute:
-            assert check_lookup(deal) == DealState.READY_TO_EMAIL
+            assert check_lookup(deal) == DealState.RESOLVED
 
         deal.lead.refresh_from_db()
         assert deal.lead.email == "found@corp.com"
@@ -125,12 +125,12 @@ class TestCheckLookup:
         """
         deal = _in_flight(campaign)
 
-        with patch("openoutreach.emails.bettercontact.poll_once",
+        with patch("openoutreach.enrichment.bettercontact.poll_once",
                    return_value=PollOutcome(
                        running=False, email="elon@tesla.com",
                        first_name="Elon", last_name="Musk")), \
                 patch("openoutreach.contacts.service.contribute"):
-            assert check_lookup(deal) == DealState.READY_TO_EMAIL
+            assert check_lookup(deal) == DealState.RESOLVED
 
         deal.lead.refresh_from_db()
         assert (deal.lead.first_name, deal.lead.last_name) == ("Elon", "Musk")
@@ -144,7 +144,7 @@ class TestCheckLookup:
             lookup_request_id="req1",
         )
 
-        with patch("openoutreach.emails.bettercontact.poll_once",
+        with patch("openoutreach.enrichment.bettercontact.poll_once",
                    return_value=PollOutcome(running=False, email="a@b.com")), \
                 patch("openoutreach.contacts.service.contribute"):
             check_lookup(deal)
@@ -157,7 +157,7 @@ class TestCheckLookup:
         deal = _ready_to_find(campaign)
 
         with patch("openoutreach.contacts.service.resolve", return_value="hub@corp.com"):
-            assert buy_address(deal) == DealState.READY_TO_EMAIL
+            assert buy_address(deal) == DealState.RESOLVED
 
         deal.lead.refresh_from_db()
         assert deal.lead.email == "hub@corp.com"
@@ -167,14 +167,14 @@ class TestCheckLookup:
         """Reachability failed, not fit — the ML labeler keeps the lead positive."""
         deal = _in_flight(campaign)
 
-        with patch("openoutreach.emails.bettercontact.poll_once",
+        with patch("openoutreach.enrichment.bettercontact.poll_once",
                    return_value=PollOutcome(running=False, email="")):
             assert check_lookup(deal) == DealState.NO_EMAIL_BETTERCONTACT
 
     def test_a_running_job_backs_off_on_its_own_row(self, campaign):
         deal = _in_flight(campaign, attempt=0)
 
-        with patch("openoutreach.emails.bettercontact.poll_once",
+        with patch("openoutreach.enrichment.bettercontact.poll_once",
                    return_value=PollOutcome(running=True)):
             assert check_lookup(deal) is None
 
@@ -184,7 +184,7 @@ class TestCheckLookup:
     def test_the_backoff_doubles_into_days(self, campaign):
         deal = _in_flight(campaign, attempt=15)
 
-        with patch("openoutreach.emails.bettercontact.poll_once",
+        with patch("openoutreach.enrichment.bettercontact.poll_once",
                    return_value=PollOutcome(running=True)):
             check_lookup(deal)
 
@@ -194,7 +194,7 @@ class TestCheckLookup:
         """The rail exists so ``datetime`` can still express the schedule."""
         deal = _in_flight(campaign, attempt=200)
 
-        with patch("openoutreach.emails.bettercontact.poll_once",
+        with patch("openoutreach.enrichment.bettercontact.poll_once",
                    return_value=PollOutcome(running=True)):
             assert check_lookup(deal) is None
 
@@ -204,7 +204,7 @@ class TestCheckLookup:
         """Nothing was learned about the job, so the backoff must not advance."""
         deal = _in_flight(campaign, attempt=3)
 
-        with patch("openoutreach.emails.bettercontact.poll_once",
+        with patch("openoutreach.enrichment.bettercontact.poll_once",
                    side_effect=BetterContactUnavailable("503")):
             assert check_lookup(deal) is None
 
@@ -215,7 +215,7 @@ class TestCheckLookup:
         """Abandoning reverted the deal and bought a *second* job for the same lead."""
         deal = _in_flight(campaign, attempt=40)
 
-        with patch("openoutreach.emails.bettercontact.poll_once",
+        with patch("openoutreach.enrichment.bettercontact.poll_once",
                    return_value=PollOutcome(running=True)):
             assert check_lookup(deal) is None
 
@@ -241,7 +241,7 @@ class TestReclaimLookup:
         to be told so."""
         deal = _in_flight(campaign, request_id="")
 
-        with patch("openoutreach.emails.bettercontact.poll_once") as poll:
+        with patch("openoutreach.enrichment.bettercontact.poll_once") as poll:
             reclaim_lookup(deal)
 
         poll.assert_not_called()

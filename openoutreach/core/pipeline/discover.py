@@ -103,7 +103,7 @@ def _fetch(node, offset: int):
     """
     from openoutreach.core.pipeline.select import DISCOVERY_PAGE_SIZE
     from openoutreach.discovery import search, step_line
-    from openoutreach.emails import bettercontact
+    from openoutreach.enrichment import bettercontact
 
     try:
         return search(node.to_filters(), limit=DISCOVERY_PAGE_SIZE, offset=offset)
@@ -171,7 +171,7 @@ def discover(campaign, qualifier=None) -> int:
     """
     from openoutreach.core.pipeline import select
     from openoutreach.discovery import step_line
-    from openoutreach.emails import bettercontact
+    from openoutreach.enrichment import bettercontact
 
     if campaign.is_freemium:
         return 0

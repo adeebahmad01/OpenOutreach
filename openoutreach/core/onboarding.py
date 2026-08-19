@@ -1,5 +1,5 @@
 # openoutreach/core/onboarding.py
-"""Email-first onboarding as an ordered list of idempotent steps.
+"""Onboarding as an ordered list of idempotent steps.
 
 First principles
 ----------------
@@ -12,10 +12,10 @@ The runner executes only the steps whose ``is_done()`` is false, in order. Becau
 every step persists the moment it succeeds, a crash or Ctrl+C mid-onboarding
 resumes exactly where it stopped, and a satisfied step is never revisited.
 
-Why this shape kills the "SMTP onboarding keeps looping back" bug:
+Why this shape kills the "onboarding keeps looping back" bug:
 
-  * The **only** thing that decides ordering is ``is_done()``. Once a mailbox
-    exists, ``mailbox`` is done — the runner cannot land back on it.
+  * The **only** thing that decides ordering is ``is_done()``. Once a step's state
+    is persisted it is done — the runner cannot land back on it.
   * A step's ``run()`` owns its **own** retry loop. A credential that fails
     verification re-asks *that step's* fields (with what you typed retained) —
     it never rewinds to an earlier step, and never restarts the whole wizard.
@@ -23,17 +23,19 @@ Why this shape kills the "SMTP onboarding keeps looping back" bug:
     each step is its own commit point.
 
 Cancellation is a single exception, not a return value threaded through every
-caller: the wizard prompts return ``None`` on Ctrl+C, ``_required()`` turns that
-into ``OnboardingCancelled`` at one boundary, and steps that want to treat cancel
-specially (the mailbox, once one box exists) catch it.
+caller: the wizard prompts return ``None`` on Ctrl+C, and ``_required()`` turns that
+into ``OnboardingCancelled`` at one boundary.
 
-Order: campaign → LLM (live-verified) → **mailbox** (SMTP auth-checked) →
-**BetterContact key** → account (your email + country + newsletter + legal, then
-the operator ``User``). The mailbox and the BetterContact key are mandatory —
-BetterContact powers both discovery and enrichment. The account step asks the
-operator's **own email** (the human's inbox — contacts key + newsletter target,
-plus a BCC copy of every send on their own campaigns), deliberately distinct from the mailbox ``from_address``; the ``User`` is created
-last, after a mailbox exists.
+Order: campaign → LLM (live-verified) → **BetterContact key** → account (your email
++ country + newsletter + legal, then the operator ``User``). The BetterContact key
+is mandatory because it powers both discovery and enrichment — note the barrier is
+an *account*, not a bill: the Lead Finder search is free and only the address lookup
+costs a credit.
+
+**Four steps, down from six.** The mailbox (seven fields, SMTP auth-checked) and the
+signature came out with the sending leg. That is most of the install path, and the
+reason it mattered is not the typing — it is that a lead finder was asking someone to
+connect an inbox, and accept a sending liability, before it had shown them a lead.
 """
 from __future__ import annotations
 
@@ -49,14 +51,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_CAMPAIGN_NAME = "Email Outreach"
 
 _INTRO = """
-  Welcome to OpenOutreach — a self-hosted AI sales agent that runs your cold
-  email funnel end to end: define your ICP, discover leads, qualify them, find a
-  verified work email, then send and follow up from a mailbox you own.
+  Welcome to OpenOutreach — a self-hosted lead finder that qualifies for you.
+  Describe your product and who you sell to; it discovers matching people, judges
+  each one against your ICP, and writes down why it chose them. Export the result
+  as CSV and send with whatever you already use.
 
-  Setup takes a few minutes. Have three things ready:
-    • an LLM provider key — the agent qualifies leads and writes your emails
-    • a mailbox you own — Gmail, Workspace, or any SMTP inbox
-    • a BetterContact key — powers lead discovery and email finding (free tier to start)
+  Setup takes a few minutes. Have two things ready:
+    • an LLM provider key — the agent qualifies your leads and writes the reasons
+    • a BetterContact key — powers lead discovery (free) and email finding (paid)
 
   OpenOutreach is free; you pay only the providers above. Stop anytime — setup
   resumes where you left off.
@@ -244,129 +246,21 @@ def _save_llm(model: str, key: str, base: str) -> None:
     logger.info("LLM config saved.")
 
 
-# ── Mailbox: the address you send from (SMTP auth-checked) ────────
-
-_MAILBOX_GUIDANCE = """
-  Mailbox — connect a sending inbox you own. This is the address your outreach
-  goes out From:, so use a real inbox you can send and receive on. Enter its
-  fields one at a time, and use an *app password*, not your login password. The
-  box is auth-checked over SMTP before anything is saved — nothing is stored
-  unless the login succeeds.
-
-  No good sending box yet? IceMail sets up a warmed, ready-to-send Google
-  Workspace inbox in minutes (~$2.50/mo). Affiliate link — supports
-  OpenOutreach, no markup to you: {icemail_link}
-
-  The SMTP/IMAP host + port fields below default to Gmail / Google Workspace
-  (smtp.gmail.com:587, imap.gmail.com:993). If you're on Gmail, Workspace, or
-  IceMail, just press Enter through them. For any other provider, type its own
-  SMTP/IMAP hosts. Ports: 587 (STARTTLS) or 465 (SSL).
-"""
-
-_MAILBOX_DEFAULTS = {
-    "from_address": "", "host": "smtp.gmail.com", "port": 587,
-    "imap_host": "imap.gmail.com", "imap_port": 993,
-}
-
-# Shown as the signature prompt, once per never-asked box. The example is a real,
-# working signature — a cold lead's first instinct is to check who wrote, so it
-# leads with a link they can open rather than a title. It carries no OpenOutreach
-# attribution: `emails.sender` appends that line itself, after the signature.
-_SIGNATURE_PROMPT = """Email signature for {address} — appended to every email this mailbox
-  sends, opener and follow-ups alike. The agent never signs its own drafts, so
-  this is the only sign-off your leads see. Optional — Ctrl+D on an empty line
-  for none (you won't be asked again).
-
-  Example:
-
-    Eracle
-    Founder, OpenOutreach
-    openoutreach.app
-
-  Your signature"""
-
-
-def _mailbox_done() -> bool:
-    from openoutreach.emails.models import has_mailbox
-
-    return has_mailbox()
-
-
-def _run_mailbox() -> None:
-    from openoutreach.emails.models import Mailbox, has_mailbox
-
-    from openoutreach.core.logging import hyperlink
-
-    icemail_url = "https://icemail.ai?via=openoutreach"
-    print(_MAILBOX_GUIDANCE.format(icemail_link=hyperlink(icemail_url)))
-    entry = dict(_MAILBOX_DEFAULTS)
-    while True:
-        try:
-            entry = _prompt_mailbox_fields(entry)  # retained for retry / next box
-        except OnboardingCancelled:
-            # Cancelling once a box exists just stops adding more; with no box the
-            # step is unsatisfiable, so onboarding genuinely aborts.
-            if has_mailbox():
-                return
-            raise
-
-        box, reason = Mailbox.objects.create_verified(**entry)
-        if box is None:
-            _say(f"  ✗ {entry['from_address']}: {reason}", "fg:red")
-            continue  # re-ask with the same values pre-filled — never rewinds
-        _say(f"  ✓ {box.from_address} authenticated and saved.", "fg:green")
-
-        if not wiz.confirm("Connect another mailbox?", default=False):
-            return  # False, or None (Ctrl+C) — either way we already have a box
-
-
-def _prompt_mailbox_fields(entry: dict) -> dict:
-    """Ask the seven mailbox fields, seeded from *entry*. Raises on cancel."""
-    return {
-        "from_address": _required(wiz.text(
-            "Email address (your From: address and SMTP username)",
-            default=entry["from_address"], validate=_looks_like_email,
-        )),
-        "password": _required(wiz.text(
-            "App password (Gmail/Workspace: myaccount.google.com → Security → "
-            "App passwords — NOT your login password)",
-            secret=True,
-        )),
-        "host": _required(wiz.text("SMTP host (Enter = Gmail/Workspace)", default=entry["host"])),
-        "port": _required(wiz.integer("SMTP port (587 STARTTLS / 465 SSL)", default=entry["port"])),
-        "imap_host": _required(wiz.text("IMAP host (Enter = Gmail/Workspace)", default=entry["imap_host"])),
-        "imap_port": _required(wiz.integer("IMAP port", default=entry["imap_port"])),
-    }
-
-
-# ── Signature: one sign-off per mailbox, asked once ───────────────
-
-def _signature_done() -> bool:
-    from openoutreach.emails.models import Mailbox
-
-    return not Mailbox.objects.filter(signature__isnull=True).exists()
-
-
-def _run_signature() -> None:
-    """Ask every never-asked box for its sign-off, persisting each as it lands.
-
-    Keyed on NULL rather than emptiness, so declining ("") sticks and the box is
-    never asked again. Backfills boxes connected before signatures existed as
-    well as ones the mailbox step just created.
-    """
-    from openoutreach.emails.models import Mailbox
-
-    for box in Mailbox.objects.filter(signature__isnull=True):
-        box.signature = _required(wiz.multiline(
-            _SIGNATURE_PROMPT.format(address=box.from_address), required=False,
-        ))
-        box.save(update_fields=["signature"])
+# The mailbox and signature steps used to sit here, between the LLM and the finder
+# key: connect a sending inbox (seven fields, SMTP auth-checked), then write the
+# sign-off appended to every email it sends. Both are gone with the sending leg.
+#
+# They were also the most expensive thing on the install path, and the expense was
+# not the typing. Behind the mailbox step stood `LEGAL_NOTICE.md` §4 — the disclosure
+# that the tool would send the maintainer's promotional campaign from your mailbox,
+# under your identity. Asking someone to accept a sending liability before they have
+# seen a single lead was the wrong trade for a tool whose output is a CSV.
 
 
 # ── BetterContact: powers discovery + enrichment (mandatory) ──────
 
 def _bettercontact_done() -> bool:
-    from openoutreach.emails import bettercontact
+    from openoutreach.enrichment import bettercontact
 
     return bettercontact.is_configured()
 
@@ -412,14 +306,10 @@ def _run_account() -> None:
     from openoutreach.core.geo import is_gdpr_protected
 
     # The operator's own inbox — the contacts-give-back key and (if opted in) the
-    # newsletter target. The daemon also BCCs a copy of every send here on the
-    # operator's own campaigns (never on freemium — emails.sender.operator_bcc).
-    # Deliberately NOT the mailbox from_address: that is the sending robot, this
-    # is the human.
+    # newsletter target. It used to need saying that this was *not* the sending
+    # mailbox; with no sending mailbox there is one address again.
     operator_email = _required(wiz.text(
-        "Your email address — your own inbox (not the sending mailbox). We'll send "
-        "product updates here if you opt in below, and can BCC you a copy of every "
-        "outreach email if you enable that in config.",
+        "Your email address. We'll send product updates here if you opt in below.",
         validate=_looks_like_email,
     )).strip()
 
@@ -481,17 +371,18 @@ def _require_legal() -> None:
 def _finalize_account(operator_email: str, country: str, newsletter: bool) -> None:
     """Persist country, create the operator ``User`` from their own email, subscribe once.
 
-    ``operator_email`` is the human's inbox (contacts key + newsletter target,
-    plus a BCC copy of every send on their own campaigns), distinct from the
-    mailbox ``from_address`` used as the sending identity.
+    ``operator_email`` is the human's inbox — the contacts-store key and the
+    newsletter target. It used to also be distinguished from a mailbox
+    ``from_address`` (the sending identity) and used as the BCC target on the
+    operator's own sends; with no sending leg there is one email address again.
+
+    **This no longer requires a mailbox.** It used to open with
+    ``Mailbox.objects.first()`` and raise ``OnboardingCancelled`` on ``None``, which
+    made the whole account step unsatisfiable without a connected inbox — one of the
+    two places the finder was welded to the sender.
     """
     from openoutreach.core.models import Campaign, SiteConfig
-    from openoutreach.emails.models import Mailbox
-    from openoutreach.emails.newsletter import subscribe_to_newsletter
-
-    box = Mailbox.objects.first()
-    if box is None:  # the mailbox step runs before this one; defensive
-        raise OnboardingCancelled
+    from openoutreach.core.newsletter import subscribe_to_newsletter
 
     cfg = SiteConfig.load()
     cfg.country_code = country
@@ -527,8 +418,6 @@ def _create_operator(campaign, email: str):
 STEPS: list[Step] = [
     Step("campaign", _campaign_done, _run_campaign),
     Step("llm", _llm_done, _run_llm),
-    Step("mailbox", _mailbox_done, _run_mailbox),
-    Step("signature", _signature_done, _run_signature),
     Step("bettercontact", _bettercontact_done, _run_bettercontact),
     Step("account", _account_done, _run_account),
 ]

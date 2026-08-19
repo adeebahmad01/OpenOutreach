@@ -35,7 +35,7 @@ def _lead(**kwargs):
 
 def _deal(campaign, reason="fits the ICP", **lead_kwargs):
     return DealFactory(campaign=campaign, lead=_lead(**lead_kwargs),
-                       state=DealState.READY_TO_EMAIL, reason=reason)
+                       state=DealState.RESOLVED, reason=reason)
 
 
 # ── the record ────────────────────────────────────────────────────
@@ -118,7 +118,7 @@ class TestLeadRecords:
 
     def test_an_unembedded_lead_is_still_exported(self, campaign):
         DealFactory(campaign=campaign, lead=LeadFactory(email="a@b.com"),
-                    state=DealState.READY_TO_EMAIL)
+                    state=DealState.RESOLVED)
 
         assert len(list(export.lead_records(campaign))) == 1
 

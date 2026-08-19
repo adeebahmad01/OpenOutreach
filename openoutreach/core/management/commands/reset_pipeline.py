@@ -8,11 +8,11 @@ Two scopes, because the two reasons to reset are different:
   or the ICP text: the seed only runs for a campaign with no nodes, so an existing walk
   would otherwise keep the vocabulary it opened with forever. Leads and verdicts survive,
   which is the point — they are the evidence the new walk scores itself against.
-- **all** — additionally delete the leads, deals, chat and queued tasks, and clear the
-  campaign's anchors and fitted GP. A genuine from-scratch run.
+- **all** — additionally delete the leads and deals, and clear the campaign's anchors
+  and fitted GP. A genuine from-scratch run.
 
-Never touches ``SiteConfig``, the operator account, mailboxes or the campaigns
-themselves: those are configuration, not pipeline state.
+Never touches ``SiteConfig``, the operator account or the campaigns themselves: those
+are configuration, not pipeline state.
 """
 from __future__ import annotations
 
@@ -33,8 +33,8 @@ class Command(BaseCommand):
             "--campaign", help="Campaign name to reset (default: every campaign).")
         parser.add_argument(
             "--all", action="store_true",
-            help="Also delete leads, deals, chat and tasks, and clear anchors + the "
-                 "fitted GP. Without this, only the discovery walk is reset.")
+            help="Also delete leads and deals, and clear anchors + the fitted GP. "
+                 "Without this, only the discovery walk is reset.")
         parser.add_argument(
             "--yes", action="store_true", help="Skip the confirmation prompt.")
         parser.add_argument(
@@ -78,7 +78,6 @@ class Command(BaseCommand):
         """What the reset would remove, counted before anything is touched."""
         from openoutreach.core.models import Keyword, QueryNode
         from openoutreach.crm.models import Deal, Lead
-        from openoutreach.emails.models import Message, Thread
 
         nodes = QueryNode.objects.filter(campaign__in=campaigns)
         counts = {"query nodes": nodes.count()}
@@ -92,11 +91,7 @@ class Command(BaseCommand):
         if not full:
             return counts
 
-        deals = Deal.objects.filter(campaign__in=campaigns)
-        counts["deals"] = deals.count()
-        threads = Thread.objects.filter(deals__in=deals).distinct()
-        counts["threads"] = threads.count()
-        counts["mail-log messages"] = Message.objects.filter(thread__in=threads).count()
+        counts["deals"] = Deal.objects.filter(campaign__in=campaigns).count()
         # Leads are campaign-agnostic (keyed on profile_url), so a partial reset leaves
         # them alone rather than deleting rows another campaign is still working.
         if self._resetting_everything(campaigns):
@@ -136,21 +131,11 @@ class Command(BaseCommand):
     def _reset(self, campaigns, *, full: bool) -> None:
         from openoutreach.core.models import Keyword, QueryNode
         from openoutreach.crm.models import Deal, Lead
-        from openoutreach.emails.models import Message, Thread
 
         everything = self._resetting_everything(campaigns)
 
         if full:
-            deals = Deal.objects.filter(campaign__in=campaigns)
-            # The threads go with the deals, and their messages with them. The log
-            # is append-only in normal running; this command is the deliberate
-            # exception, and a mail-log row whose deal is gone is a record of
-            # nothing — so the messages are dropped explicitly rather than left
-            # behind by the thread's SET_NULL.
-            threads = Thread.objects.filter(deals__in=deals)
-            Message.objects.filter(thread__in=threads).delete()
-            threads.delete()
-            deals.delete()
+            Deal.objects.filter(campaign__in=campaigns).delete()
             if everything:
                 Lead.objects.all().delete()
 

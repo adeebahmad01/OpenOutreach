@@ -15,7 +15,7 @@ import numpy as np
 from termcolor import colored
 
 from openoutreach.core.logblock import step_line  # noqa: F401 (re-exported for callers)
-from openoutreach.emails.bettercontact import submit_and_poll
+from openoutreach.enrichment.bettercontact import submit_and_poll
 
 logger = logging.getLogger(__name__)
 

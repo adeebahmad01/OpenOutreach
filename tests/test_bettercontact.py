@@ -1,4 +1,4 @@
-# tests/emails/test_bettercontact.py
+# tests/test_bettercontact.py
 """BetterContact slice — mock at the HTTP boundary (`bettercontact._session`).
 
 The paid finder is a two-leg async handshake: ``submit`` fires a job and returns
@@ -11,8 +11,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from openoutreach.emails import bettercontact
-from openoutreach.emails.bettercontact import (
+from openoutreach.enrichment import bettercontact
+from openoutreach.enrichment.bettercontact import (
     BetterContactQuery,
     BetterContactUnavailable,
 )

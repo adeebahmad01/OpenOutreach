@@ -92,56 +92,22 @@ def disqualify_lead(profile_url: str):
     lead.save(update_fields=["disqualified"])
 
 
-def _closed_states() -> tuple:
-    """States an unsubscribe leaves alone — the deal is already over.
-
-    Overwriting one would destroy the outcome that closed it, and an opt-out from
-    someone whose thread ended weeks ago changes nothing about that thread. Every
-    other state moves to UNSUBSCRIBED, whatever leg of the funnel it was on.
-    """
-    from openoutreach.crm.models import DealState
-
-    return (
-        DealState.COMPLETED,
-        DealState.FAILED,
-        DealState.NO_EMAIL_BETTERCONTACT,
-        DealState.UNSUBSCRIBED,
-    )
-
-
-def suppress_email(address: str) -> int:
-    """Honour an opt-out from *address*: suppress every lead at it, close their deals.
-
-    Suppression binds to the **person**, not to one thread — so it is written to
-    ``Lead.disqualified`` (permanent, account-level, cross-campaign), which the
-    candidate queries already filter, rather than to a state only one campaign
-    would read. ``Lead.email`` has no unique constraint, so *every* row holding
-    the address is suppressed, matched case-insensitively because a mail client
-    echoes back whatever casing it was given.
-
-    Returns the number of leads suppressed (0 when the address is unknown — an
-    unsubscribe from someone we never emailed, which is not an error).
-
-    Idempotent: re-running over the same address writes the same rows to the same
-    values, so a rescanned mailbox costs nothing.
-    """
-    from openoutreach.crm.models import Deal, DealState, Lead
-
-    address = (address or "").strip()
-    if not address:
-        return 0
-
-    leads = list(Lead.objects.filter(email__iexact=address))
-    if not leads:
-        logger.info("unsubscribe from %s matched no lead", address)
-        return 0
-
-    Lead.objects.filter(pk__in=[lead.pk for lead in leads]).update(disqualified=True)
-    closed = (
-        Deal.objects.filter(lead__in=leads)
-        .exclude(state__in=_closed_states())
-        .update(state=DealState.UNSUBSCRIBED)
-    )
-    logger.info("unsubscribe from %s: %d lead(s) suppressed, %d deal(s) closed",
-                address, len(leads), closed)
-    return len(leads)
+# ``suppress_email`` lived here — an opt-out from an address suppressed every lead
+# holding it and moved their open deals to UNSUBSCRIBED. It is **gone with the
+# sending leg**, and that is a legal position, not a cleanup.
+#
+# Every mechanism that fed it was a *sending* mechanism: the `List-Unsubscribe`
+# header, the `+unsub` alias on the operator's own sending address, the mailbox scan
+# that read a client-generated unsubscribe, and the agent recognising a worded request
+# in a reply. A finder that never contacts anyone is not the sender under CAN-SPAM /
+# GDPR / CASL, so the duty is not inherited — it moves to OpenEmailSequence with the
+# code. Instantly and Smartlead both block a suppressed address at import, which is
+# where an opt-out now lands.
+#
+# ``Lead.disqualified`` itself stays: it is the permanent, account-level exclusion,
+# the export filters it, and eleven candidate queries already read it. What is gone is
+# the *inbound* path that used to set it from mail we received.
+#
+# The one suppression duty that does not leave is the hub's, and it never involved a
+# sequencer: a person objecting to the shared contacts store is removed via the hub's
+# own endpoint, store-wide. That obligation runs between the data subject and the hub.

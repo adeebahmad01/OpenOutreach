@@ -1,4 +1,4 @@
-# openoutreach/emails/steps/lookup.py
+# openoutreach/enrichment/lookup.py
 """The paid email lookup, in two steps: buy the address, then check on it.
 
 ``buy_address`` resolves free sources first — an address already on the lead, then
@@ -6,8 +6,8 @@ the hub's cross-operator cache — and only pays BetterContact when both miss. A
 submit returns a ``request_id`` and nothing waits on it: the deal parks at
 FINDING_EMAIL carrying the handle, and ``check_lookup`` polls it later.
 
-    already has email  → READY_TO_EMAIL          (no lookup, no credit)
-    free hub-cache hit → READY_TO_EMAIL          (no provider job, no credit)
+    already has email  → RESOLVED                (no lookup, no credit)
+    free hub-cache hit → RESOLVED                (no provider job, no credit)
     hub miss           → FINDING_EMAIL           (job submitted, poll from the deal)
     couldn't submit    → stays READY_TO_FIND_EMAIL (no key / API down — try later)
 
@@ -52,8 +52,8 @@ def buy_address(deal) -> DealState | None:
     # give-back (Lead is account-level, Deal is campaign-scoped). No lookup, no credit.
     if deal.lead.email:
         logger.info("%s", step_line(
-            "known email", "already resolved → READY_TO_EMAIL", glyph="✓", color="green"))
-        return DealState.READY_TO_EMAIL
+            "known email", "already resolved → RESOLVED", glyph="✓", color="green"))
+        return DealState.RESOLVED
 
     # Free hub cache next — a hit skips the provider job, and the credit, entirely.
     cached = contacts.resolve(deal.lead)
@@ -61,8 +61,8 @@ def buy_address(deal) -> DealState | None:
         deal.lead.email = cached
         deal.lead.save(update_fields=["email"])
         logger.info("%s", step_line(
-            "hub cache", "hit → READY_TO_EMAIL", glyph="✓", color="green"))
-        return DealState.READY_TO_EMAIL
+            "hub cache", "hit → RESOLVED", glyph="✓", color="green"))
+        return DealState.RESOLVED
 
     logger.info("%s", step_line("hub cache", "miss"))
     return _submit(deal)
@@ -80,8 +80,11 @@ def _submit(deal) -> DealState | None:
     ~42% usable (2026-06-11, 45 real leads) which is enough. Do not widen this query
     without a decision to widen it.
     """
-    from openoutreach.emails import bettercontact
-    from openoutreach.emails.bettercontact import BetterContactQuery, BetterContactUnavailable
+    from openoutreach.enrichment import bettercontact
+    from openoutreach.enrichment.bettercontact import (
+        BetterContactQuery,
+        BetterContactUnavailable,
+    )
 
     if not bettercontact.is_configured():
         logger.info("%s", step_line(
@@ -130,14 +133,14 @@ def reclaim_lookup(deal) -> DealState:
 def check_lookup(deal) -> DealState | None:
     """Poll this deal's in-flight lookup exactly once and act on the outcome.
 
-        hit           → READY_TO_EMAIL (address stored + given back to the hub)
+        hit           → RESOLVED (address stored + given back to the hub)
         miss          → NO_EMAIL_BETTERCONTACT (terminal — a fit positive the ML keeps)
         still running → back off, stay put
         couldn't poll → retry at the same interval (nothing was learned about the job)
     """
     from openoutreach.contacts import service as contacts
-    from openoutreach.emails import bettercontact
-    from openoutreach.emails.bettercontact import BetterContactUnavailable
+    from openoutreach.enrichment import bettercontact
+    from openoutreach.enrichment.bettercontact import BetterContactUnavailable
 
     logger.info("%s", block_header(
         f"check_lookup · {deal.campaign} · {deal.lead.profile_url}", "magenta",
@@ -171,8 +174,8 @@ def check_lookup(deal) -> DealState | None:
     _store_identity(deal.lead, outcome)
     contacts.contribute(deal.lead, [outcome.email], contacts.ORIGIN_BETTERCONTACT)
     logger.info("%s", step_line(
-        "hit", f"{outcome.email} → READY_TO_EMAIL", glyph="✓", color="green"))
-    return DealState.READY_TO_EMAIL
+        "hit", f"{outcome.email} → RESOLVED", glyph="✓", color="green"))
+    return DealState.RESOLVED
 
 
 def _store_identity(lead, outcome) -> None:

@@ -30,10 +30,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "openoutreach.crm.apps.CrmConfig",
-    "openoutreach.chat.apps.ChatConfig",
     "openoutreach.core.apps.CoreConfig",
-    "openoutreach.legacy.apps.LegacyConfig",
-    "openoutreach.emails.apps.EmailsConfig",
 ]
 
 MIDDLEWARE = [

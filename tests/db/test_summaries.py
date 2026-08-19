@@ -123,97 +123,12 @@ class TestMaterializeProfileSummary:
         assert deal_with_lead.profile_summary is None
 
 
-class TestUpdateChatSummary:
-    BINDING = {"seller_name": "Diego"}
-
-    def _msg(self, content, is_outgoing):
-        """A mail-log turn, as the reply step hands them over."""
-        m = MagicMock()
-        m.body_text = content
-        m.is_outbound = is_outgoing
-        return m
-
-    def test_noop_on_empty_messages(self, db, deal_with_lead):
-        from openoutreach.core.db.summaries import update_chat_summary
-
-        with patch("openoutreach.core.db.summaries.extract_facts") as mock_extract:
-            update_chat_summary(deal_with_lead, [], **self.BINDING)
-
-        mock_extract.assert_not_called()
-        deal_with_lead.refresh_from_db()
-        assert deal_with_lead.chat_summary is None
-
-    def test_first_pass_includes_both_sides_labeled(self, db, deal_with_lead):
-        """Both sides are sent to extraction with [Me]/[Lead] tags for disambiguation."""
-        from openoutreach.core.db.summaries import update_chat_summary
-
-        msgs = [
-            self._msg("Hi, are you the founder?", is_outgoing=True),
-            self._msg("Yeah, I founded Acme last year.", is_outgoing=False),
-        ]
-        new_facts = ["Lead founded Acme last year."]
-        with patch("openoutreach.core.db.summaries.extract_facts",
-                   return_value=new_facts) as mock_extract, \
-             patch("openoutreach.core.db.summaries.reconcile_facts",
-                   return_value=new_facts) as mock_reconcile:
-            update_chat_summary(deal_with_lead, iter(msgs), **self.BINDING)
-
-        sent_text = mock_extract.call_args[0][0]
-        assert "[Me] Hi, are you the founder?" in sent_text
-        assert "[Lead] Yeah, I founded Acme last year." in sent_text
-        assert mock_extract.call_args.kwargs["seller_name"] == "Diego"
-        # First pass: existing is empty, reconcile sees only new facts.
-        mock_reconcile.assert_called_once_with([], new_facts, **self.BINDING)
-        deal_with_lead.refresh_from_db()
-        assert deal_with_lead.chat_summary == {"facts": new_facts}
-
-    def test_all_outgoing_burst_is_noop(self, db, deal_with_lead):
-        """A one-sided seller-only burst must not pollute chat_summary with our pitch."""
-        from openoutreach.core.db.summaries import update_chat_summary
-
-        msgs = [
-            self._msg("Ciao Andrea, sono Diego di Sunnyplans...", is_outgoing=True),
-            self._msg("Hai visto il mio messaggio?", is_outgoing=True),
-        ]
-        with patch("openoutreach.core.db.summaries.extract_facts") as mock_extract, \
-             patch("openoutreach.core.db.summaries.reconcile_facts") as mock_reconcile:
-            update_chat_summary(deal_with_lead, msgs, **self.BINDING)
-
-        mock_extract.assert_not_called()
-        mock_reconcile.assert_not_called()
-        deal_with_lead.refresh_from_db()
-        assert deal_with_lead.chat_summary is None
-
-    def test_second_pass_reconciles_via_mem0_prompt(self, db, deal_with_lead):
-        """A second sync routes through reconcile_facts → mem0 UPDATE prompt."""
-        from openoutreach.core.db.summaries import update_chat_summary
-
-        deal_with_lead.chat_summary = {"facts": ["Lead is the founder."]}
-        deal_with_lead.save(update_fields=["chat_summary"])
-
-        msgs = [self._msg("We have budget.", is_outgoing=False)]
-        with patch("openoutreach.core.db.summaries.extract_facts",
-                   return_value=["Lead has budget."]), \
-             patch("openoutreach.core.db.summaries.reconcile_facts",
-                   return_value=["Lead is the founder.", "Lead has budget."]) as mock_reconcile:
-            update_chat_summary(deal_with_lead, msgs, **self.BINDING)
-
-        mock_reconcile.assert_called_once_with(
-            ["Lead is the founder."], ["Lead has budget."], **self.BINDING,
-        )
-        deal_with_lead.refresh_from_db()
-        assert deal_with_lead.chat_summary == {
-            "facts": ["Lead is the founder.", "Lead has budget."],
-        }
-
-    def test_blank_messages_treated_as_empty(self, db, deal_with_lead):
-        from openoutreach.core.db.summaries import update_chat_summary
-
-        msgs = [self._msg("   ", is_outgoing=True), self._msg("", is_outgoing=False)]
-        with patch("openoutreach.core.db.summaries.extract_facts") as mock_extract:
-            update_chat_summary(deal_with_lead, msgs, **self.BINDING)
-
-        mock_extract.assert_not_called()
+# ``TestUpdateChatSummary`` stood here — five tests over the chat summary the outreach
+# agent carried across a thread. The function and the ``Deal.chat_summary`` column both
+# left with the sending leg, so there is no conversation to summarise.
+#
+# ``TestReconcileFacts`` below stays: reconciliation is still used by the profile
+# summary, which is about the lead rather than about a thread with them.
 
 
 class TestReconcileFacts:

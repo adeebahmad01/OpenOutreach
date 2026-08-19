@@ -1,4 +1,4 @@
-# openoutreach/emails/bettercontact.py
+# openoutreach/enrichment/bettercontact.py
 """BetterContact email lookup — resolve a work email for a qualified lead.
 
 The paid finder is a **two-leg async handshake**, so the daemon never blocks on

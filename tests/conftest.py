@@ -28,20 +28,6 @@ def _mock_embeddings(request):
             yield
 
 
-@pytest.fixture(autouse=True)
-def _open_sending_window():
-    """Hold the operator's sending window open for the whole suite.
-
-    Otherwise every test that sends a first email passes or fails by the wall
-    clock of the machine running it — green at 10:00, red at midnight and all
-    weekend. Tests that care about the window patch it back closed themselves;
-    the window's own rules are tested against explicit datetimes in
-    ``tests/test_sending_window.py``.
-    """
-    with patch("openoutreach.emails.models.mailbox.within_sending_window", return_value=True):
-        yield
-
-
 @pytest.fixture
 def operator(db):
     """The onboarded operator — what ``core.operator.get_active_user()`` will find."""

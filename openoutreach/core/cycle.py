@@ -25,21 +25,26 @@ One ordered list. The cycle walks it top to bottom and stops at the first thing 
 can do, so priority is just the order these are written in:
 
     1  FINDING_EMAIL          check the lookup            (not_before elapsed)
-    2  EMAILED + reply        answer the reply            (a lead wrote back)
-    3  READY_TO_EMAIL         send the first email        (a mailbox is free)
-    4  QUALIFIED              score with the campaign's model
-    5  READY_TO_FIND_EMAIL    buy the address             (room to send today)
-    6  (the campaign itself)  top up the pipeline         (room to send today)
+    2  QUALIFIED              score with the campaign's model
+    3  READY_TO_FIND_EMAIL    buy the address             (a provider is configured)
+    4  (the campaign itself)  top up the pipeline         (always)
 
-A state that is not listed is terminal, and terminal costs nothing: NO_EMAIL_
-BETTERCONTACT, UNSUBSCRIBED, COMPLETED, FAILED — and EMAILED with no unanswered
-reply, which is where most deals come to rest, because nobody is ever chased.
+A state that is not listed is terminal, and terminal costs nothing: RESOLVED,
+NO_EMAIL_BETTERCONTACT and FAILED. Most deals come to rest at one of those three,
+and resting is free because nothing iterates them.
 
-Rows 5 and 6 share one condition, and it is the only spend control there is:
-**never resolve an address, and never spend an LLM call qualifying, for someone
-there is no room to email today.** Idle is the *normal* state here — sends are paced
-minutes apart and a cycle is seconds — so "nothing better to do" cannot bound
-discovery on its own; that condition is what does.
+**There is no spend gate on rows 2 and 4, and that is the shape of the finder.**
+Both rows used to share one — *never resolve an address, and never spend an LLM call
+qualifying, for someone there is no room to email today* — which was right while
+every lead ended in a send. Nothing rations discovery or qualification now: they cost
+the operator's own LLM key and nothing else, and the loop is bounded the only way
+that matters, at one unit of work per cycle. Row 3 is the single paid step and asks
+only whether there is a provider to pay.
+
+**Two rows are gone with the sending leg** — answering a reply and sending a first
+email — along with the mail pass and the daily warmth re-measure that fed them. They
+live in OpenEmailSequence now. Leads leave this process over a CSV
+(``core/export.py``) and nothing comes back up that wire.
 
 Campaigns take turns (``_rotate``). There is no share, no weight and no allocation:
 with nothing minted in advance there is no budget to split, so the fairness question
@@ -54,7 +59,6 @@ from django.utils import timezone
 from pydantic_ai.exceptions import ModelHTTPError
 from termcolor import colored
 
-from openoutreach.core.sending_window import within_sending_window
 from openoutreach.crm.models import DealState
 
 logger = logging.getLogger(__name__)
@@ -70,20 +74,12 @@ CYCLE_SECONDS = 5
 # wedged one, and it carries the counts that say why there was nothing to do.
 IDLE_LOG_INTERVAL_S = 60
 
-# How often the mail pass logs into each box. The daemon's only inbound latency —
-# a reply is invisible until the next pass — traded against one IMAP login per box
-# per interval. Minutes, not seconds: nobody expects an answer inside a minute, and
-# a login a second would be its own kind of rude.
-MAIL_PASS_INTERVAL_S = 300
-
 # Errors that must stop the daemon rather than be retried. A misconfigured LLM key
 # is not a transient fault: every cycle would raise it, log it and try again in five
 # seconds, forever, while the operator sees a daemon that looks alive and does
 # nothing. Everything else is logged and skipped — the row is left untouched and the
 # next cycle moves on.
 HALTING_ERRORS = (ModelHTTPError,)
-
-_mail_read_at = None
 
 # When the last "nothing to do" line went out, so the pulse is one a minute rather
 # than one a cycle. Reset by any action, so the first idle after work always prints.
@@ -114,8 +110,6 @@ def run_daemon() -> None:
     rotation = _rotate()
     while True:
         try:
-            read_mail_if_due()
-            refresh_capacities_if_due()
             run_one_action(next(rotation))
         except HALTING_ERRORS as exc:
             logger.error(
@@ -200,7 +194,7 @@ _WAITING_ON = (
     (DealState.QUALIFIED, "waiting to be ranked"),
     (DealState.READY_TO_FIND_EMAIL, "waiting for an address to be bought"),
     (DealState.FINDING_EMAIL, "address on order"),
-    (DealState.READY_TO_EMAIL, "waiting to be emailed"),
+    (DealState.RESOLVED, "resolved, ready to export"),
 )
 
 
@@ -209,8 +203,7 @@ def _pipeline_summary(campaign) -> str:
     from django.db.models import Count
 
     from openoutreach.crm.models import Deal
-    from openoutreach.emails import bettercontact
-    from openoutreach.emails.models import Mailbox
+    from openoutreach.enrichment import bettercontact
 
     counts = dict(
         Deal.objects.filter(campaign=campaign, lead__disqualified=False)
@@ -219,28 +212,20 @@ def _pipeline_summary(campaign) -> str:
         .values_list("state", "n"),
     )
     waiting = [f"{counts.get(state, 0)} {phrase}" for state, phrase in _WAITING_ON]
-    waiting.append(f"{unanswered_replies(campaign).count()} reply(ies) to answer")
 
-    # Each gate said as its consequence rather than as its name — "no finder key, so
-    # not buying addresses" tells you why a row declined; a boolean tells you nothing.
-    # Discovery and qualification have no gate to report any more: they always run.
-    gates = []
-    if not bettercontact.is_configured():
-        gates.append("no finder key, so not buying addresses")
-    left = Mailbox.objects.remaining_today()
-    if not left:
-        gates.append("no send headroom, so not emailing")
-    elif not within_sending_window():
-        gates.append("outside sending hours, so not emailing")
-    held = f" · {' · '.join(gates)}" if gates else ""
-    return f"{' · '.join(waiting)} · {left} send(s) left today{held}"
+    # The one gate left, said as its consequence rather than as its name — "no finder
+    # key, so not buying addresses" tells you why a row declined; a boolean tells you
+    # nothing. Discovery and qualification have no gate to report: they always run.
+    held = "" if bettercontact.is_configured() else (
+        " · no finder key, so not buying addresses")
+    return f"{' · '.join(waiting)}{held}"
 
 
 # ── 1. Check an in-flight lookup ──────────────────────────────────
 
 
 def _check_lookups(campaign) -> bool:
-    from openoutreach.emails.steps.lookup import check_lookup, reclaim_lookup
+    from openoutreach.enrichment.lookup import check_lookup, reclaim_lookup
 
     deal = _due(campaign, DealState.FINDING_EMAIL).first()
     if deal is None:
@@ -249,100 +234,6 @@ def _check_lookups(campaign) -> bool:
     # it, or it sits in a state no other row claims for as long as the install runs.
     step = check_lookup if deal.lookup_request_id else reclaim_lookup
     return _apply(deal, step(deal))
-
-
-# ── 2. Answer a reply ─────────────────────────────────────────────
-
-
-def _answer_replies(campaign) -> bool:
-    from openoutreach.emails.steps.reply import answer_reply
-
-    deal = unanswered_replies(campaign).first()
-    if deal is None:
-        return False
-    return _apply(deal, answer_reply(deal))
-
-
-def unanswered_replies(campaign):
-    """EMAILED deals whose newest inbound turn is newer than our newest outgoing one.
-
-    This is the entire follow-up trigger. No timer, no flag, no bookkeeping: the
-    mail pass writes inbound rows and the comparison between the two newest
-    timestamps says whether the ball is in our court. Oldest reply first, so nobody
-    waits behind a livelier thread.
-
-    **Turns, not messages.** A bounce and an out-of-office are in the thread and
-    are not somebody writing back, so neither can make a deal actionable — the
-    loop that apologised twice to a dead address is closed by the same rule that
-    keeps NDRs out of the summary.
-
-    **The two timestamps are subqueries, not aggregates.** ``Max(...)`` over the joined
-    messages reads better and is what this asked for originally, but an aggregate makes
-    the query a GROUP BY over every selected column — and ``select_related`` puts the
-    campaign, lead and mailbox rows in that list. Grouping then carries the BLOBs:
-    ``Campaign.model_blob`` (the pickled GP, 10.5 MB once a campaign has ~1,350 labels),
-    ``Campaign.anchor_embeddings`` and ``Lead.embedding``, repeated per joined row. On a
-    live install that single ``.first()`` allocated **6.5 GB** and ran for ten seconds,
-    against 326 EMAILED deals — it climbed to ~3 GB on the 3.8 GB production VM, drove
-    the box into swap, and is what SIGKILLed the daemon. A campaign whose GP has few
-    labels has a small blob and shows nothing, so this scales with the operator's
-    success. Row 2 runs it every cycle and the idle pulse ``.count()``s it, so it is
-    also the hottest query in the loop. A correlated subquery per timestamp needs no
-    grouping at all and reads the same.
-    """
-    from django.db.models import F, OuterRef, Q, Subquery
-
-    from openoutreach.crm.models import Deal
-    from openoutreach.emails.models import Direction, Message
-    from openoutreach.emails.models.maillog import TURN_KINDS
-
-    def newest(direction: str) -> Subquery:
-        return Subquery(
-            Message.objects
-            .filter(thread=OuterRef("thread_id"), direction=direction, kind__in=TURN_KINDS)
-            .order_by("-sent_at")
-            .values("sent_at")[:1]
-        )
-
-    return (
-        Deal.objects.filter(
-            campaign=campaign,
-            state=DealState.EMAILED,
-            outcome="",
-            lead__disqualified=False,
-            thread__isnull=False,
-        )
-        .annotate(
-            last_in=newest(Direction.INBOUND),
-            last_out=newest(Direction.OUTBOUND),
-        )
-        .filter(last_in__isnull=False)
-        .filter(Q(last_out__isnull=True) | Q(last_in__gt=F("last_out")))
-        .select_related("lead", "campaign", "mailbox")
-        .order_by("last_in")
-    )
-
-
-# ── 3. Send a first email ─────────────────────────────────────────
-
-
-def _send_first_emails(campaign) -> bool:
-    from openoutreach.emails.models import Mailbox
-    from openoutreach.emails.steps.send import send_first_email
-
-    mailbox = Mailbox.objects.free_for_first_email()
-    if mailbox is None:
-        return False
-    deal = (
-        _due(campaign, DealState.READY_TO_EMAIL)
-        .filter(lead__disqualified=False)
-        .exclude(lead__email__isnull=True)
-        .exclude(lead__email="")
-        .first()
-    )
-    if deal is None:
-        return False
-    return _apply(deal, send_first_email(deal, mailbox))
 
 
 # ── 4. Score the qualified pool ───────────────────────────────────
@@ -397,8 +288,8 @@ def _pool_signature(campaign) -> tuple[int, int]:
 
 
 def _buy_addresses(campaign) -> bool:
-    from openoutreach.emails import bettercontact
-    from openoutreach.emails.steps.lookup import buy_address
+    from openoutreach.enrichment import bettercontact
+    from openoutreach.enrichment.lookup import buy_address
 
     # The only gate left on the one paid step: is there a provider to pay. What
     # bounds the spend is the operator's own prepaid credit balance, which the
@@ -443,46 +334,13 @@ def _top_up(campaign) -> bool:
     return top_up(campaign)
 
 
-# ── Periodic side-effects ─────────────────────────────────────────
-
-
-def read_mail_if_due() -> None:
-    """Walk every mailbox's new mail — replies and opt-outs in one pass per box.
-
-    A periodic side-effect rather than a state transition: no entity is moving, the
-    world is simply being read. Best-effort per box, so one unreachable mailbox does
-    not stop the others being read.
-    """
-    global _mail_read_at
-    from openoutreach.emails.mail_pass import run_mail_pass
-
-    now = timezone.now()
-    if _mail_read_at and (now - _mail_read_at).total_seconds() < MAIL_PASS_INTERVAL_S:
-        return
-    run_mail_pass()
-    _mail_read_at = now
-
-
-def refresh_capacities_if_due() -> None:
-    """Re-measure every mailbox's warm capacity, once a day.
-
-    Costs an IMAP round trip per box and moves on the scale of days, so it is stamped
-    daily however it went — an unreachable box costs one timeout a day, not one a
-    cycle.
-    """
-    from openoutreach.emails.models import Mailbox
-    from openoutreach.emails.warmth import mark_measured, measurement_due, refresh_capacity
-
-    if not measurement_due():
-        return
-    boxes = list(Mailbox.objects.all())
-    logger.info("warmth: re-measuring %d mailbox(es)", len(boxes))
-    for box in boxes:
-        refresh_capacity(box)
-    mark_measured()
-
-
 # ── The hierarchy ─────────────────────────────────────────────────
+#
+# **The loop has no periodic side-effects any more.** It used to run two before every
+# action: the mail pass (IMAP into each box, every five minutes) and the daily warmth
+# re-measure (an IMAP round trip per box to re-derive its send cap). Both were about
+# reading what the world did with our email, and neither has a caller here now — a
+# finder emits no email to have an answer to. They moved with the sending leg.
 
 # The ordered list from this module's docstring, made data so the walk can name the
 # row it fired. Defined here rather than at the top because it holds the functions
@@ -494,8 +352,6 @@ def refresh_capacities_if_due() -> None:
 # "find & qualify new leads" is what that row actually does.
 ROWS = (
     ("check for the email address we ordered", _check_lookups),
-    ("answer a reply", _answer_replies),
-    ("send a first email", _send_first_emails),
     ("rank the qualified leads", _score_qualified),
     ("buy an email address", _buy_addresses),
     ("find & qualify new leads", _top_up),
@@ -514,7 +370,7 @@ def _due(campaign, state):
     return (
         Deal.objects.filter(campaign=campaign, state=state)
         .filter(Q(not_before__isnull=True) | Q(not_before__lte=timezone.now()))
-        .select_related("lead", "campaign", "mailbox")
+        .select_related("lead", "campaign")
         .order_by("creation_date")
     )
 
@@ -523,9 +379,10 @@ def _apply(deal, next_state) -> bool:
     """Persist whatever the step did to *deal*, including its new state.
 
     One save for the transition and the fields that justify it, so a deal can never
-    be recorded as sent without its audit fields, or moved out of READY_TO_EMAIL
-    without the send being recorded. A step that returns ``None`` has decided to stay
-    put — it has usually written ``not_before`` — and that is saved just the same.
+    be moved to RESOLVED without the address that justifies it, or parked at
+    FINDING_EMAIL without the job handle to poll. A step that returns ``None`` has
+    decided to stay put — it has usually written ``not_before`` — and that is saved
+    just the same.
     """
     if next_state is not None:
         deal.state = next_state

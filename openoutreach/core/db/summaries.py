@@ -1,16 +1,16 @@
-"""mem0-style fact-list summaries for Deal profile and chat history.
+"""mem0-style fact-list summary for a Deal's lead profile.
 
-Single LLM boundary for the lazy summary pipeline. Summaries are stored as
-JSON fact lists on `Deal.profile_summary` and `Deal.chat_summary`. Both are
-campaign-scoped derived caches: deleting them and re-running the lazy path
-rebuilds them from source (the lead's stored `profile_text` for
-`profile_summary`, mail-log turns for `chat_summary` — no re-scrape).
+Single LLM boundary for the lazy summary pipeline. The summary is stored as a JSON
+fact list on `Deal.profile_summary`: a campaign-scoped derived cache, so deleting it
+and re-running the lazy path rebuilds it from the lead's stored `profile_text`.
+
+There was a second one — `Deal.chat_summary`, built from mail-log turns so the
+outreach agent carried context across a thread. It left with the sending leg.
 """
 from __future__ import annotations
 
 import json
 import logging
-from typing import Iterable
 
 from pydantic import BaseModel, Field
 
@@ -164,63 +164,13 @@ def materialize_profile_summary_if_missing(deal) -> None:
     )
 
 
-# ── Chat summary ──
-
-def _format_messages_for_extraction(messages: Iterable) -> str:
-    """Render conversation turns as a labeled transcript for fact extraction.
-
-    Both sides are included so the LLM can disambiguate anaphoric lead
-    replies ("yes", "that sounds good") using the preceding outgoing
-    context. The extraction prompt instructs the LLM to extract facts
-    about the lead only.
-
-    Returns an empty string when there are no incoming (lead) messages,
-    so a one-sided outgoing burst still short-circuits the LLM call.
-    """
-    lines: list[str] = []
-    has_incoming = False
-    for m in messages:
-        content = (m.body_text or "").strip()
-        if not content:
-            continue
-        tag = "[Me]" if m.is_outbound else "[Lead]"
-        if not m.is_outbound:
-            has_incoming = True
-        lines.append(f"{tag} {content}")
-    if not has_incoming:
-        return ""
-    return "\n".join(lines)
-
-
-def update_chat_summary(deal, new_messages, *, seller_name: str) -> None:
-    """Fold newly-read inbound turns into `deal.chat_summary` incrementally.
-
-    Existing facts are preserved; only new messages are sent to the LLM.
-    `seller_name` binds the [Me] tag during both extraction and
-    reconciliation, so previously-stored contaminated facts can be demoted on
-    the next pass. Empty input is a no-op (e.g., a sync that found no new
-    messages).
-    """
-    new_messages = list(new_messages)
-    if not new_messages:
-        return
-
-    formatted = _format_messages_for_extraction(new_messages)
-    if not formatted:
-        return
-
-    new_facts = extract_facts(formatted, seller_name=seller_name)
-    if not new_facts:
-        return
-
-    existing = (deal.chat_summary or {}).get("facts", [])
-    reconciled = reconcile_facts(existing, new_facts, seller_name=seller_name)
-    deal.chat_summary = {"facts": reconciled}
-    deal.save(update_fields=["chat_summary"])
-    logger.info(
-        "chat_summary updated for deal=%s (+%d new facts → %d total)",
-        deal.pk, len(new_facts), len(reconciled),
-    )
+# The chat summary lived here — ``update_chat_summary`` folded each newly-read inbound
+# turn into ``Deal.chat_summary`` so the outreach agent carried what it had learned
+# across a multi-turn thread. It is gone with the sending leg, and so is the column: a
+# conversation summary is only worth keeping if something is holding a conversation.
+#
+# ``reconcile_facts`` below is kept and still used by the profile summary, which is
+# about the *lead*, not about a thread with them.
 
 
 # ── Reconciliation ──
