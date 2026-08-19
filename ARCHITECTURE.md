@@ -537,8 +537,21 @@ email, first_name, last_name, company, title, website, linkedin_url, reason, lea
 ```
 
 `reason` lands as a custom variable and is the reason the product exists. `lead_id` is the only
-column that is there for us: it is the join key for outcomes coming back, since sequencers echo
-custom variables in their webhooks and an address can change under us.
+column that is there for us: a stable join key that survives an address changing under us.
+
+**The boundary is one-way — nothing comes back** (decided 2026-08-19 on the same card). Reply
+outcomes are conversation states that depend on the message and the sender's skill, which is the
+half being handed away; ingesting them would infer "was this a good lead" from "did that email
+work". Suppression stays with the sender too: a finder that never contacts anyone is not the sender
+under CAN-SPAM/GDPR, and the mainstream sequencers block a suppressed address at import
+([Instantly](https://help.instantly.ai/en/articles/6192983-global-blocklist),
+[Smartlead](https://helpcenter.smartlead.ai/en/articles/139-what-is-global-block-list-your-comprehensive-cold-outreach-guide)).
+So there is **no inbound endpoint and no event vocabulary**, and the GP keeps training on the LLM's
+fit verdict alone — `get_labeled_arrays` has never seen a market signal. `lead_id` keeps the door
+open at no cost if that is ever revisited; the one candidate is `bounced`, which grades the row we
+emitted rather than the message. **Note the operator-side duty this creates**: import dedupe is
+opt-in on Smartlead and undocumented on Instantly, so a re-exported lead who never opted out can be
+contacted twice unless the operator enables it — say so in every adapter's docs.
 
 - **CSV is a flattening of the JSON record, never a second schema** — both are generated from
   `RECORD_FIELDS`, so a field cannot appear in one and be forgotten in the other. `None` writes
