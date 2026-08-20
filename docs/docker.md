@@ -112,7 +112,7 @@ docker run --pull always -v ~/.openoutreach/data:/app/data ghcr.io/eracle/openou
 
 Place your `db.sqlite3` inside the mounted directory (`~/.openoutreach/data/` above; swap for your own
 path). Two caveats: the dir and file must be writable by uid 1000 (the container user) or writes fail
-with `readonly database`; and `rundaemon` runs `migrate` on startup, so back the file up first
+with `readonly database`; and `run` applies migrations on startup, so back the file up first
 (`cp db.sqlite3{,.bak}`) if it's precious.
 
 Note that a native install uses the **same default path**, so `uvx openoutreach` and the container can

@@ -49,27 +49,46 @@ upgradeable — see *Migrations* below.
 
 `openoutreach/__main__.py:main` — the `openoutreach` console script, and the entry point
 (`manage.py` is a shim over it for a checkout). A bare invocation (no subcommand, or a leading flag)
-defaults to `rundaemon`. A global `--db PATH` (or `--db=PATH`) is stripped from argv before Django
+defaults to `run`. A global `--db PATH` (or `--db=PATH`) is stripped from argv before Django
 parses it and exported as `OPENOUTREACH_DB`, which `settings.py` reads for the SQLite file (default
 `~/.openoutreach/data/db.sqlite3` installed, `data/db.sqlite3` in a checkout); the parent directory
 is created if missing.
 
-### `rundaemon` management command (`management/commands/rundaemon.py`)
+### The verb surface
+
+Four verbs, chosen rather than accumulated — they are what the two readers actually need:
+
+| verb | |
+|:-----|:--|
+| `run` | run it. The bare invocation defaults here. |
+| `status [--json]` | what is configured, blocked, counted, and next. |
+| `reset [--campaign N] [--all]` | start a campaign's walk over without losing its config. |
+| `export_leads --campaign N` | the CSV — **until it writes itself** (`p1-e1-leads-csv-default-output` deletes this one). |
+
+**`--json` belongs on every verb with a result**, which today is `status` alone: `run` streams
+progress, `reset` performs an action, and a flag that serializes nothing is a promise the surface
+cannot keep.
+
+Two were removed rather than renamed. **`setup_crm`** was an implementation detail with a verb around
+it — `run` calls the function directly, so nothing is lost. **`reset_data`** deleted every lead and
+deal across every campaign; that is `reset --all` without `--campaign`, minus the backup `reset` takes
+first, so it was a blunter duplicate of a verb that already existed.
+
+### `run` management command (`management/commands/run.py`)
 
 Startup sequence:
 1. **Configure logging** — level from `--verbosity`, banner, noisy third-party loggers silenced (`core/logging.py`).
-2. **Ensure DB** — `migrate --no-input` (the custom migrate; see below) + `setup_crm` (idempotent).
+2. **Ensure DB** — `migrate --no-input` (narrated to stderr; the custom migrate, see below) + the idempotent CRM bootstrap (`core/management/setup_crm.py`, a function — the verb around it is gone).
 3. **Onboard** — if `missing_keys()` is non-empty: `hydrate_from_env()` first, then the interactive wizard on a TTY, else exit **naming the variables** that would have satisfied it (no TTY, no silent partial start). See *The environment path* below.
 4. **Validate the operator** — `llm_api_key` set, an active operator `User` exists, at least one campaign. All three exit loudly rather than starting a daemon that cannot do anything.
 5. **Run** — `run_daemon()` (`core/cycle.py`). No session object is built: the campaign rides on the deal and the operator is looked up (`core/operator.py`).
 
-Docker's `start` script `exec`s `openoutreach rundaemon` (no Xvfb/VNC — there is no browser).
+Docker's `start` script `exec`s `openoutreach run` (no Xvfb/VNC — there is no browser).
 
-### Other management commands
+### The other three verbs
 
 - `status` — **what the daemon would say if you asked it.** Human summary by default, `--json` for a program. See *Status* below.
-- `setup_crm` — idempotent CRM bootstrap (default Site).
-- `reset_data` — wipe pipeline data for a fresh run.
+- `reset [--campaign NAME] [--all]` — start a campaign's discovery walk over; `--all` also drops its leads, deals, anchors and fitted GP, after a database backup.
 - `export_leads --campaign NAME` — **the lead export**. One argument; CSV on stdout, redirect for a file. The record lives in `core/export.py`. See *The Lead Export* below.
 
 ## The Output Contract (`core/management/base.py`, `core/errors.py`)
@@ -78,8 +97,8 @@ What a program depends on, and the reason both exist as one place rather than a 
 
 - **stdout is result-only.** Logs, the startup banner, and Django's `migrate` narration all go to
   **stderr** — `configure_logging` attaches its handler there, `print_banner` writes there, and
-  `rundaemon` passes `stdout=self.stderr` into `call_command("migrate")`. Verified end-to-end: a
-  headless `rundaemon` that cannot start writes **zero bytes** to stdout.
+  `run` passes `stdout=self.stderr` into `call_command("migrate")`. Verified end-to-end: a
+  headless `run` that cannot start writes **zero bytes** to stdout.
 - **Colour is gated on `stderr.isatty()`**, not stdout, or piping a result would strip the colour out
   of an interactive run.
 - **An expected failure is one line**: `error: <type>: <message>` on stderr, exit 1, no traceback.
@@ -154,7 +173,7 @@ liability before showing them a lead.
 
 ### The environment path (`hydrate_from_env`)
 
-An agent-driven install has no TTY, so **this is the main path, not a fallback**. `rundaemon` boots
+An agent-driven install has no TTY, so **this is the main path, not a fallback**. `run` boots
 `hydrate_from_env()` → re-check `missing_keys()` → wizard **on a TTY**, or exit **naming the variables
 that would have satisfied it**. Every field is an `OPENOUTREACH_*` variable:
 

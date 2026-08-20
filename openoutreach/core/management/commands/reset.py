@@ -1,4 +1,4 @@
-# openoutreach/core/management/commands/reset_pipeline.py
+# openoutreach/core/management/commands/reset.py
 """Reset a campaign's pipeline state without touching its configuration.
 
 Two scopes, because the two reasons to reset are different:
@@ -13,6 +13,11 @@ Two scopes, because the two reasons to reset are different:
 
 Never touches ``SiteConfig``, the operator account or the campaigns themselves: those
 are configuration, not pipeline state.
+
+**This absorbed the old ``reset_data``**, which deleted every lead and deal across every
+campaign and cleared the GP blobs. That is ``reset --all`` with no ``--campaign``, minus
+the backup this one takes first — so it was a blunter duplicate of a verb that already
+existed, and a global irreversible wipe is not a thing to keep two ways of doing.
 """
 from __future__ import annotations
 

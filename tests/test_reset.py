@@ -1,5 +1,5 @@
-# tests/test_reset_pipeline.py
-"""`manage.py reset_pipeline` — start a campaign's walk over without losing its config."""
+# tests/test_reset.py
+"""`openoutreach reset` — start a campaign's walk over without losing its config."""
 from io import StringIO
 
 import pytest
@@ -29,7 +29,7 @@ def _populate(campaign):
 
 def _run(**kw):
     out = StringIO()
-    call_command("reset_pipeline", stdout=out, **kw)
+    call_command("reset", stdout=out, **kw)
     return out.getvalue()
 
 

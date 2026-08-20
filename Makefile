@@ -8,12 +8,11 @@ install: ## install the package and dev dependencies (editable)
 	pip install uv 2>/dev/null || true
 	uv pip install -e ".[dev]"
 
-setup: install ## install + migrate + bootstrap CRM
+setup: install ## install + migrate (the CRM bootstraps itself on the first run)
 	python manage.py migrate --no-input
-	python manage.py setup_crm
 
-run: ## run the daemon
-	python manage.py rundaemon
+run: ## run it
+	python manage.py run
 
 test: ## run the test suite
 	pytest

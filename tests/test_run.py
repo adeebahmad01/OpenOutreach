@@ -1,4 +1,4 @@
-# tests/test_rundaemon.py
+# tests/test_run.py
 """Boot: environment first, wizard only if a human is there to answer.
 
 The regression this locks down is the one an agent-driven install hits first —
@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-from openoutreach.core.management.commands.rundaemon import Command
+from openoutreach.core.management.commands.run import Command
 
 FULL_ENV = {
     "OPENOUTREACH_PRODUCT_DESCRIPTION": "A self-hosted CI dashboard for small dev teams",

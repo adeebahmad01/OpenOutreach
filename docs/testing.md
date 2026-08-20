@@ -38,7 +38,7 @@ tests/
 ├── test_ready_pool.py          # GP rank gate
 ├── test_qualify.py             # qualification flow
 └── test_onboarding{,_wizard}.py, test_llm.py, test_geo.py, test_db_option.py,
-    test_reset_pipeline.py, test_version.py
+    test_reset.py, test_version.py
 ```
 
 *(The `tests/emails/` and `tests/agents/` trees, `test_sending_window.py` and
