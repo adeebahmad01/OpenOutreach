@@ -1,8 +1,14 @@
-# Docker Installation and Usage
+# Docker — Running OpenOutreach on a Server
 
-OpenOutreach runs as a single browserless daemon — a slim Python image with **no browser and no VNC**. All you interact with is the terminal (for onboarding) and, optionally, the Django Admin.
+> **This is not the install path.** The supported install is `uvx openoutreach` (or
+> `pip install openoutreach`) — see the README quick start. This page is for running the daemon
+> unattended on a server, which is the one job the image still does better than a shell.
+> Development and tests run natively; there is no `docker-test`.
 
-## Quick Start (Pre-built Image — Recommended)
+The image is a slim Python runtime with **no browser and no VNC** — a venv at `/opt/venv` holding the
+installed package, and nothing from the build stage.
+
+## Quick Start (Pre-built Image)
 
 Pre-built images are published to GitHub Container Registry.
 
@@ -10,10 +16,14 @@ Pre-built images are published to GitHub Container Registry.
 docker run --pull always -it -v ~/.openoutreach/data:/app/data ghcr.io/eracle/openoutreach:latest
 ```
 
-- `-it` is required so the **interactive onboarding** can prompt you on first run — product/objective → LLM key → BetterContact key → your email → country → newsletter/legal.
-- `-v ~/.openoutreach/data:/app/data` persists everything (CRM database, model blobs, embeddings) on your host across restarts.
+- `-it` is only needed for the **interactive onboarding** on first run — product/objective → LLM key →
+  BetterContact key → your email → country → newsletter/legal. Configure those by environment instead
+  and the container needs no TTY at all.
+- `-v ~/.openoutreach/data:/app/data` persists everything (CRM database, model blobs, embeddings) on
+  your host across restarts. The image sets `OPENOUTREACH_DB=/app/data/db.sqlite3`.
 
-There are **no ports to publish** — the daemon has no web server of its own and no browser to watch. (To browse your CRM, run the Django Admin separately; see below.)
+There are **no ports to publish** — the daemon has no web server of its own and no browser to watch.
+(To browse your CRM, run the Django Admin separately; see below.)
 
 ### Available Tags
 
@@ -33,26 +43,28 @@ docker ps
 docker stop <container-id>
 
 # Restart (data persists in the mounted directory)
-docker run --pull always -it -v ~/.openoutreach/data:/app/data ghcr.io/eracle/openoutreach:latest
+docker run --pull always -v ~/.openoutreach/data:/app/data ghcr.io/eracle/openoutreach:latest
 ```
 
 ### View your CRM (Django Admin)
 
-The daemon image runs the worker, not a web server. To browse Leads and Deals, run the admin server (locally or in a second container) and publish port 8000:
+The daemon image runs the worker, not a web server. To browse Leads and Deals, run the admin server
+(locally or in a second container) and publish port 8000:
 
 ```bash
 docker run --pull always -it -p 8000:8000 -v ~/.openoutreach/data:/app/data \
-  ghcr.io/eracle/openoutreach:latest python manage.py runserver 0.0.0.0:8000
+  ghcr.io/eracle/openoutreach:latest openoutreach runserver 0.0.0.0:8000
 ```
 
-Then open **http://localhost:8000/admin/** (create a superuser first with `python manage.py createsuperuser`).
+Then open **http://localhost:8000/admin/** (create a superuser first with
+`openoutreach createsuperuser`).
 
 ---
 
 ## Build from Source (Docker Compose)
 
-For development or customization, you can build the image locally. The compose file (`local.yml`)
-mounts the entire project directory into the container for live code editing.
+`local.yml` builds the same production image from a checkout. It is what the prod VM uses — one
+directory per operator, each with its own CRM.
 
 ### Prerequisites
 
@@ -70,7 +82,8 @@ cd OpenOutreach
 make up
 ```
 
-This builds the Docker image from source with `BUILD_ENV=local` (includes test dependencies) and starts the daemon.
+**The code is what the image was built from.** Only `./data` is mounted, so moving an instance
+forward is `git pull` + rebuild — never a live edit inside the container.
 
 **Note:** The compose file uses `HOST_UID` / `HOST_GID` environment variables (defaulting to 1000)
 for file ownership. If your host UID differs from 1000, set them explicitly:
@@ -87,18 +100,20 @@ HOST_UID=$(id -u) HOST_GID=$(id -g) make up
 | `make up` | Build and start the daemon |
 | `make stop` | Stop the running containers |
 | `make logs` | Follow application logs |
-| `make docker-test` | Run the test suite in Docker |
-
-### Volume Mounts
-
-The pre-built `docker run` command mounts a host directory at `/app/data` for persistence (database, config). The compose setup (`local.yml`) mounts the entire repo `.:/app` for live code editing during development.
 
 ### Use an existing `db.sqlite3`
 
-To run against a database file you already have, bind-mount the host **directory** containing it onto `/app/data` (the app opens `/app/data/db.sqlite3`):
+To run against a database file you already have, bind-mount the host **directory** containing it onto
+`/app/data` (the image opens `/app/data/db.sqlite3`):
 
 ```bash
-docker run --pull always -it -v ~/.openoutreach/data:/app/data ghcr.io/eracle/openoutreach:latest
+docker run --pull always -v ~/.openoutreach/data:/app/data ghcr.io/eracle/openoutreach:latest
 ```
 
-Place your `db.sqlite3` inside the mounted directory (`~/.openoutreach/data/` above; swap for your own path). Two caveats: the dir and file must be writable by uid 1000 (the container user) or writes fail with `readonly database`; and `rundaemon` runs `migrate` on startup, so back the file up first (`cp db.sqlite3{,.bak}`) if it's precious.
+Place your `db.sqlite3` inside the mounted directory (`~/.openoutreach/data/` above; swap for your own
+path). Two caveats: the dir and file must be writable by uid 1000 (the container user) or writes fail
+with `readonly database`; and `rundaemon` runs `migrate` on startup, so back the file up first
+(`cp db.sqlite3{,.bak}`) if it's precious.
+
+Note that a native install uses the **same default path**, so `uvx openoutreach` and the container can
+be pointed at one CRM — but never at the same time. One daemon per database, ever.

@@ -6,5 +6,5 @@ set -o pipefail
 set -o nounset
 
 # Run the daemon (migrate + onboard + task queue).
-# Forward any arguments, e.g. --onboard <file>.
-exec python manage.py rundaemon "$@"
+# Forward any arguments.
+exec openoutreach rundaemon "$@"

@@ -5,8 +5,7 @@ The suite is pytest, mirroring the package structure under `tests/`. Mock at the
 ## Running
 
 ```bash
-make test                 # full suite (local)
-make docker-test          # full suite in Docker
+make test                 # full suite (native — tests do not run in Docker)
 
 .venv/bin/pytest tests/test_qualify.py     # a single file
 .venv/bin/pytest -k test_name              # a single test by name

@@ -1,12 +1,13 @@
-# local.yml
+# local.yml — the server deploy (docs/infrastructure.md §7). Filename kept because the
+# VM's update-all.sh and every existing instance reference it.
+#
+# For development, install the package instead: `uv pip install -e ".[dev]"`.
 
 services:
   app:
     build:
       context: .
       dockerfile: ./compose/openoutreach/Dockerfile
-      args:
-        - BUILD_ENV=local
     restart: unless-stopped
     stdin_open: true
     tty: true
@@ -14,4 +15,6 @@ services:
       - HOST_UID=${HOST_UID:-1000}
       - HOST_GID=${HOST_GID:-1000}
     volumes:
-      - .:/app
+      # Only the CRM is mounted — the code is what the image was built from, so
+      # moving an instance forward is `git pull` + rebuild, never a live edit.
+      - ./data:/app/data

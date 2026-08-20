@@ -528,18 +528,29 @@ Paths relative to `openoutreach/`.
 - **`conf.py` — the three send guards are gone.** `WARM_*` (the measured per-box daily ceiling), `MIN_SEND_INTERVAL_SECONDS`/`SEND_INTERVAL_JITTER_*` (the 3.5–4.5 minute gap between first emails) and `SEND_WINDOW_*` (Mon–Fri 08:00–20:00, operator-local) were most of this file. They moved with the code they governed; the reasoning is preserved in `cold_outreach/README.md` on the OpenEmailSequence side, because it is worth not re-deriving: receivers punish *rate* and *volume* separately and a recipient reads the *hour*, so no one guard covers the others.
 - **`conf.py:CAMPAIGN_CONFIG`** — `min_gp_confidence` (the GP rank gate — **only** a spend gate on the paid lookup; it is not a steering signal and never a quality score), `qualification_n_mc_samples` (100), `embedding_model` (`BAAI/bge-small-en-v1.5`). **There is no discovery cadence knob**: growing the vocabulary used to be an LLM call worth rationing (`mint_every_n_qualified`, removed) and is now a tokenize-and-count that simply runs every pass. The walk's only other constant is the df≥2 admission floor, which lives in `pipeline/vocabulary.py` beside the measurement that set it.
 - **Prompt templates** (`core/templates/prompts/`) — `icp_filters.j2` (the cold-start ICP → seed keywords + size band), `anchor_profiles.j2`, `qualify_lead.j2`. *(`outreach_agent.j2` went with the agent; `mint_clauses.j2` with LLM clause minting.)*
-- **`requirements/`** — `base.txt`, `local.txt`, `production.txt`, `crm.txt` (empty).
+- **`pyproject.toml`** — package metadata, dependencies, dev extras, and the `openoutreach` console
+  script. Replaces the `requirements/*.txt` files, which are gone.
 
-## Docker
+## Install
 
-Multi-stage build from `python:3.12-slim-bookworm` using `uv` (no browser, no VNC).
-`compose/openoutreach/Dockerfile`. `BUILD_ENV` arg selects
-requirements; data persists in a volume at `/app/data`.
+**The tool is CLI-first and ships on PyPI**: `uvx openoutreach`, or `pip install openoutreach`. The
+console script is `openoutreach/__main__.py:main`; `manage.py` is a shim over it for a checkout.
+Installed, the CRM lives at `~/.openoutreach/data/db.sqlite3` — a wheel's `ROOT_DIR` is site-packages,
+which is no place for an operator's data. See the `openoutreach-docs` card `p1-e2-cli-entry-points`.
+
+## Docker — the server deploy, not the install path
+
+Two-stage build from `python:3.12-slim-bookworm`: stage one installs the package into a venv at
+`/opt/venv` with `uv`, stage two copies that one directory and carries neither `git` nor `uv`.
+No browser, no VNC. `compose/openoutreach/Dockerfile`. It exists for running the daemon on a server
+(`openoutreach-docs/docs/infrastructure.md` §7) — **development and tests run natively**, there is no
+`BUILD_ENV` and no dev extras in the image. `OPENOUTREACH_DB=/app/data/db.sqlite3` names the CRM path
+explicitly, since the code no longer sits beside it; `local.yml` mounts `./data` there and nothing else.
 
 ## CI/CD
 
-- `tests.yml` — pytest on push / PRs.
-- `deploy.yml` — **on every push to `main`**, and on `v*` tags. Runs `make docker-test`, then builds
+- `tests.yml` — native pytest on push / PRs (Python 3.12, `uv pip install -e ".[dev]"`).
+- `deploy.yml` — **on every push to `main`**, and on `v*` tags. Runs the tests, then builds
   + pushes `ghcr.io/eracle/openoutreach`, then fires a `repository-dispatch` (`image-updated`) at
   `eracle/hub.openoutreach.app`. Image tags: `latest` (default branch only), `sha-<commit>`, and
   semver (`v*` tags only).
@@ -550,9 +561,14 @@ requirements; data persists in a volume at `/app/data`.
   **pushed tip**: commits buried inside a multi-commit push never get their own image, so a
   migration can go from unpublished to live in one push.
 
+- **A `v*` tag is the release**, and the only thing that publishes to PyPI: `publish-pypi` builds an
+  sdist + wheel and uploads them through trusted publishing (OIDC, environment `pypi` — no API token
+  in the repo). The image's no-release-gate behaviour above is unchanged; the package's is the
+  opposite, and deliberately so.
+
 ## Dependencies
 
-`requirements/` files; `uv pip install` for fast installs. No browser/Playwright, no DjangoCRM.
+`pyproject.toml`; `uv pip install` for fast installs. No browser/Playwright, no DjangoCRM.
 
 Core: `Django`, `pydantic`, `pydantic-ai-slim` (with `openai`/`anthropic`/`google`/`groq`/`mistral`/`cohere`/`bedrock` extras; `griffe` pinned `<2`), `jinja2`, `pandas`, `termcolor`, `tenacity`, `questionary`, `tendo`, `pyyaml`, `jsonpath-ng`
 ML: `scikit-learn`, `fastembed`, `huggingface_hub`, `numpy`/`joblib` (transitive)

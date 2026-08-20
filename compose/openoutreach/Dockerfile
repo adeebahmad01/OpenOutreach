@@ -1,19 +1,23 @@
-# ── Stage 1: build dependencies ─────────────────────────────────
+# Production image. The supported install is `uvx openoutreach` / `pip install
+# openoutreach` — this exists for running the daemon on a server (docs/infrastructure.md §7),
+# not for local development and not for tests. Run those natively.
+
+# ── Stage 1: build a venv holding the package and its dependencies ──
 FROM python:3.12-slim-bookworm AS deps
 
 RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 RUN pip install uv
 
-COPY ./requirements /requirements
-ARG BUILD_ENV=production
-RUN uv pip install --system -r /requirements/${BUILD_ENV}.txt
+COPY . /src
+RUN uv venv /opt/venv && VIRTUAL_ENV=/opt/venv uv pip install --no-cache /src
 
 # ── Stage 2: runtime ────────────────────────────────────────────
 FROM python:3.12-slim-bookworm AS runtime
 
-# Copy installed Python packages from the build stage
-COPY --from=deps /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
-COPY --from=deps /usr/local/bin /usr/local/bin
+# One self-contained directory: the package, its dependencies, and the
+# `openoutreach` console script. Nothing from the build stage — no git, no uv.
+COPY --from=deps /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
 ENV EDITOR=nano
 
@@ -33,8 +37,9 @@ COPY ./compose/openoutreach/entrypoint /entrypoint
 COPY ./compose/openoutreach/start /start
 RUN sed -i 's/\r$//g' /entrypoint /start && chmod +x /entrypoint /start
 
-COPY --chown=ubuntu:ubuntu . ${APP_HOME}
-RUN chown ubuntu:ubuntu ${APP_HOME}
+# The package lives in the venv, so the CRM cannot default to a path beside the
+# code. Name it explicitly: /app/data is the volume operators already mount.
+ENV OPENOUTREACH_DB=/app/data/db.sqlite3
 
 ENTRYPOINT ["/entrypoint"]
 CMD ["/start"]

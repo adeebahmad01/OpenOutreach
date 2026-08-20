@@ -15,9 +15,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run tests
-        run: HOST_UID=$(id -u) HOST_GID=$(id -g) make docker-test
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install
+        run: uv pip install --system -e ".[dev]"
+
+      - name: Run tests
+        run: pytest
+
+  # The supported install. Publishes on a `v*` tag only — `main` does not ship a release.
+  publish-pypi:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # PyPI trusted publishing
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist + wheel
+        run: pipx run build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  # The server image (docs/infrastructure.md §7) — not the install path.
   build-and-push:
     needs: test
     runs-on: ubuntu-latest
@@ -50,8 +81,6 @@ jobs:
         with:
           context: .
           file: ./compose/openoutreach/Dockerfile
-          build-args: |
-            BUILD_ENV=production
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

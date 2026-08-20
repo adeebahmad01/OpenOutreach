@@ -87,7 +87,7 @@ What that means for you, concretely:
 - 🛡️ **Zero platform-ToS surface** — browserless, no social-network account, no scraping — nothing to get banned
 - 💸 **Pay only for what resolves** — searching is free; a paid lookup is rationed and billed on a verified hit
 - 📤 **Exports where you already work** — CSV in the shape the sequencer importers expect
-- 🐳 **One-command setup** — Dockerized deployment, interactive onboarding
+- ⚡ **One-command setup** — `uvx openoutreach`, interactive onboarding, no container required
 
 Every comparable tool that qualifies leads for you is paid SaaS. This one is GPLv3, runs on your machine, and you bring your own provider keys.
 
@@ -115,17 +115,21 @@ The BetterContact link above is an **affiliate link** — signing up through it 
 
 ---
 
-## ⚡ Quick Start (Docker — Recommended)
-
-Pre-built images are published to GitHub Container Registry.
+## ⚡ Quick Start
 
 ```bash
-docker run --pull always -it -v ~/.openoutreach/data:/app/data ghcr.io/eracle/openoutreach:latest
+uvx openoutreach
 ```
 
-The interactive onboarding walks you through the inputs above on first run — product/objective → LLM key (live-verified) → BetterContact key → your email → country → newsletter/legal. Four steps. All data persists in `~/.openoutreach/data` on your host across restarts. The image is a slim Python runtime — **no browser, no VNC**.
+or, if you would rather install it:
 
-For Docker Compose, build-from-source, and more options see the **[Docker Guide](./docs/docker.md)**.
+```bash
+pip install openoutreach && openoutreach
+```
+
+The interactive onboarding walks you through the inputs above on first run — product/objective → LLM key (live-verified) → BetterContact key → your email → country → newsletter/legal. Four steps. Everything lives in `~/.openoutreach/data`, so stopping and starting loses nothing. No browser, no daemon manager, no container.
+
+Running it on a server instead? A Docker image is published to GitHub Container Registry for exactly that — see the **[Docker Guide](./docs/docker.md)**.
 
 ---
 
@@ -187,7 +191,7 @@ python manage.py export_leads --campaign "My Campaign" > leads.csv
 | 📤 **Export That Just Imports**    | CSV in the exact column names Instantly and Smartlead expect, so a file imports without column mapping. One record schema, one translation layer, no privileged path for our own sender. |
 | 💾 **Built-in CRM**               | Django Admin — browse Leads, Companies and Deals, and read every verdict. Everything is local and everything exports. |
 | 🔄 **Stateful Pipeline**          | Tracks deal states in a local DB — fully resumable, nothing scheduled in advance, no queue table.                   |
-| 🐳 **One-Command Deployment**      | Dockerized setup with interactive onboarding; a slim runtime with no browser and no VNC.                            |
+| ⚡ **One-Command Install**          | `uvx openoutreach` — a Python CLI with interactive onboarding, no browser and no container. A Docker image exists for running it on a server. |
 
 ---
 
@@ -226,15 +230,17 @@ Configure behavior via Django Admin (`SiteConfig` + `Campaign`).
 ```
 ├── docs/                             # architecture, configuration, docker, lifecycle, testing
 ├── openoutreach/                    # single source package; Django apps nested inside
-│   ├── settings.py                  # Django settings (SQLite at data/db.sqlite3)
+│   ├── __main__.py                  # the `openoutreach` console script — the entry point
+│   ├── settings.py                  # Django settings (SQLite at ~/.openoutreach/data/db.sqlite3)
 │   ├── core/                        # engine app: the daemon cycle, Campaign/SiteConfig,
 │   │                                #   LLM factory, onboarding, ML + discovery/qualify
 │   │                                #   pipeline, the lead export
 │   ├── enrichment/                  # the one paid step: provider client + buy/check lookup
 │   ├── crm/                         # Lead + Company + Deal models
 │   └── contacts/                    # the shared contacts-store client (the hub)
-├── manage.py                         # Django management (no args defaults to rundaemon)
-├── local.yml                        # Docker Compose
+├── manage.py                         # checkout shim over openoutreach/__main__.py
+├── pyproject.toml                   # package metadata, dependencies, console script
+├── local.yml                        # Docker Compose — the server deploy only
 └── Makefile                         # Shortcuts (setup, run, admin, test)
 ```
 

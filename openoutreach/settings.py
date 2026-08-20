@@ -62,14 +62,27 @@ TEMPLATES = [
     },
 ]
 
-# `manage.py --db PATH` sets OPENOUTREACH_DB; otherwise the bundled data dir.
-DATABASE_PATH = Path(os.environ.get("OPENOUTREACH_DB") or ROOT_DIR / "data" / "db.sqlite3").expanduser()
+# `--db PATH` sets OPENOUTREACH_DB; otherwise the operator's data dir.
+#
+# Installed from a wheel, ROOT_DIR is inside site-packages — which is no place for an
+# operator's CRM, and may not be writable. The default therefore lives in the home
+# directory, and a checkout keeps its own `data/` only because it already has one.
+RUNNING_FROM_CHECKOUT = (ROOT_DIR / "manage.py").exists()
+DEFAULT_DATA_DIR = ROOT_DIR / "data" if RUNNING_FROM_CHECKOUT else Path.home() / ".openoutreach" / "data"
+
+DATABASE_PATH = Path(os.environ.get("OPENOUTREACH_DB") or DEFAULT_DATA_DIR / "db.sqlite3").expanduser()
 DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": str(DATABASE_PATH),
+        # WAL lets `openoutreach status` read while the daemon holds a write lock;
+        # without it a concurrent read fails with "database is locked".
+        "OPTIONS": {
+            "init_command": "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;",
+            "transaction_mode": "IMMEDIATE",
+        },
     }
 }
 
