@@ -15,12 +15,11 @@ from __future__ import annotations
 
 import json
 
-from django.core.management.base import BaseCommand
-
+from openoutreach.core.management.base import OpenOutreachCommand
 from openoutreach.core.status import build_status
 
 
-class Command(BaseCommand):
+class Command(OpenOutreachCommand):
     help = "Report what is configured, what is blocked, the counts, and the next action."
 
     def add_arguments(self, parser):

@@ -2,12 +2,14 @@ import logging
 import sys
 
 from django.core.management import call_command
-from django.core.management.base import BaseCommand
+
+from openoutreach.core.errors import ErrorType, OpenOutreachError
+from openoutreach.core.management.base import OpenOutreachCommand
 
 logger = logging.getLogger(__name__)
 
 
-class Command(BaseCommand):
+class Command(OpenOutreachCommand):
     help = "Run the OpenOutreach daemon (onboard, validate, start the cycle)."
 
     def add_arguments(self, parser):
@@ -42,7 +44,10 @@ class Command(BaseCommand):
         print_banner()
 
     def _ensure_db(self):
-        call_command("migrate", "--no-input")
+        # Django's migrate narrates to stdout. The daemon has no result, so all of its
+        # output is progress — and a stray "Applying core.0001_initial… OK" in a
+        # redirected stdout is exactly what the contract exists to prevent.
+        call_command("migrate", "--no-input", stdout=self.stderr)
 
         from openoutreach.core.management.setup_crm import setup_crm
         setup_crm()
@@ -70,31 +75,38 @@ class Command(BaseCommand):
             onboarding.onboard_interactive()
             return
 
-        self.stderr.write(
-            "error: onboarding_incomplete: no TTY, and the environment does not "
-            "carry everything.\nSet these and run again:\n"
+        raise OpenOutreachError(
+            ErrorType.ONBOARDING_INCOMPLETE,
+            "no TTY, and the environment does not carry everything.\n"
+            "Set these and run again:\n"
             f"{onboarding.env_help()}\n"
             "Optional: "
             f"{onboarding.ENV_PREFIX}CAMPAIGN_NAME, {onboarding.ENV_PREFIX}LLM_API_BASE "
             f"(required for openai_compatible:*), {onboarding.ENV_PREFIX}NEWSLETTER.\n"
             f"{onboarding.ENV_PREFIX}ACCEPT_LEGAL_NOTICE must be set to 'true' — it "
-            f"records that you accept {onboarding.LEGAL_NOTICE_URL}."
+            f"records that you accept {onboarding.LEGAL_NOTICE_URL}.",
         )
-        sys.exit(1)
 
     def _validate_operator(self):
-        """Fail loudly on the three things the cycle cannot run without."""
+        """Fail loudly on the three things the cycle cannot run without.
+
+        Each exits with a typed line rather than a log record: these are answers to
+        the reader, and a program needs to branch on them.
+        """
         from openoutreach.core.models import SiteConfig
         from openoutreach.core.operator import campaigns, get_active_user
 
         if not SiteConfig.load().llm_api_key:
-            logger.error("LLM_API_KEY is required. Set it in Site Configuration (Django Admin).")
-            sys.exit(1)
+            raise OpenOutreachError(
+                ErrorType.ONBOARDING_INCOMPLETE,
+                "no LLM API key — set OPENOUTREACH_LLM_API_KEY, or edit Site "
+                "Configuration in the Django Admin.",
+            )
 
         if get_active_user() is None:
-            logger.error("No active operator account found.")
-            sys.exit(1)
+            raise OpenOutreachError(
+                ErrorType.ONBOARDING_INCOMPLETE, "no active operator account.")
 
         if not campaigns():
-            logger.error("No campaigns found for this operator.")
-            sys.exit(1)
+            raise OpenOutreachError(
+                ErrorType.ONBOARDING_INCOMPLETE, "no campaigns for this operator.")

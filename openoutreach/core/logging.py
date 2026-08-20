@@ -21,10 +21,14 @@ BANNER = r"""
 
 
 def print_banner():
-    """Print the OpenOutreach startup banner in bold cyan."""
-    sys.stdout.write(colored(BANNER, "cyan", attrs=["bold"]))
-    sys.stdout.write("\n")
-    sys.stdout.flush()
+    """Print the OpenOutreach startup banner in bold cyan — on stderr.
+
+    The banner is decoration, not a result. Everything decorative shares stderr with
+    the logs so that stdout carries only what a program came for.
+    """
+    sys.stderr.write(colored(BANNER, "cyan", attrs=["bold"]))
+    sys.stderr.write("\n")
+    sys.stderr.flush()
 
 
 # ── Colored formatter ───────────────────────────────────────────────
@@ -69,12 +73,17 @@ _BRANDS = {
 
 
 def _color_enabled() -> bool:
-    """Mirror termcolor's gating: NO_COLOR off, FORCE_COLOR on, else TTY-only."""
+    """Mirror termcolor's gating: NO_COLOR off, FORCE_COLOR on, else TTY-only.
+
+    Gated on **stderr**, because that is where the coloured output goes. Gating on
+    stdout would strip the colour out of an interactive run the moment its result was
+    piped somewhere.
+    """
     if "NO_COLOR" in os.environ:
         return False
     if os.environ.get("FORCE_COLOR"):
         return True
-    return sys.stdout.isatty()
+    return sys.stderr.isatty()
 
 
 def brand(service: str, text: str | None = None) -> str:
@@ -126,7 +135,9 @@ def configure_logging(level: int = logging.DEBUG):
     root = logging.getLogger()
     root.handlers.clear()
 
-    handler = logging.StreamHandler(sys.stdout)
+    # stderr, not stdout: logs are not the result. A run whose stdout is redirected
+    # into a file or piped into a program must yield data and nothing else.
+    handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(ColoredFormatter("%(message)s"))
     handler.setLevel(level)
 

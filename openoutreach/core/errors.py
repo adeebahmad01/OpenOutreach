@@ -36,3 +36,22 @@ class ErrorType:
 
     ONBOARDING_INCOMPLETE = "onboarding_incomplete"
     """Onboarding cannot finish from what is configured, and no TTY is available."""
+
+
+def format_error(error_type: str, message: str) -> str:
+    """The one error line every verb writes: ``error: <type>: <message>``."""
+    return f"error: {error_type}: {message}"
+
+
+class OpenOutreachError(Exception):
+    """A failure with a stable ``type``, rendered as the contract's error line.
+
+    Deliberately **not** a ``CommandError``: Django catches that one and prefixes it
+    with the exception's class name, which would put noise in front of the line an
+    agent parses. ``OpenOutreachCommand`` catches this instead and writes it verbatim.
+    """
+
+    def __init__(self, error_type: str, message: str) -> None:
+        self.error_type = error_type
+        self.message = message
+        super().__init__(format_error(error_type, message))

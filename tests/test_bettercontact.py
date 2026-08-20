@@ -38,19 +38,32 @@ def unkeyed(db):
     return cfg
 
 
-def _response(body, error=None):
+def _response(body, error=None, status_code=200, headers=None):
     resp = MagicMock()
     resp.json.return_value = body
     resp.raise_for_status.side_effect = error
+    resp.status_code = status_code
+    resp.headers = headers or {}
     return resp
 
 
 def _fake_session(post=None, get=None):
-    """A requests.Session stand-in usable as a context manager."""
+    """A requests.Session stand-in usable as a context manager.
+
+    Every call now goes through ``session.request(method, url, …)`` — the one place
+    the status refusals are typed — so the fake dispatches by method and the tests
+    keep mocking the same boundary they always did.
+    """
     session = MagicMock()
     session.__enter__.return_value = session
     session.post = post or MagicMock()
     session.get = get or MagicMock()
+
+    def request(method, url, **kwargs):
+        handler = session.post if method.upper() == "POST" else session.get
+        return handler(url, **kwargs)
+
+    session.request = MagicMock(side_effect=request)
     return session
 
 

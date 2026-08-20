@@ -72,6 +72,31 @@ Docker's `start` script `exec`s `openoutreach rundaemon` (no Xvfb/VNC — there 
 - `reset_data` — wipe pipeline data for a fresh run.
 - `export_leads --campaign NAME` — **the lead export**. One argument; CSV on stdout, redirect for a file. The record lives in `core/export.py`. See *The Lead Export* below.
 
+## The Output Contract (`core/management/base.py`, `core/errors.py`)
+
+What a program depends on, and the reason both exist as one place rather than a habit.
+
+- **stdout is result-only.** Logs, the startup banner, and Django's `migrate` narration all go to
+  **stderr** — `configure_logging` attaches its handler there, `print_banner` writes there, and
+  `rundaemon` passes `stdout=self.stderr` into `call_command("migrate")`. Verified end-to-end: a
+  headless `rundaemon` that cannot start writes **zero bytes** to stdout.
+- **Colour is gated on `stderr.isatty()`**, not stdout, or piping a result would strip the colour out
+  of an interactive run.
+- **An expected failure is one line**: `error: <type>: <message>` on stderr, exit 1, no traceback.
+  `OpenOutreachCommand.run_from_argv` catches `OpenOutreachError` and writes it verbatim; anything
+  else keeps Django's behaviour, because a bug deserves its traceback. `OpenOutreachError` is
+  deliberately **not** a `CommandError` — Django prefixes that with the exception's class name, which
+  would put noise in front of the line an agent parses.
+- **The provider's refusals are three different things**, typed at the HTTP boundary in
+  `bettercontact._request`: 401 → `provider_auth`, 402 → `provider_out_of_credits`, an exhausted 429
+  backoff → `provider_rate_limited`. Everything else stays `provider_unavailable`.
+- **A 429 is backed off, never retried at speed** — their docs warn that a client which keeps firing
+  can get the *account* blocked. The backoff is `urllib3.Retry` mounted on the session
+  (`_RETRY`: 5 attempts, `backoff_factor=5` doubling, `backoff_max=120`, `respect_retry_after_header`,
+  forcelist `(429,)` only). It lives in the transport rather than in our code because urllib3 already
+  implements exactly this, `Retry-After` included; `tenacity` retries on *exceptions*, so using it
+  here would mean raising one just to make it fire.
+
 ## Status (`core/status.py`)
 
 The reader here is as often a program as a person, and a program does not tail a log — it **asks**.

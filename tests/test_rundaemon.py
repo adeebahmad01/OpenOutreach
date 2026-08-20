@@ -41,11 +41,14 @@ def command():
 
 @pytest.mark.django_db
 def test_headless_and_unconfigured_names_the_variables(headless, command):
-    with pytest.raises(SystemExit) as exc:
+    from openoutreach.core.errors import ErrorType, OpenOutreachError
+
+    with pytest.raises(OpenOutreachError) as exc:
         command._ensure_onboarded()
 
-    assert exc.value.code == 1
-    message = command.stderr.getvalue()
+    assert exc.value.error_type == ErrorType.ONBOARDING_INCOMPLETE
+    message = str(exc.value)
+    assert message.startswith("error: onboarding_incomplete: ")
     assert "OPENOUTREACH_PRODUCT_DESCRIPTION" in message
     assert "OPENOUTREACH_BETTERCONTACT_API_KEY" in message
     assert "OPENOUTREACH_ACCEPT_LEGAL_NOTICE" in message

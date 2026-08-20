@@ -146,10 +146,8 @@ def _credits() -> dict:
     try:
         return {"balance": bettercontact.credit_balance(), "error": None}
     except bettercontact.BetterContactUnavailable as exc:
-        message = str(exc)
-        error = ErrorType.PROVIDER_AUTH if "401" in message else ErrorType.PROVIDER_UNAVAILABLE
-        logger.debug("Could not read the credit balance: %s", message)
-        return {"balance": None, "error": error, "detail": message}
+        logger.debug("Could not read the credit balance: %s", exc)
+        return {"balance": None, "error": exc.error_type, "detail": str(exc)}
 
 
 # ── what is blocked, and why ─────────────────────────────────────
@@ -173,6 +171,16 @@ def _blocked(onboarding_state: dict, credits: dict, totals: dict) -> list[dict]:
         blocked.append({
             "type": ErrorType.PROVIDER_AUTH,
             "message": "BetterContact rejected the API key",
+        })
+    elif credits["error"] == ErrorType.PROVIDER_OUT_OF_CREDITS:
+        blocked.append({
+            "type": ErrorType.PROVIDER_OUT_OF_CREDITS,
+            "message": "BetterContact reports the credits are exhausted",
+        })
+    elif credits["error"] == ErrorType.PROVIDER_RATE_LIMITED:
+        blocked.append({
+            "type": ErrorType.PROVIDER_RATE_LIMITED,
+            "message": "BetterContact is rate-limiting this client — the run is backing off",
         })
     elif credits["balance"] == 0 and totals["ranked_for_lookup"]:
         blocked.append({

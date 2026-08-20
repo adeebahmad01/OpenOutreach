@@ -21,7 +21,10 @@ import time
 from dataclasses import dataclass
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
+from openoutreach.core.errors import ErrorType
 from openoutreach.core.logblock import step_line
 
 logger = logging.getLogger(__name__)
@@ -31,6 +34,23 @@ _ACCOUNT_URL = "https://app.bettercontact.rocks/api/v2/account"
 _POLL_INTERVAL_S = 5
 _POLL_TIMEOUT_S = 300
 _HTTP_TIMEOUT_S = 30
+
+# **A 429 is backed off, never retried at speed** — their docs warn that a client which
+# keeps firing through one can get the *account* blocked, which costs the operator far
+# more than the throttled call was worth. urllib3 already does this correctly: waits of
+# 5s, 10s, 20s, 40s (capped at ``backoff_max``), and ``Retry-After`` overrides the
+# schedule whenever the response carries one. Only 429 is retried — a 401 or a 402 is a
+# final answer, and repeating it would just be noise.
+_RATE_LIMIT_ATTEMPTS = 5
+_RETRY = Retry(
+    total=_RATE_LIMIT_ATTEMPTS,
+    status_forcelist=(429,),
+    allowed_methods=frozenset({"GET", "POST"}),
+    backoff_factor=5,
+    backoff_max=120,
+    respect_retry_after_header=True,
+    raise_on_status=True,
+)
 _USABLE_STATUSES = frozenset({"valid", "deliverable", "catch_all_safe"})
 
 # Cloudflare 403s a non-browser User-Agent (error 1010), so spoof a browser.
@@ -42,7 +62,17 @@ _BROWSER_UA = (
 
 class BetterContactUnavailable(Exception):
     """BetterContact could not run — no API key configured, or the service was
-    unreachable. Distinct from a genuine miss (it ran, found no email)."""
+    unreachable. Distinct from a genuine miss (it ran, found no email).
+
+    Carries a stable ``error_type`` from ``core.errors.ErrorType`` so a caller can
+    tell *why* without matching on the message. The default is
+    ``provider_unavailable``; the HTTP layer narrows it to auth, out-of-credits or
+    rate-limited, which are three different things to a reader and to the funnel.
+    """
+
+    def __init__(self, message: str, error_type: str = ErrorType.PROVIDER_UNAVAILABLE) -> None:
+        self.error_type = error_type
+        super().__init__(message)
 
 
 @dataclass(frozen=True)
@@ -115,11 +145,7 @@ def credit_balance() -> int:
     api_key = _require_key()
     with _session(api_key) as session:
         try:
-            resp = session.get(_ACCOUNT_URL, timeout=_HTTP_TIMEOUT_S)
-            if resp.status_code == 401:
-                raise BetterContactUnavailable("BetterContact rejected the API key (401)")
-            resp.raise_for_status()
-            body = resp.json()
+            body = _request(session, "GET", _ACCOUNT_URL).json()
         except (requests.RequestException, TimeoutError) as exc:
             raise BetterContactUnavailable(f"BetterContact unreachable: {exc}") from exc
 
@@ -158,9 +184,7 @@ def poll_once(request_id: str) -> PollOutcome:
     api_key = _require_key()
     with _session(api_key) as session:
         try:
-            resp = session.get(f"{_ENRICH_URL}/{request_id}", timeout=_HTTP_TIMEOUT_S)
-            resp.raise_for_status()
-            body = resp.json()
+            body = _request(session, "GET", f"{_ENRICH_URL}/{request_id}").json()
         except (requests.RequestException, TimeoutError) as exc:
             raise BetterContactUnavailable(f"BetterContact unreachable: {exc}") from exc
 
@@ -225,15 +249,50 @@ def submit_and_poll(api_key: str, url: str, body: dict) -> dict:
 
 
 def _session(api_key: str) -> requests.Session:
+    """A session that backs off on 429 before any of our code sees the response."""
     session = requests.Session()
     session.headers.update({"X-API-Key": api_key, "User-Agent": _BROWSER_UA})
+    adapter = HTTPAdapter(max_retries=_RETRY)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
     return session
 
 
-def _submit(session: requests.Session, url: str, body: dict) -> str:
-    resp = session.post(url, json=body, timeout=_HTTP_TIMEOUT_S)
+# ── one HTTP call, with the answers the provider actually gives ──
+
+
+def _request(session: requests.Session, method: str, url: str, **kwargs) -> requests.Response:
+    """Perform one request, typing the refusals the provider actually gives.
+
+    The 429 backoff itself lives in the session's transport adapter (``_RETRY``), not
+    here — urllib3 already implements exponential backoff that honours ``Retry-After``,
+    and a hand-rolled loop would only be a worse copy of it. What is left for this
+    function is naming the three refusals, because they are three different things to
+    a reader: a bad key, an empty wallet, and *slow down*.
+    """
+    try:
+        resp = session.request(method, url, timeout=_HTTP_TIMEOUT_S, **kwargs)
+    except requests.exceptions.RetryError as exc:
+        # The adapter exhausted its retries — the only status it retries is 429.
+        raise BetterContactUnavailable(
+            f"BetterContact rate-limited this client through "
+            f"{_RATE_LIMIT_ATTEMPTS} backed-off attempts",
+            ErrorType.PROVIDER_RATE_LIMITED,
+        ) from exc
+
+    if resp.status_code == 401:
+        raise BetterContactUnavailable(
+            "BetterContact rejected the API key (401)", ErrorType.PROVIDER_AUTH)
+    if resp.status_code == 402:
+        raise BetterContactUnavailable(
+            "BetterContact credits are exhausted (402)", ErrorType.PROVIDER_OUT_OF_CREDITS)
+
     resp.raise_for_status()
-    payload = resp.json()
+    return resp
+
+
+def _submit(session: requests.Session, url: str, body: dict) -> str:
+    payload = _request(session, "POST", url, json=body).json()
     request_id = payload.get("request_id") or payload.get("id")
     if not request_id:
         raise BetterContactUnavailable("BetterContact returned no request id")
@@ -245,9 +304,7 @@ def _poll(session: requests.Session, url: str, request_id: str) -> dict:
     deadline = time.monotonic() + _POLL_TIMEOUT_S
     attempt = 0
     while True:
-        resp = session.get(f"{url}/{request_id}", timeout=_HTTP_TIMEOUT_S)
-        resp.raise_for_status()
-        body = resp.json()
+        body = _request(session, "GET", f"{url}/{request_id}").json()
         if body.get("status") == "terminated":
             return body
         attempt += 1

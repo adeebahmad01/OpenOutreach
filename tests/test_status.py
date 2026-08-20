@@ -29,11 +29,11 @@ def configured():
 @pytest.fixture
 def balance():
     """Control the provider balance without a network call."""
-    def _set(value=None, error=None):
+    def _set(value=None, error=None, error_type=ErrorType.PROVIDER_UNAVAILABLE):
         if error is not None:
             from openoutreach.enrichment.bettercontact import BetterContactUnavailable
             return patch("openoutreach.enrichment.bettercontact.credit_balance",
-                         side_effect=BetterContactUnavailable(error))
+                         side_effect=BetterContactUnavailable(error, error_type))
         return patch("openoutreach.enrichment.bettercontact.credit_balance", return_value=value)
     return _set
 
@@ -83,7 +83,8 @@ def test_exportable_separates_the_rows_that_carry_an_address(
 
 @pytest.mark.django_db
 def test_a_rejected_key_is_not_a_balance_of_zero(campaign, configured, has_key, balance):
-    with balance(error="BetterContact rejected the API key (401)"):
+    with balance(error="BetterContact rejected the API key (401)",
+                 error_type=ErrorType.PROVIDER_AUTH):
         document = status_module.build_status()
 
     assert document["credits"]["balance"] is None
