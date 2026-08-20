@@ -37,6 +37,9 @@ class ErrorType:
     ONBOARDING_INCOMPLETE = "onboarding_incomplete"
     """Onboarding cannot finish from what is configured, and no TTY is available."""
 
+    NOT_INITIALIZED = "not_initialized"
+    """The database has no schema yet — nothing has run here. Only ``run`` creates it."""
+
 
 def format_error(error_type: str, message: str) -> str:
     """The one error line every verb writes: ``error: <type>: <message>``."""

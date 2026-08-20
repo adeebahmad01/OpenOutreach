@@ -26,11 +26,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from django.conf import settings
-from django.core.management.base import BaseCommand, CommandError
+from django.core.management.base import CommandError
 from django.db import transaction
 
+from openoutreach.core.management.base import OpenOutreachCommand
 
-class Command(BaseCommand):
+
+class Command(OpenOutreachCommand):
     help = "Reset a campaign's discovery walk (and optionally its leads) to start fresh."
 
     def add_arguments(self, parser):

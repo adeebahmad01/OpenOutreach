@@ -6,7 +6,9 @@ import logging
 
 import numpy as np
 
-from openoutreach.core.conf import CAMPAIGN_CONFIG, FASTEMBED_CACHE_DIR
+from django.conf import settings
+
+from openoutreach.core.conf import CAMPAIGN_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -20,9 +22,10 @@ def _get_model():
         from fastembed import TextEmbedding
 
         model_name = CAMPAIGN_CONFIG["embedding_model"]
-        logger.debug("Loading embedding model: %s", model_name)
-        FASTEMBED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        _model = TextEmbedding(model_name=model_name, cache_dir=str(FASTEMBED_CACHE_DIR))
+        cache_dir = settings.FASTEMBED_CACHE_DIR
+        logger.debug("Loading embedding model %s from %s", model_name, cache_dir)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        _model = TextEmbedding(model_name=model_name, cache_dir=str(cache_dir))
     return _model
 
 

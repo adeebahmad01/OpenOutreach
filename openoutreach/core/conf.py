@@ -7,11 +7,7 @@ from pathlib import Path
 # ----------------------------------------------------------------------
 # Paths
 # ----------------------------------------------------------------------
-ROOT_DIR = Path(__file__).parent.parent.parent
-
 PROMPTS_DIR = Path(__file__).parent / "templates" / "prompts"
-
-FASTEMBED_CACHE_DIR = ROOT_DIR / ".cache" / "fastembed"
 
 # ----------------------------------------------------------------------
 # The three send guards used to live here — warm capacity (the per-box daily

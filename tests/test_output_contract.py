@@ -81,6 +81,38 @@ def test_an_unexpected_exception_still_raises():
         Buggy().run_from_argv(["openoutreach", "buggy"])
 
 
+# ── a fresh install is an answer, not a traceback ────────────────
+
+def test_reading_an_unmigrated_database_is_a_typed_error(capsys):
+    """`openoutreach status` before the first run used to raise `no such table`."""
+    class Reader(OpenOutreachCommand):
+        def handle(self, *args, **options):
+            raise AssertionError("the guard should have stopped this")
+
+    with patch("django.db.connection.introspection.table_names", return_value=[]):
+        with pytest.raises(SystemExit) as exc:
+            Reader().run_from_argv(["openoutreach", "reader"])
+
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith(f"error: {ErrorType.NOT_INITIALIZED}: ")
+    assert captured.out == ""
+
+
+def test_the_verb_that_migrates_is_not_guarded(capsys):
+    """`run` creates the schema, so it must be allowed to find none."""
+    class Migrating(OpenOutreachCommand):
+        requires_database = False
+
+        def handle(self, *args, **options):
+            self.stdout.write("ran")
+
+    with patch("django.db.connection.introspection.table_names", return_value=[]):
+        Migrating().run_from_argv(["openoutreach", "migrating"])
+
+    assert capsys.readouterr().out.strip() == "ran"
+
+
 # ── the provider's refusals are three different things ───────────
 
 def _session_answering(status_code, body=None, headers=None):

@@ -12,6 +12,9 @@ logger = logging.getLogger(__name__)
 class Command(OpenOutreachCommand):
     help = "Run the OpenOutreach daemon (onboard, validate, start the cycle)."
 
+    # The verb that migrates. Every other one is entitled to find a schema already there.
+    requires_database = False
+
     def add_arguments(self, parser):
         parser.add_argument(
             "--log-level",

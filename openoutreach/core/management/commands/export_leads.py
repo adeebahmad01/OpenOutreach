@@ -19,12 +19,13 @@ from __future__ import annotations
 
 import sys
 
-from django.core.management.base import BaseCommand, CommandError
+from django.core.management.base import CommandError
 
 from openoutreach.core.export import lead_records, write_csv
+from openoutreach.core.management.base import OpenOutreachCommand
 
 
-class Command(BaseCommand):
+class Command(OpenOutreachCommand):
     help = "Export a campaign's qualified leads as CSV."
 
     def add_arguments(self, parser):

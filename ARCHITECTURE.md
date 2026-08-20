@@ -106,6 +106,13 @@ What a program depends on, and the reason both exist as one place rather than a 
   else keeps Django's behaviour, because a bug deserves its traceback. `OpenOutreachError` is
   deliberately **not** a `CommandError` — Django prefixes that with the exception's class name, which
   would put noise in front of the line an agent parses.
+- **A fresh install is an answer too.** `settings.py` creates the data *directory*, but only `run`
+  migrates, so on a wheel every other verb used to die on a raw `no such table: core_campaign`.
+  `OpenOutreachCommand.requires_database` (default `True`; `run` sets it `False`) checks for the
+  schema in `execute()` — **after** argument parsing, so `--help` still answers — and raises
+  `not_initialized`, naming the database path. Reporting zero campaigns instead would be precisely
+  the empty-result failure `core/errors.py` exists to prevent: nothing was found because nothing has
+  ever run. `reset` and `export_leads` moved onto `OpenOutreachCommand` to inherit it.
 - **The provider's refusals are three different things**, typed at the HTTP boundary in
   `bettercontact._request`: 401 → `provider_auth`, 402 → `provider_out_of_credits`, an exhausted 429
   backoff → `provider_rate_limited`. Everything else stays `provider_unavailable`.
@@ -639,8 +646,20 @@ Paths relative to `openoutreach/`.
 
 **The tool is CLI-first and ships on PyPI**: `uvx openoutreach`, or `pip install openoutreach`. The
 console script is `openoutreach/__main__.py:main`; `manage.py` is a shim over it for a checkout.
-Installed, the CRM lives at `~/.openoutreach/data/db.sqlite3` — a wheel's `ROOT_DIR` is site-packages,
-which is no place for an operator's data. See the `openoutreach-docs` card `p1-e2-cli-entry-points`.
+Everything the install writes hangs off one root — `settings.state_dir()`, the checkout when
+`manage.py` sits beside the package and `~/.openoutreach` otherwise, because a wheel's `ROOT_DIR` is
+site-packages and no operator's data belongs there. Under it: `data/db.sqlite3` and
+`.cache/fastembed`. The model cache is deliberately **not** derived from the database path, so
+`--db /tmp/scratch.sqlite3` does not send fastembed off to re-download 65 MB beside a throwaway DB.
+
+**Measured on a cold machine** (2026-08-20, from a local wheel): `uv` resolves and installs in **30 s**
+into a **550 MB** venv, and the first embedding fetches the ONNX weights in a further **11 s** / 65 MB
+— about **40 s of one-time cost** before any lead work, which is small enough that no pre-warm verb is
+needed. The venv's largest pieces are scipy (81 MB), onnxruntime (61 MB), pandas (45 MB) and Django
+(41 MB); `botocore` + `fastavro` + `pillow` (~45 MB together) arrive only through the
+`pydantic-ai-slim[…,cohere,bedrock]` extras, and are the one obvious lever if that number ever matters.
+
+See the `openoutreach-docs` card `p1-e2-cli-entry-points`.
 
 ## Docker — the server deploy, not the install path
 
