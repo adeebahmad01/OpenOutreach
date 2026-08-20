@@ -27,6 +27,7 @@ from openoutreach.core.logblock import step_line
 logger = logging.getLogger(__name__)
 
 _ENRICH_URL = "https://app.bettercontact.rocks/api/v2/async"
+_ACCOUNT_URL = "https://app.bettercontact.rocks/api/v2/account"
 _POLL_INTERVAL_S = 5
 _POLL_TIMEOUT_S = 300
 _HTTP_TIMEOUT_S = 30
@@ -100,6 +101,32 @@ def is_configured() -> bool:
     from openoutreach.core.models import SiteConfig
 
     return bool(SiteConfig.load().bettercontact_api_key)
+
+
+def credit_balance() -> int:
+    """Credits left on the operator's BetterContact account.
+
+    The balance is **readable**, which is what lets the run warn before a lead fails
+    rather than after a 402: ``GET /account`` → ``credits_left``, counted across the
+    whole organisation. Raises ``BetterContactUnavailable`` with a 401 spelled out,
+    since an invalid key and an unreachable service need different answers from a
+    reader.
+    """
+    api_key = _require_key()
+    with _session(api_key) as session:
+        try:
+            resp = session.get(_ACCOUNT_URL, timeout=_HTTP_TIMEOUT_S)
+            if resp.status_code == 401:
+                raise BetterContactUnavailable("BetterContact rejected the API key (401)")
+            resp.raise_for_status()
+            body = resp.json()
+        except (requests.RequestException, TimeoutError) as exc:
+            raise BetterContactUnavailable(f"BetterContact unreachable: {exc}") from exc
+
+    credits = body.get("credits_left")
+    if not isinstance(credits, int):
+        raise BetterContactUnavailable(f"BetterContact returned no credit count: {body!r}")
+    return credits
 
 
 def submit(query: BetterContactQuery) -> str:

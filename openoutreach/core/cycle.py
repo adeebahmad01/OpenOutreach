@@ -291,8 +291,11 @@ def _buy_addresses(campaign) -> bool:
 
     # The only gate left on the one paid step: is there a provider to pay. What
     # bounds the spend is the operator's own prepaid credit balance, which the
-    # provider enforces and we cannot see — see ``_top_up`` for why nothing here
-    # rations it on our side.
+    # provider enforces — see ``_top_up`` for why nothing here rations it on our
+    # side. The balance is **readable** (``bettercontact.credit_balance``), which is
+    # how ``status`` reports it and how the run can warn before a lead fails rather
+    # than after a 402; it is deliberately not consulted here, because one extra
+    # request per purchase would buy nothing the provider's own answer does not say.
     if not bettercontact.is_configured():
         return False
     deal = _due(campaign, DealState.READY_TO_FIND_EMAIL).filter(

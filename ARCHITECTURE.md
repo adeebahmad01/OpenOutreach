@@ -47,27 +47,61 @@ upgradeable — see *Migrations* below.
 
 ## Entry Flow
 
-`manage.py` — stock Django management entrypoint. Bare `python manage.py` (no subcommand, or a
-leading flag) defaults to `rundaemon`. A global `--db PATH` (or `--db=PATH`) is stripped from argv
-before Django parses it and exported as `OPENOUTREACH_DB`, which `settings.py` reads for the SQLite
-file (default `data/db.sqlite3`); the parent directory is created if missing.
+`openoutreach/__main__.py:main` — the `openoutreach` console script, and the entry point
+(`manage.py` is a shim over it for a checkout). A bare invocation (no subcommand, or a leading flag)
+defaults to `rundaemon`. A global `--db PATH` (or `--db=PATH`) is stripped from argv before Django
+parses it and exported as `OPENOUTREACH_DB`, which `settings.py` reads for the SQLite file (default
+`~/.openoutreach/data/db.sqlite3` installed, `data/db.sqlite3` in a checkout); the parent directory
+is created if missing.
 
 ### `rundaemon` management command (`management/commands/rundaemon.py`)
 
 Startup sequence:
 1. **Configure logging** — level from `--verbosity`, banner, noisy third-party loggers silenced (`core/logging.py`).
 2. **Ensure DB** — `migrate --no-input` (the custom migrate; see below) + `setup_crm` (idempotent).
-3. **Onboard** — if `missing_keys()` is non-empty: interactive wizard on a TTY, else print what's missing and exit (no TTY, no silent partial start).
+3. **Onboard** — if `missing_keys()` is non-empty: `hydrate_from_env()` first, then the interactive wizard on a TTY, else exit **naming the variables** that would have satisfied it (no TTY, no silent partial start). See *The environment path* below.
 4. **Validate the operator** — `llm_api_key` set, an active operator `User` exists, at least one campaign. All three exit loudly rather than starting a daemon that cannot do anything.
 5. **Run** — `run_daemon()` (`core/cycle.py`). No session object is built: the campaign rides on the deal and the operator is looked up (`core/operator.py`).
 
-Docker's `start` script `exec`s `python manage.py rundaemon` (no Xvfb/VNC — there is no browser).
+Docker's `start` script `exec`s `openoutreach rundaemon` (no Xvfb/VNC — there is no browser).
 
 ### Other management commands
 
+- `status` — **what the daemon would say if you asked it.** Human summary by default, `--json` for a program. See *Status* below.
 - `setup_crm` — idempotent CRM bootstrap (default Site).
 - `reset_data` — wipe pipeline data for a fresh run.
 - `export_leads --campaign NAME` — **the lead export**. One argument; CSV on stdout, redirect for a file. The record lives in `core/export.py`. See *The Lead Export* below.
+
+## Status (`core/status.py`)
+
+The reader here is as often a program as a person, and a program does not tail a log — it **asks**.
+`build_status()` assembles one dict and reads nothing else; the command renders it. It is safe
+against a live daemon: SQLite runs in WAL, so the read never waits on the daemon's writes (verified
+against a held `BEGIN IMMEDIATE`).
+
+| key | what it carries |
+|:----|:----------------|
+| `onboarding` | `complete`, the satisfied steps, and per-step the variables that would satisfy the rest |
+| `campaigns` / `totals` | the pipeline counts, per campaign and summed |
+| `credits` | `balance` + `error` — `GET /api/v2/account` → `credits_left` |
+| `blocked` | what stands between now and more qualified rows, typed from `core/errors.py` |
+| `export` | the command that writes the CSV (`path` is `null` until the default-output card lands) |
+| `next_action` | the one thing to do next, with what it unlocks, how many leads, and the URL |
+
+Three decisions inside it:
+
+- **A balance that could not be read is not a balance of zero.** `no_credential`,
+  `provider_auth` and `provider_unavailable` are reported as *why*, because a rejected key must
+  never render like a run that has simply found nothing yet.
+- **`exportable` is not `mailable`.** The export excludes only the two rejections, so a `QUALIFIED`
+  lead exports with a blank `email` column — an address is an enrichment on top, never a
+  precondition. The counts therefore split `exportable_with_email` / `exportable_without_email`, and
+  they are counted **from the records** rather than from `RESOLVED` standing in for them.
+- **`next_action` is ordered by what blocks progress**, so `add_credits` sits above `export_leads`:
+  a ranked lead cannot advance without credits, while the export is available at any time. This does
+  not break the *never before value* rule — `ranked_for_lookup > 0` is itself the proof that
+  qualified leads with written reasons exist, and a run that has qualified nobody reaches `wait` and
+  is asked for nothing.
 
 ## Onboarding (`core/onboarding.py`)
 

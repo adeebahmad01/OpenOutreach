@@ -47,7 +47,14 @@ Searching the licensed source is free, so the system can afford to look at a lot
 The deliverable is a file, and it is shaped for the tools you already send with:
 
 ```bash
-python manage.py export_leads --campaign "My Campaign" > leads.csv
+openoutreach export_leads --campaign "My Campaign" > leads.csv
+```
+
+Want to know where it's up to without reading logs? Ask it:
+
+```bash
+openoutreach status            # human summary
+openoutreach status --json     # the same thing, for a script or an agent
 ```
 
 ```
@@ -176,8 +183,11 @@ Browse Leads, Companies and Deals — every qualification decision, with its rea
 ### 4. Export
 
 ```bash
-python manage.py export_leads --campaign "My Campaign" > leads.csv
+openoutreach export_leads --campaign "My Campaign" > leads.csv
 ```
+
+A row exports as soon as the qualifier accepts it — an email address is an enrichment on top, never a
+precondition — so a CSV can carry rows with a blank `email`. `openoutreach status` counts both.
 
 ---
 ## ✨ Features
