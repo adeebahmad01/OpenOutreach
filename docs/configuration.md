@@ -2,6 +2,29 @@
 
 Configuration lives in two places: the **`SiteConfig`** DB singleton and per-campaign **`Campaign`** rows (both managed via interactive onboarding or Django Admin), plus a few hardcoded defaults in **`core/conf.py`**. There are no social-network credentials — OpenOutreach is browserless and uses no such account.
 
+## Configure without a terminal
+
+Every onboarding field is also an environment variable, so an install with no TTY (an agent, a
+container, CI) never needs the wizard. Set these and run `openoutreach`:
+
+| Variable | Step | Notes |
+|:---------|:-----|:------|
+| `OPENOUTREACH_PRODUCT_DESCRIPTION` | campaign | what it does, who it's for, the problem it solves |
+| `OPENOUTREACH_CAMPAIGN_TARGET` | campaign | who you're going after and the outcome you want |
+| `OPENOUTREACH_CAMPAIGN_NAME` | campaign | optional — defaults to "Email Outreach" |
+| `OPENOUTREACH_AI_MODEL` | llm | `provider:model`, e.g. `anthropic:claude-sonnet-4-5-20250929` |
+| `OPENOUTREACH_LLM_API_KEY` | llm | live-verified at boot; a bad key stops the run |
+| `OPENOUTREACH_LLM_API_BASE` | llm | required for `openai_compatible:*`, ignored otherwise |
+| `OPENOUTREACH_BETTERCONTACT_API_KEY` | bettercontact | powers discovery (free) and enrichment (paid) |
+| `OPENOUTREACH_OPERATOR_EMAIL` | account | your own inbox — contacts key and newsletter target |
+| `OPENOUTREACH_COUNTRY` | account | ISO 3166 alpha-2, e.g. `US` |
+| `OPENOUTREACH_ACCEPT_LEGAL_NOTICE` | account | must be `true` — records that you accept the [Legal Notice](../LEGAL_NOTICE.md) |
+| `OPENOUTREACH_NEWSLETTER` | account | optional, **defaults off** — set `true` to subscribe |
+
+A step takes effect only when *all* of its variables are set; anything left over goes to the wizard on
+a terminal, or exits listing exactly what is missing. `OPENOUTREACH_DB` (or `--db PATH`) points any
+command at a different SQLite file.
+
 ## Operator / LLM / keys (`SiteConfig` singleton, pk=1)
 
 Set during onboarding, editable in Django Admin. `SiteConfig` is the single source of truth for keys and the one persisted operator setting (country).

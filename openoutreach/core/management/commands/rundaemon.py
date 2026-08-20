@@ -48,22 +48,39 @@ class Command(BaseCommand):
         setup_crm()
 
     def _ensure_onboarded(self):
-        from openoutreach.core.onboarding import missing_keys, onboard_interactive
+        """Environment first, wizard only if a human is there to answer.
 
-        missing = missing_keys()
-        if not missing:
+        The order is the point: an agent-driven install has no TTY, so the
+        non-interactive path is the main path. What the environment cannot satisfy
+        goes to the wizard on a TTY, or exits **naming the variables** that would
+        have satisfied it — never a bare "onboarding incomplete".
+        """
+        from openoutreach.core import onboarding
+
+        if not onboarding.missing_keys():
+            return
+
+        filled = onboarding.hydrate_from_env()
+        if filled:
+            logger.info("Configured from the environment: %s.", ", ".join(sorted(filled)))
+        if not onboarding.missing_keys():
             return
 
         if sys.stdin.isatty():
-            onboard_interactive()
-        else:
-            self.stderr.write(
-                f"Onboarding incomplete and no TTY available.\n"
-                f"Missing: {', '.join(sorted(missing))}\n"
-                f"Run with an interactive terminal to complete onboarding "
-                f"(a mailbox and a BetterContact key must be connected)."
-            )
-            sys.exit(1)
+            onboarding.onboard_interactive()
+            return
+
+        self.stderr.write(
+            "error: onboarding_incomplete: no TTY, and the environment does not "
+            "carry everything.\nSet these and run again:\n"
+            f"{onboarding.env_help()}\n"
+            "Optional: "
+            f"{onboarding.ENV_PREFIX}CAMPAIGN_NAME, {onboarding.ENV_PREFIX}LLM_API_BASE "
+            f"(required for openai_compatible:*), {onboarding.ENV_PREFIX}NEWSLETTER.\n"
+            f"{onboarding.ENV_PREFIX}ACCEPT_LEGAL_NOTICE must be set to 'true' — it "
+            f"records that you accept {onboarding.LEGAL_NOTICE_URL}."
+        )
+        sys.exit(1)
 
     def _validate_operator(self):
         """Fail loudly on the three things the cycle cannot run without."""

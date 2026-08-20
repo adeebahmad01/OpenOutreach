@@ -40,7 +40,8 @@ connect an inbox, and accept a sending liability, before it had shown them a lea
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, TypeVar
 
@@ -65,11 +66,19 @@ _INTRO = """
 """
 
 # The canonical Legal Notice — the single source of truth for how OpenOutreach
-# behaves toward the operator's mailbox and the people it contacts. LEGAL_NOTICE.md
-# lives at the repo root and ships in the image (COPY . ${APP_HOME}); onboarding
-# reads §4/§6 from it at runtime rather than paraphrasing, so the two can't drift.
+# behaves toward the operator's mailbox and the people it contacts. Onboarding reads
+# §4/§6 from it at runtime rather than paraphrasing, so the two can't drift.
+#
+# Two locations, one file: in a checkout it is at the repo root, and the wheel
+# force-includes that same file *inside* the package (see pyproject.toml), because
+# from site-packages there is no repo root to walk up to. Installed, the first path
+# below is the real one; the second is the checkout.
 LEGAL_NOTICE_URL = "https://github.com/eracle/OpenOutreach/blob/main/LEGAL_NOTICE.md"
-LEGAL_NOTICE_PATH = Path(__file__).resolve().parents[2] / "LEGAL_NOTICE.md"
+_PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+LEGAL_NOTICE_PATH = next(
+    (p for p in (_PACKAGE_ROOT / "LEGAL_NOTICE.md", _PACKAGE_ROOT.parent / "LEGAL_NOTICE.md") if p.exists()),
+    _PACKAGE_ROOT / "LEGAL_NOTICE.md",
+)
 
 # The funding/contacts behaviours the operator most needs to see before accepting.
 _INFORMATION_NOTICE_SECTIONS = (4, 6)
@@ -147,16 +156,76 @@ def _say(message: str, style: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# The environment — the second way in, and the only one an agent has
+# ---------------------------------------------------------------------------
+#
+# An agent-driven install has no TTY, so this is the main path, not a fallback.
+# Every field the wizard asks for is settable here; a step hydrates only when it
+# has *all* of its own fields, because a half-filled step would persist state the
+# wizard would then have to reconcile.
+
+ENV_PREFIX = "OPENOUTREACH_"
+
+_TRUE = {"1", "true", "yes", "on"}
+_FALSE = {"0", "false", "no", "off"}
+
+
+class OnboardingEnvError(SystemExit):
+    """Raised when a variable is set but unusable — never silently ignored.
+
+    A bad value is a different thing from an absent one: absent means *ask*, bad
+    means *stop and say so*. Falling through to "missing" would print a variable
+    the operator has already set.
+    """
+
+    def __init__(self, name: str, problem: str) -> None:
+        super().__init__(f"error: bad_config: {ENV_PREFIX}{name}: {problem}")
+
+
+def _env(name: str) -> str:
+    """Read one onboarding variable, stripped. Absent and blank are the same thing."""
+    return os.environ.get(ENV_PREFIX + name, "").strip()
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Read a boolean variable, rejecting anything that is not plainly yes or no."""
+    raw = _env(name).lower()
+    if not raw:
+        return default
+    if raw in _TRUE:
+        return True
+    if raw in _FALSE:
+        return False
+    raise OnboardingEnvError(name, f"expected one of {sorted(_TRUE | _FALSE)}, got {raw!r}")
+
+
+def _env_validated(name: str, value: str, validate: Callable[[str], bool | str]) -> str:
+    """Apply a wizard validator to an environment value, raising on rejection."""
+    verdict = validate(value)
+    if verdict is not True:
+        raise OnboardingEnvError(name, str(verdict))
+    return value
+
+
+# ---------------------------------------------------------------------------
 # Step registry
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class Step:
-    """One onboarding step: a name, a done-check, and a runner."""
+    """One onboarding step: a name, a done-check, a runner, and an environment path.
+
+    ``from_env`` is the third capability, and the reason a step stays the one place
+    that knows its own fields: it reads the variables it owns, persists them if they
+    are all there, and returns whether it did. ``env_keys`` is what an incomplete
+    headless run prints — the variables that would have satisfied this step.
+    """
 
     key: str
     is_done: Callable[[], bool]
     run: Callable[[], None]
+    from_env: Callable[[], bool] = lambda: False
+    env_keys: tuple[str, ...] = field(default=())
 
 
 # ── Campaign: what you sell, and to whom ─────────────────────────
@@ -188,6 +257,23 @@ def _run_campaign() -> None:
         )),
     )
     logger.info("Campaign '%s' created.", DEFAULT_CAMPAIGN_NAME)
+
+
+def _campaign_from_env() -> bool:
+    from openoutreach.core.models import Campaign
+
+    product = _env("PRODUCT_DESCRIPTION")
+    target = _env("CAMPAIGN_TARGET")
+    if not (product and target):
+        return False
+
+    Campaign.objects.create(
+        name=_env("CAMPAIGN_NAME") or DEFAULT_CAMPAIGN_NAME,
+        product_docs=product,
+        campaign_target=target,
+    )
+    logger.info("Campaign created from the environment.")
+    return True
 
 
 # ── LLM: the agent's brain (live-verified) ───────────────────────
@@ -231,6 +317,29 @@ def _run_llm() -> None:
             _say("  ✓ LLM credentials OK.", "fg:green")
             return
         _say(f"  ✗ {error}", "fg:red")
+
+
+def _llm_from_env() -> bool:
+    """Hydrate the LLM step, verifying the credentials exactly as the wizard does.
+
+    An unverified key is worse headless than interactively: there is nobody to
+    re-ask, and the daemon would fail later inside a qualification instead of at
+    boot, where the message is readable.
+    """
+    from openoutreach.core.llm import verify_llm_credentials
+
+    model, key = _env("AI_MODEL"), _env("LLM_API_KEY")
+    base = _env("LLM_API_BASE")
+    if not (model and key):
+        return False
+    if model.startswith("openai_compatible:") and not base:
+        raise OnboardingEnvError("LLM_API_BASE", "required for an openai_compatible:* model")
+
+    error = verify_llm_credentials(model, key, base)
+    if error is not None:
+        raise OnboardingEnvError("LLM_API_KEY", error)
+    _save_llm(model, key, base)
+    return True
 
 
 def _save_llm(model: str, key: str, base: str) -> None:
@@ -279,6 +388,20 @@ def _run_bettercontact() -> None:
     _say("  ✓ BetterContact key saved.", "fg:green")
 
 
+def _bettercontact_from_env() -> bool:
+    from openoutreach.core.models import SiteConfig
+
+    key = _env("BETTERCONTACT_API_KEY")
+    if not key:
+        return False
+
+    cfg = SiteConfig.load()
+    cfg.bettercontact_api_key = key
+    cfg.save()
+    logger.info("BetterContact key set from the environment.")
+    return True
+
+
 # ── Account: country + newsletter + information notice + legal, then the operator User ─
 
 def _account_done() -> bool:
@@ -324,6 +447,25 @@ def _run_account() -> None:
     _show_information_notice()
     _require_legal()
     _finalize_account(operator_email, country, newsletter)
+
+
+def _account_from_env() -> bool:
+    """Hydrate the account step, including the Legal Notice acceptance.
+
+    **Acceptance is never inferred.** The variable has to say yes; absent leaves the
+    step unsatisfied, so a headless run stops and names it rather than proceeding on
+    a notice nobody agreed to. Newsletter defaults to off everywhere here — the
+    wizard's jurisdiction-aware default is a *suggestion to a human*, and silence in
+    a config file is not consent anywhere.
+    """
+    email, country = _env("OPERATOR_EMAIL"), _env("COUNTRY")
+    if not (email and country and _env_bool("ACCEPT_LEGAL_NOTICE")):
+        return False
+
+    _env_validated("OPERATOR_EMAIL", email, _looks_like_email)
+    _env_validated("COUNTRY", country, _looks_like_country)
+    _finalize_account(email, country.lower(), _env_bool("NEWSLETTER"))
+    return True
 
 
 def _looks_like_country(value: str) -> bool | str:
@@ -412,16 +554,56 @@ def _create_operator(campaign, email: str):
 # ---------------------------------------------------------------------------
 
 STEPS: list[Step] = [
-    Step("campaign", _campaign_done, _run_campaign),
-    Step("llm", _llm_done, _run_llm),
-    Step("bettercontact", _bettercontact_done, _run_bettercontact),
-    Step("account", _account_done, _run_account),
+    Step(
+        "campaign", _campaign_done, _run_campaign, _campaign_from_env,
+        ("PRODUCT_DESCRIPTION", "CAMPAIGN_TARGET"),
+    ),
+    Step(
+        "llm", _llm_done, _run_llm, _llm_from_env,
+        ("AI_MODEL", "LLM_API_KEY"),
+    ),
+    Step(
+        "bettercontact", _bettercontact_done, _run_bettercontact, _bettercontact_from_env,
+        ("BETTERCONTACT_API_KEY",),
+    ),
+    Step(
+        "account", _account_done, _run_account, _account_from_env,
+        ("OPERATOR_EMAIL", "COUNTRY", "ACCEPT_LEGAL_NOTICE"),
+    ),
 ]
 
 
 def missing_keys() -> set[str]:
     """Return the keys of steps that still need attention (empty ⇒ fully onboarded)."""
     return {step.key for step in STEPS if not step.is_done()}
+
+
+def hydrate_from_env() -> set[str]:
+    """Satisfy every unsatisfied step the environment can, returning the keys filled.
+
+    Runs in step order so a later step can rely on an earlier one's rows (the account
+    step attaches the operator to the campaign). A step that cannot be filled is left
+    alone; a step whose variables are set but *wrong* raises rather than being skipped.
+    """
+    filled = set()
+    for step in STEPS:
+        if not step.is_done() and step.from_env():
+            filled.add(step.key)
+    return filled
+
+
+def missing_env_keys() -> dict[str, tuple[str, ...]]:
+    """Map each still-unsatisfied step to the variables that would satisfy it."""
+    return {step.key: step.env_keys for step in STEPS if not step.is_done()}
+
+
+def env_help() -> str:
+    """Render the unsatisfied steps as the variables to set — the headless exit text."""
+    lines = [
+        f"  {key}: {', '.join(ENV_PREFIX + name for name in names)}"
+        for key, names in missing_env_keys().items()
+    ]
+    return "\n".join(lines)
 
 
 def onboard_interactive() -> None:

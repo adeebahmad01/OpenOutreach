@@ -76,5 +76,10 @@ Issues = "https://github.com/eracle/OpenOutreach/issues"
 [tool.hatch.build.targets.wheel]
 packages = ["openoutreach"]
 
+# Onboarding reads §4/§6 of the notice verbatim at runtime. From site-packages there
+# is no repo root, so the file ships inside the package instead.
+[tool.hatch.build.targets.wheel.force-include]
+"LEGAL_NOTICE.md" = "openoutreach/LEGAL_NOTICE.md"
+
 [tool.hatch.build.targets.sdist]
 include = ["openoutreach", "README.md", "LICENCE.md", "pyproject.toml"]

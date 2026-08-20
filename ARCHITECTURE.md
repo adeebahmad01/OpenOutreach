@@ -71,9 +71,10 @@ Docker's `start` script `exec`s `python manage.py rundaemon` (no Xvfb/VNC — th
 
 ## Onboarding (`core/onboarding.py`)
 
-Built as an **ordered list of idempotent steps** (`STEPS`). Each `Step` is a
-`(key, is_done, run)` triple: `is_done()` reads the DB (never prompts), `run()` collects what's
-missing and **persists it the moment it succeeds**. `onboard_interactive()` runs only the steps
+Built as an **ordered list of idempotent steps** (`STEPS`). Each `Step` is
+`(key, is_done, run, from_env, env_keys)`: `is_done()` reads the DB (never prompts), `run()` collects
+what's missing and **persists it the moment it succeeds**, and `from_env()` does the same from the
+environment — the third capability, so a step stays the one place that knows its own fields. `onboard_interactive()` runs only the steps
 whose `is_done()` is false, in order — so a partial onboarding resumes exactly where it stopped and
 a satisfied step is never revisited. There is no end-of-wizard `apply()` that could half-fail; each
 step is its own commit point.
@@ -91,6 +92,31 @@ is most of the install path, and the cost was never the typing: behind the mailb
 `LEGAL_NOTICE.md` §4, which told a prospective operator that the tool would send the maintainer's
 promotional campaign from their own mailbox. A lead finder was asking someone to accept a sending
 liability before showing them a lead.
+
+### The environment path (`hydrate_from_env`)
+
+An agent-driven install has no TTY, so **this is the main path, not a fallback**. `rundaemon` boots
+`hydrate_from_env()` → re-check `missing_keys()` → wizard **on a TTY**, or exit **naming the variables
+that would have satisfied it**. Every field is an `OPENOUTREACH_*` variable:
+
+```
+campaign        OPENOUTREACH_PRODUCT_DESCRIPTION, OPENOUTREACH_CAMPAIGN_TARGET  (+ CAMPAIGN_NAME)
+llm             OPENOUTREACH_AI_MODEL, OPENOUTREACH_LLM_API_KEY  (+ LLM_API_BASE, required for openai_compatible:*)
+bettercontact   OPENOUTREACH_BETTERCONTACT_API_KEY
+account         OPENOUTREACH_OPERATOR_EMAIL, OPENOUTREACH_COUNTRY, OPENOUTREACH_ACCEPT_LEGAL_NOTICE  (+ NEWSLETTER)
+```
+
+Four rules, each answering a way this could go quietly wrong:
+
+- **All or nothing per step.** A step with only some of its fields set does not hydrate, because a
+  half-applied step would leave state the wizard then has to reconcile.
+- **A bad value stops; an absent one asks.** `OnboardingEnvError` (a `SystemExit`) carries
+  `error: bad_config: <VAR>: <problem>` — falling through to "missing" would print a variable the
+  operator has already set.
+- **Legal acceptance is never inferred**, and `NEWSLETTER` defaults **off everywhere** — the wizard's
+  jurisdiction-aware default is a suggestion to a human; silence in a config file is not consent.
+- **The LLM key is still live-verified.** Headless there is nobody to re-ask, so a bad key must fail at
+  boot, where the message is readable, not mid-qualification.
 
 - Cancellation is a **single exception**: prompts return `None` on Ctrl+C, and `_required()` turns that into `OnboardingCancelled` at one boundary.
 - A failed step re-asks **its own** fields (LLM retries re-verify) — it never rewinds to an earlier step or restarts the wizard. This is what fixed the "onboarding keeps looping back" bug.
