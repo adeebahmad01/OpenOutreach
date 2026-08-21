@@ -2,7 +2,9 @@
 
 # OpenOutreach — open-source AI agent for B2B lead generation
 
-> **Describe your product, and it finds the people who fit and explains why each one does, then exports a CSV your cold-email tool can send. Self-hosted CLI.**
+> **Describe your product. Define your target market. The AI finds the people who fit — and tells you why each one does.**
+>
+> Self-hosted CLI. The output is a CSV your cold-email tool can send.
 
 <div align="center">
 
