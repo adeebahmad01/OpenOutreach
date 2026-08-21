@@ -67,18 +67,28 @@ def format_failure(exc: OpenOutreachError, *, as_json: bool) -> str:
 
 
 def require_initialized_database() -> None:
-    """Refuse to read a database that has never been migrated.
+    """Refuse to read a database that is missing or behind on migrations.
 
     Answering with zero campaigns instead would be the empty-result failure the error
-    vocabulary exists to prevent: nothing was found because nothing has ever run.
+    vocabulary exists to prevent: nothing was found because nothing has ever run. A
+    schema that exists but is behind (a ``.venv``/checkout refreshed against a DB file
+    from before some migration) hits the same class of failure — a raw
+    ``OperationalError: no such column`` — so it gets the same gentle message rather
+    than a traceback.
     """
     from django.conf import settings
     from django.db import connection
+    from django.db.migrations.executor import MigrationExecutor
 
-    if "core_campaign" in connection.introspection.table_names():
-        return
+    if "core_campaign" not in connection.introspection.table_names():
+        raise OpenOutreachError(
+            ErrorType.NOT_INITIALIZED,
+            f"no pipeline yet at {settings.DATABASE_PATH} — run `openoutreach init` to create it",
+        )
 
-    raise OpenOutreachError(
-        ErrorType.NOT_INITIALIZED,
-        f"no pipeline yet at {settings.DATABASE_PATH} — run `openoutreach init` to create it",
-    )
+    executor = MigrationExecutor(connection)
+    if executor.migration_plan(executor.loader.graph.leaf_nodes()):
+        raise OpenOutreachError(
+            ErrorType.NOT_INITIALIZED,
+            f"{settings.DATABASE_PATH} is behind on migrations — run `openoutreach find 0` to bring it current",
+        )
