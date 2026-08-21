@@ -71,8 +71,13 @@ def buy_address(deal) -> DealState | None:
 def _submit(deal) -> DealState | None:
     """Fire the paid provider job and park the deal on its handle.
 
-    A couldn't-submit (no key, API down) leaves the deal where it is: no credit was
-    spent and no handle exists to poll, so the next cycle simply tries again.
+    A couldn't-submit (no key, API down) leaves the deal in `READY_TO_FIND_EMAIL` — no
+    credit was spent and there is no handle to poll — but **backs it off first**. Without
+    that the row is still due on the very next pass, so the same deal is re-picked
+    immediately and forever: noise every few seconds under the old daemon, and a job that
+    never returns now that a bounded run stops only when nothing can advance. Writing
+    ``not_before`` is the architecture's one waiting mechanism, and an unreachable
+    provider is exactly the case it exists for.
 
     **Only the profile URL is sent.** The provider accepts name and company too and
     resolves better with them, but the lookup is deliberately minimal: the less of a
@@ -89,6 +94,7 @@ def _submit(deal) -> DealState | None:
     if not bettercontact.is_configured():
         logger.info("%s", step_line(
             "bettercontact", "finder unconfigured — left queued", glyph="⚠", color="yellow"))
+        _back_off(deal, advance=True)
         return None
 
     try:
@@ -98,6 +104,7 @@ def _submit(deal) -> DealState | None:
         logger.info("%s", step_line(
             "bettercontact", f"submit unavailable ({exc}) — left queued",
             glyph="⚠", color="yellow"))
+        _back_off(deal, advance=True)
         return None
 
     deal.lookup_request_id = request_id

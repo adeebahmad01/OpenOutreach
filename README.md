@@ -44,14 +44,19 @@ Searching the licensed source is free, so the system can afford to look at a lot
 
 ## 📤 What You Get Out
 
-The deliverable is a file, and it is shaped for the tools you already send with. There is no
-command to run — the daemon writes one CSV per campaign as leads qualify:
+The deliverable is a file, and it is shaped for the tools you already send with. You ask for an
+amount, and you get it back:
 
-```
-~/.openoutreach/data/leads/my-campaign.csv
+```bash
+openoutreach find 10 emails > leads.csv
 ```
 
-Want to know where it's up to without reading logs? Ask it:
+It runs until it has ten more leads carrying an address, prints **the whole campaign** as CSV, and
+exits — so the file you just wrote is always the current truth, and there is nothing to poll and
+nothing to supervise. Exit 0 means it got what you asked for; anything short still prints its rows
+and says why it stopped.
+
+Want to know where things stand without running a job? Ask it:
 
 ```bash
 openoutreach status            # human summary
@@ -95,7 +100,7 @@ What that means for you, concretely:
 - 🛡️ **Zero platform-ToS surface** — browserless, no social-network account, no scraping — nothing to get banned
 - 💸 **Pay only for what resolves** — searching is free; a paid lookup is rationed and billed on a verified hit
 - 📤 **Exports where you already work** — CSV in the shape the sequencer importers expect
-- ⚡ **One-command setup** — `uvx openoutreach`, interactive onboarding, no container required
+- ⚡ **One-command setup** — `uvx openoutreach find 10`, interactive onboarding, no container required
 
 Every comparable tool that qualifies leads for you is paid SaaS. This one is GPLv3, runs on your machine, and you bring your own provider keys.
 
@@ -126,16 +131,27 @@ The BetterContact link above is an **affiliate link** — signing up through it 
 ## ⚡ Quick Start
 
 ```bash
-uvx openoutreach
+uvx openoutreach find 10
 ```
 
 or, if you would rather install it:
 
 ```bash
-pip install openoutreach && openoutreach
+pip install openoutreach && openoutreach find 10
 ```
 
-The interactive onboarding walks you through the inputs above on first run — product/objective → LLM key (live-verified) → BetterContact key → your email → country → newsletter/legal. Four steps. Everything lives in `~/.openoutreach/data`, so stopping and starting loses nothing. No browser, no daemon manager, no container.
+The interactive onboarding walks you through the inputs above on first run — product/objective → LLM key (live-verified) → BetterContact key → your email → country → newsletter/legal. Four steps. Everything lives in `~/.openoutreach/data`, so stopping and starting loses nothing: the number you ask for is *more than you already have*, so running it again continues where it left off. No browser, no daemon manager, no container.
+
+**The three verbs:**
+
+```bash
+openoutreach find 10             # ten more qualified leads (free)
+openoutreach find 10 emails      # ten more with a work email (one credit each)
+openoutreach find 0              # no work — just print what the campaign already has
+openoutreach find 1 --open       # ...and open each new profile in your browser as it lands
+openoutreach status              # what is configured, blocked and counted
+openoutreach reset --campaign X  # start a campaign's search over
+```
 
 Running it on a server instead? A Docker image is published to GitHub Container Registry for exactly that — see the **[Docker Guide](./docs/docker.md)**.
 
@@ -159,12 +175,12 @@ cd OpenOutreach
 make setup
 ```
 
-### 2. Run the Daemon
+### 2. Find Some Leads
 
 ```bash
-make run
+make find N=10          # or: python manage.py find 10 emails
 ```
-The interactive onboarding prompts for your LLM key, BetterContact key, and campaign details on first run. Fully resumable — stop/restart anytime without losing progress.
+The interactive onboarding prompts for your LLM key, BetterContact key, and campaign details on first run. Fully resumable — the goal is *more than you have*, so stopping and running it again continues rather than restarting.
 
 ### 3. Read the Verdicts (CRM Admin)
 
@@ -205,13 +221,14 @@ precondition — so a CSV can carry rows with a blank `email`. `openoutreach sta
 | 📤 **Export That Just Imports**    | CSV in the exact column names Instantly and Smartlead expect, so a file imports without column mapping. One record schema, one translation layer, no privileged path for our own sender. |
 | 💾 **Built-in CRM**               | Django Admin — browse Leads, Companies and Deals, and read every verdict. Everything is local and everything exports. |
 | 🔄 **Stateful Pipeline**          | Tracks deal states in a local DB — fully resumable, nothing scheduled in advance, no queue table.                   |
-| ⚡ **One-Command Install**          | `uvx openoutreach` — a Python CLI with interactive onboarding, no browser and no container. A Docker image exists for running it on a server. |
+| ⚡ **One-Command Install**          | `uvx openoutreach find 10` — a Python CLI with interactive onboarding, no browser and no container. A Docker image exists for running it on a server. |
+| 🤖 **Built For Agents**            | One bounded call: ask for an amount, get the rows on stdout and an exit code that means *I got what you asked for*. No daemon to supervise, no file to discover, nothing to poll. `--json` for the whole outcome. |
 
 ---
 
 ## 📖 How the Pipeline Works
 
-The daemon runs a short cycle that asks the deals what they need — there is no queue table and nothing is scheduled in advance. Each pass walks one ordered list and stops at the first thing it can do, so priority *is* that order:
+`find` does one thing at a time until your goal is met, asking the deals what they need — there is no queue table and nothing is scheduled in advance. Each pass walks one ordered list and stops at the first thing it can do, so priority *is* that order:
 
 | # | Step | What it does |
 |---|------|-------------|
@@ -220,7 +237,9 @@ The daemon runs a short cycle that asks the deals what they need — there is no
 | 3 | **buy an address** | Free hub-cache hit resolves immediately; otherwise fires a paid provider job and parks the deal at `FINDING_EMAIL`. |
 | 4 | **top up** | Discovers and qualifies more leads. |
 
-Only step 3 costs money, and its only gate is whether you configured a provider. **Steps 2 and 4 are ungated on purpose**: searching the index is free and qualifying costs one call against your own LLM key, so there is nothing to ration — the loop does one thing per cycle and that is the bound.
+Only step 3 costs money, and its only gate is whether you configured a provider. **Steps 2 and 4 are ungated on purpose**: searching the index is free and qualifying costs one call against your own LLM key, so there is nothing to ration — and what bounds the paid step is the number you typed, since one credit is one verified address.
+
+The run ends when the goal is met, or when **nothing can advance right now** — every lead is waiting on a lookup that is not due yet, or the search has drained. There is no timeout to configure, because each thing being waited on carries its own.
 
 **Discover → qualify → gate → resolve → export.** One LLM pass turns your campaign into opening search keywords; from there the keyword vocabulary grows by counting the words that appear in profiles the LLM has accepted, and the walk keeps firing the most promising set. Qualification runs the GP + LLM loop over the stored firmographic text and writes the `reason`. The GP confidence gate promotes `QUALIFIED → READY_TO_FIND_EMAIL`, **rationing the paid lookup** so only the best-fit leads cost a credit. A miss ends the deal as `NO_EMAIL_BETTERCONTACT` with a blank outcome (so the labeler skips it — an unfindable address is not a fit signal).
 
@@ -246,7 +265,7 @@ Configure behavior via Django Admin (`SiteConfig` + `Campaign`).
 ├── openoutreach/                    # single source package; Django apps nested inside
 │   ├── __main__.py                  # the `openoutreach` console script — the entry point
 │   ├── settings.py                  # Django settings (SQLite at ~/.openoutreach/data/db.sqlite3)
-│   ├── core/                        # engine app: the daemon cycle, Campaign/SiteConfig,
+│   ├── core/                        # engine app: the job + cycle, Campaign/SiteConfig,
 │   │                                #   LLM factory, onboarding, ML + discovery/qualify
 │   │                                #   pipeline, the lead export
 │   ├── enrichment/                  # the one paid step: provider client + buy/check lookup

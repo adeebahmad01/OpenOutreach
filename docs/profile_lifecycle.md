@@ -9,7 +9,7 @@ Discover (Lead Finder) → embed → Qualify (LLM) → QUALIFIED ─(GP gate)─
                                      free hub hit ─▶ RESOLVED       FINDING_EMAIL ─(check_lookup poll)─▶ hit: RESOLVED
                                                                      provider job in flight        miss: NO_EMAIL_BETTERCONTACT
 
-                                  <data dir>/leads/<slug>.csv (written by the run)  →  whatever you send with
+                                     openoutreach find 10 emails  →  CSV on stdout  →  whatever you send with
 ```
 
 The authoritative state machine (with every transition and edge case) is in **[`../ARCHITECTURE.md`](../ARCHITECTURE.md) → Deal State Machine**. This page is the narrative summary.
@@ -60,13 +60,13 @@ The provider's response also carries `contact_first_name`/`contact_last_name`, w
 
 ## 6. Export — the end of the line
 
-**Where:** `core/export.py`, written by the cycle to `<data dir>/leads/<campaign slug>.csv` — no command to run, and `openoutreach status` reports the path
+**Where:** `core/export.py`, printed by `openoutreach find` on stdout — the whole campaign, every time, so `find 10 emails > leads.csv` always leaves the current truth in that file
 
 ```
 email, first_name, last_name, company, title, website, linkedin_url, reason, lead_id
 ```
 
-The file is rewritten whole after any action on the campaign, so it is always the current truth: an address resolved later updates the row already in it. The column names are the **importers'**, not ours, so a file imports into Instantly or Smartlead without column mapping. A `QUALIFIED` deal is already exportable — an address is an enrichment on top, never a precondition. **Two rejections are always excluded**: `FAILED` (the LLM's campaign-scoped verdict) and `Lead.disqualified` (the permanent account-level exclusion). There is **no score column**: the GP posterior is a spend gate, not a quality signal, and the fit verdict is already in the file as `reason`, in language a person reads.
+The whole campaign prints every time, so the file you redirect into is always the current truth: an address resolved since your last run comes back with the row filled in. The column names are the **importers'**, not ours, so a file imports into Instantly or Smartlead without column mapping. A `QUALIFIED` deal is already exportable — an address is an enrichment on top, never a precondition. **Two rejections are always excluded**: `FAILED` (the LLM's campaign-scoped verdict) and `Lead.disqualified` (the permanent account-level exclusion). There is **no score column**: the GP posterior is a spend gate, not a quality signal, and the fit verdict is already in the file as `reason`, in language a person reads.
 
 The boundary is **one-way**. Leads leave; nothing comes back. There is no inbound endpoint, and the opt-out duty belongs to whoever does the contacting.
 

@@ -76,20 +76,46 @@ it — `run` calls the function directly, so nothing is lost. **`reset_data`** d
 deal across every campaign; that is `reset --all` without `--campaign`, minus the backup `reset` takes
 first, so it was a blunter duplicate of a verb that already existed.
 
-### `run` management command (`management/commands/run.py`)
+### `find` management command (`management/commands/find.py`)
 
-Startup sequence:
+    openoutreach find 10 [emails] [--campaign N] [--new] [--json] [--open]
+
+**The unit is a noun, not a flag**, and that is a spend decision: the provider bills one credit per
+verified hit, so `find 10 emails` is capped at ten credits by construction — the number typed is the
+budget, in the same unit as the invoice. A `--with-email` modifier would have hidden the money, and
+`--max-credits` would be a second ceiling saying the same thing. `find 0` does no work and prints
+what is already there; it is not a special case, it is `produced >= count` being true before the loop.
+
+Startup sequence, inherited whole from the deleted `run`:
 1. **Configure logging** — level from `--verbosity`, banner, noisy third-party loggers silenced (`core/logging.py`).
 2. **Ensure DB** — `migrate --no-input` (narrated to stderr; the custom migrate, see below) + the idempotent CRM bootstrap (`core/management/setup_crm.py`, a function — the verb around it is gone).
 3. **Onboard** — if `missing_keys()` is non-empty: `hydrate_from_env()` first, then the interactive wizard on a TTY, else exit **naming the variables** that would have satisfied it (no TTY, no silent partial start). See *The environment path* below.
-4. **Validate the operator** — `llm_api_key` set, an active operator `User` exists, at least one campaign. All three exit loudly rather than starting a daemon that cannot do anything.
-5. **Run** — `run_daemon()` (`core/cycle.py`). No session object is built: the campaign rides on the deal and the operator is looked up (`core/operator.py`).
+4. **Validate the operator** — `llm_api_key` set, an active operator `User` exists, at least one campaign. All three exit loudly rather than starting work that cannot go anywhere.
+5. **Select the campaign** — the named one, or the only one. Several campaigns and no `--campaign` is a typed error listing them; nothing is ever guessed.
+6. **Run the job** — `core/job.py:run_job`, then print.
 
-Docker's `start` script `exec`s `openoutreach run` (no Xvfb/VNC — there is no browser).
+**stdout carries the whole campaign, not just this run's rows.** That is what makes `> leads.csv`
+correct by construction: the newest file supersedes every earlier one, and a lead whose address
+resolved since last time comes back with it filled in. It is one file you overwrite, not a batch per
+run. `--new` narrows to what this run produced — the escape hatch for a caller reading stdout into a
+context window rather than into a file — and `--json` emits one object carrying the goal, the
+outcome and the rows.
+
+**Exit 0 means the goal was met, and nothing else.** Short of it, the rows still print and one
+`error: <type>: <message>` line goes to stderr: *the code says how much you got, the type says why it
+stopped*. That is the property that lets a caller branch without parsing anything, and the cost —
+`set -e` dying on a good partial result — is real and accepted.
+
+`--open` hands each new lead's `profile_url` to the operator's own browser as it lands. **It does not
+spend the browserless claim**: nothing is fetched, automated or authenticated, and `profile_url` stays
+*stored, never fetched* by us. No browser available is a `bad_config` error at argument time, because
+a flag that silently does nothing is the bug you find at 2am.
+
+Docker's `start` script `exec`s `openoutreach find "$@"` — one job, then the container exits.
 
 ### The other two verbs
 
-- `status` — **what the daemon would say if you asked it.** Human summary by default, `--json` for a program. See *Status* below.
+- `status` — **what is in the database, without running a job.** Human summary by default, `--json` for a program. See *Status* below.
 - `reset [--campaign NAME] [--all]` — start a campaign's discovery walk over; `--all` also drops its leads, deals, anchors and fitted GP, after a database backup.
 
 ## The Output Contract (`core/management/base.py`, `core/errors.py`)
@@ -126,10 +152,14 @@ What a program depends on, and the reason both exist as one place rather than a 
 
 ## Status (`core/status.py`)
 
-The reader here is as often a program as a person, and a program does not tail a log — it **asks**.
-`build_status()` assembles one dict and reads nothing else; the command renders it. It is safe
-against a live daemon: SQLite runs in WAL, so the read never waits on the daemon's writes (verified
-against a held `BEGIN IMMEDIATE`).
+`build_status()` assembles one dict and reads nothing else; the command renders it. SQLite runs in
+WAL, so it still answers while a job holds a write lock (verified against a held `BEGIN IMMEDIATE`).
+
+**It is smaller than it was, on purpose.** It began as the verb an agent asked *instead of tailing a
+log*, because a daemon could not answer for itself — `next_action` existed so a caller had something
+to interrogate at all. With `find` bounded by a goal the work verb returns its own result, and this
+one is back to being what it says: the standing state of the database, for a reader who did not run
+the job.
 
 | key | what it carries |
 |:----|:----------------|
@@ -137,8 +167,7 @@ against a held `BEGIN IMMEDIATE`).
 | `campaigns` / `totals` | the pipeline counts, per campaign and summed |
 | `credits` | `balance` + `error` — `GET /api/v2/account` → `credits_left` |
 | `blocked` | what stands between now and more qualified rows, typed from `core/errors.py` |
-| `export` | `path` — the CSV the run has already written, or `null` while no campaign has a row in one |
-| `next_action` | the one thing to do next, with what it unlocks, how many leads, and the URL |
+| `next_action` | the one thing to do next, with what it unlocks and the command or URL that does it |
 
 Three decisions inside it:
 
@@ -149,11 +178,11 @@ Three decisions inside it:
   lead exports with a blank `email` column — an address is an enrichment on top, never a
   precondition. The counts therefore split `exportable_with_email` / `exportable_without_email`, and
   they are counted **from the records** rather than from `RESOLVED` standing in for them.
-- **`next_action` is ordered by what blocks progress**, so `add_credits` sits above `read_leads`:
-  a ranked lead cannot advance without credits, while the CSV is already on disk. This does
+- **`next_action` is ordered by what blocks progress**, so `add_credits` sits above `print_leads`:
+  a ranked lead cannot advance without credits, while printing what exists costs nothing. This does
   not break the *never before value* rule — `ranked_for_lookup > 0` is itself the proof that
-  qualified leads with written reasons exist, and a run that has qualified nobody reaches `wait` and
-  is asked for nothing.
+  qualified leads with written reasons exist, and a campaign that has qualified nobody is asked for
+  no money, only told to go and find some (`find_leads`).
 
 ## Onboarding (`core/onboarding.py`)
 
@@ -207,7 +236,7 @@ Four rules, each answering a way this could go quietly wrong:
 - Cancellation is a **single exception**: prompts return `None` on Ctrl+C, and `_required()` turns that into `OnboardingCancelled` at one boundary.
 - A failed step re-asks **its own** fields (LLM retries re-verify) — it never rewinds to an earlier step or restarts the wizard. This is what fixed the "onboarding keeps looping back" bug.
 - The operator's email **is asked** (the `account` step) and stored as `User.email`. The newsletter subscribes it and the contacts give-back keys the operator by it. It used to need distinguishing from the mailbox `from_address` (the sending identity) and doubled as a BCC target on the operator's own sends; with no sending leg there is one address again. `account`'s `is_done()` requires an active staff `User` with a **non-blank** email, so a blank-email account can't short-circuit the prompt.
-- `missing_keys()` returns the keys of unsatisfied steps (`campaign`/`llm`/`bettercontact`/`account`), so the daemon knows onboarding is incomplete until every gate passes.
+- `missing_keys()` returns the keys of unsatisfied steps (`campaign`/`llm`/`bettercontact`/`account`), so `find` knows onboarding is incomplete until every gate passes.
 - The newsletter opt-in **default** is jurisdiction-aware (off in GDPR/opt-in countries via `core/geo.is_gdpr_protected`), but an explicit yes always subscribes (lawful consent anywhere). Nothing is persisted in the `account` step until the Legal Notice is accepted.
 - The interactive wizard is vendored in `onboarding_wizard.py`: thin `text`/`integer`/`confirm`/`multiline` functions over questionary/prompt_toolkit, each owning its own validation loop and returning a value or `None` (cancel). No external `openoutreach` package dependency.
 
@@ -258,15 +287,33 @@ filtered only the second. Pre-Deal Lead states are implicit: url-only (a `Lead` 
 in advance, so nothing can drift, be lost, or need reconciling — and no row's timestamp can gate
 anything but itself.
 
-The loop is `core/cycle.py`:
+The loop is `core/job.py`, and it is four lines:
 
 ```python
-while True:
-    read_mail_if_due()           # one IMAP walk per box: replies + opt-outs
-    refresh_capacities_if_due()  # daily warm-capacity measurement
-    run_one_action(next(rotation))
-    time.sleep(CYCLE_SECONDS)    # 5s, fixed — no data decides when we next wake
+while produced(campaign) < goal.count:
+    if not run_one_action(campaign):
+        break          # every remaining deal is waiting on its own not_before
 ```
+
+**There is no timeout, deliberately.** Every unit of work already carries its own bound —
+`deal.not_before` is the one retry mechanism there is, the lookup poll doubles its own backoff, and
+`urllib3.Retry` bounds the 429s. A job-level clock would be a second timeout answering a question the
+first one already answers, and answering it worse: a clock knows nothing about *why* it is waiting.
+The terminal condition is derived from real state instead — the job ends when **nothing can advance
+right now**, which is what `run_one_action` returning `False` already meant.
+
+**Progress is a set, not a subtraction.** A goal counts the leads that *entered* it during this run,
+so a lead rejected mid-run cannot silently cancel out one that was found — and `--new` stays exact
+for both units, which matters because an `emails` goal is usually satisfied by leads that were
+already exportable and merely gained an address, something no timestamp on the row would identify.
+
+**What ends a job short, in the vocabulary of `core/errors.py`:** `goal_unreached` (nothing left to
+do, or `Ctrl-C` — the operator's own deadline, since the one case with no natural bound is a campaign
+whose leads are all rejected), or `bad_config` when a `HALTING_ERRORS` exception says the model
+rejected the request. Provider refusals keep their own types.
+
+*(Two lines are gone from the shape above along with the sending leg: `read_mail_if_due()` and
+`refresh_capacities_if_due()`, the only two periodic side-effects the loop ever had.)*
 
 ### What replaced, and why
 
@@ -321,25 +368,29 @@ scores the whole `QUALIFIED` pool in one pass and drops the model (`qualifier_fo
 justified it (`P(f>0.5)=0.997 ≥ 0.75`), and passes `log=False` so the transition is not printed
 twice; the score cannot ride in `reason`, which holds the LLM's qualification rationale.
 
-**The walk is also the daemon's time accounting.** `ROWS` pairs each row with a name, so every
-action logs which row fired and how long it took (`[Email Outreach] buy an email address — 2.3s`),
-and at `debug` every row logs its decision time even when it declines. The steps log what they
-*did*; without this a row that spends twenty seconds deciding it has nothing to do says so nowhere.
-When no row fires, `_log_idle` prints the pipeline counts at most once every
-`IDLE_LOG_INTERVAL_S` — idle is the normal state, so a line per cycle would bury everything else,
-and the counts separate *no work* from *work behind a gate*, which look identical from outside and
-are entirely different problems.
+**The walk is also the job's time accounting.** `ROWS` pairs each row with a name, so every action
+logs which row fired and how long it took (`[Email Outreach] buy an email address — 2.3s`), and at
+`debug` every row logs its decision time even when it declines. The steps log what they *did*;
+without this a row that spends twenty seconds deciding it has nothing to do says so nowhere.
+
+When no row fires, `pipeline_summary` prints the counts — and that same line becomes the *reason* the
+job stopped short, because the counts separate a drained search from three addresses still on order,
+which are a dead end and a reason to run again in an hour. It used to be throttled to one line a
+minute (`_log_idle`, `IDLE_LOG_INTERVAL_S`): idle was the normal state of a process that never ended,
+so a line per cycle buried everything else. A bounded job stops at the first idle, so it prints once
+and the throttle is gone.
 
 **Log vocabulary is the operator's, not the schema's.** A row is named for what happens to a lead
 (`find & qualify new leads`, not `top_up`), the idle counts say what each group is waiting *on*
 (`60 waiting to be ranked`, not `Qualified=60`), and the one remaining gate is printed as its
 consequence (`no finder key, so not buying addresses`, not a boolean). Function and state names
-belong in the code and the diagrams; a log line is read by someone asking what the daemon is doing
-to their pipeline.
+belong in the code and the diagrams; a log line is read by someone asking what is happening to their
+pipeline.
 
-Campaigns take turns (`_rotate`, re-read each lap so a campaign created after boot joins). There is
-no share, no weight and no allocation: with nothing minted in advance there is no budget to split,
-so fairness collapses to whose turn it is.
+**Campaigns no longer take turns.** `_rotate` round-robined them because a process that never ends
+has to decide, forever, whose work to do next. A job names its campaign (`--campaign`, or the only
+one), so the fairness question has nobody to be fair between and the scheduler that answered it is
+gone.
 
 ### Steps
 
@@ -347,11 +398,12 @@ Each takes one entity and returns the next `DealState` or `None`; `cycle._apply`
 `deal.save()`, so a transition and the fields that justify it commit together. Steps are **total**:
 they catch the failures they can actually meet and return an explicit state, so the cycle's
 `try/except` is a bug backstop, not a retry policy. A step that wants to wait writes
-`deal.not_before` — that is the only retry mechanism there is. `HALTING_ERRORS` (today
-`ModelHTTPError`) is the exception: a misconfigured LLM key stops the daemon loudly rather than
-being retried every five seconds forever behind an `alive` log line.
+`deal.not_before` — that is the only retry mechanism there is, and it is also what lets a bounded job
+end honestly: a row that waits stops being due, so `run_one_action` can return `False` and mean it.
+`HALTING_ERRORS` (today `ModelHTTPError`) is the exception: a misconfigured LLM key ends the job with
+a typed `bad_config` line rather than being retried forever behind an `alive` log line.
 
-1. **`buy_address`** (`enrichment/lookup.py`) — resolves cheapest-first: an address already on the lead → `RESOLVED`; the free hub cache (`contacts.resolve`) → `RESOLVED`; else `bettercontact.submit` fires a job, stores `lookup_request_id`, and parks at `FINDING_EMAIL`. Couldn't-submit (no key, API down) stays put — no credit spent, no handle to poll.
+1. **`buy_address`** (`enrichment/lookup.py`) — resolves cheapest-first: an address already on the lead → `RESOLVED`; the free hub cache (`contacts.resolve`) → `RESOLVED`; else `bettercontact.submit` fires a job, stores `lookup_request_id`, and parks at `FINDING_EMAIL`. Couldn't-submit (no key, API down) stays in `READY_TO_FIND_EMAIL` — no credit spent, no handle to poll — but **backs the deal off first** (`_back_off`, the same doubling the poll uses). Without that the row is still due on the next pass, so the same deal is re-picked immediately and forever: noise every few seconds under the daemon, an endless job now that a run stops only when nothing can advance. *Queued* and *due* are different things.
 2. **`check_lookup`** (same module) — polls `lookup_request_id` once: hit → `RESOLVED` + hub give-back; miss → `NO_EMAIL_BETTERCONTACT` (no reason, blank outcome); still-running → double `not_before`. **The only terminal outcomes are the provider's own** — no deadline, no attempt limit. Both were tried: past the deadline the leg abandoned the job and reverted the deal, where the buy step bought a *second* job for the same lead, so a provider outage became a hot resubmit loop (418 submits and 4,512 polls in a week for ~40 leads, none terminating). Doubling makes waiting nearly free (a week costs 17 polls) and refuses to mislabel — a timeout is evidence about the provider, not about the lead. The interval rails at `COLLECT_BACKOFF_MAX_S` (a month) only so `datetime` can still express it. A deal parked here with an **empty** `lookup_request_id` has no job and never cost a credit, so row 1 routes it to **`reclaim_lookup`** → `READY_TO_FIND_EMAIL` instead. The row used to `.exclude(lookup_request_id="")` and skip it, which stranded it in a state no other row claims — measured on a live install: two deals stuck for 206 hours.
 
 A third and fourth step stood here — `send_first_email` and `answer_reply` — and both left with
@@ -484,7 +536,7 @@ rather than pinned to a single hallucination.
   padding positives are enough to keep the class off 1 while they last.
 - **`is_cold` (any anchor still standing, i.e. `n_real_positives < ANCHOR_COUNT`) — not
   `has_real_positive`, not "is it fitted?" — is the engine's phase test.** Retirement is written through to `Campaign.anchor_profiles` /
-  `anchor_embeddings`, both because the daemon restores the survivors on boot (`stored_anchors`;
+  `anchor_embeddings`, both because a job restores the survivors on the way in (`stored_anchors`;
   it never invents more once a real positive exists) and because `select.LabelStore` counts those
   same profiles as positives for the discovery walk — a retirement that lived only in memory
   would leave the walk counting evidence the qualifier had already discarded.
@@ -550,11 +602,17 @@ exported file imports without column mapping. The internal model keeps its own n
 match N importers, so the mapping is a function, not a migration.
 
 ```
-email, first_name, last_name, company, title, website, linkedin_url, reason, lead_id
+email, first_name, last_name, company, title, website, linkedin_url, reason, lead_id, qualified_at
 ```
 
-`reason` lands as a custom variable and is the reason the product exists. `lead_id` is the only
-column that is there for us: a stable join key that survives an address changing under us.
+`reason` lands as a custom variable and is the reason the product exists. Two columns are there for
+us: `lead_id`, a stable join key that survives an address changing under us, and `qualified_at`
+(`Deal.creation_date`, ISO 8601), so a file carries its own provenance — a caller tells which rows
+its own call produced by comparing against the time it started, and a sequencer imports only what is
+newer than last time. **A `new` flag would have been the obvious alternative and is wrong**:
+invocation-relative state written into a file that outlives the invocation means two files disagree
+about the same lead, and the column is a lie the second time anyone reads it. A timestamp is true
+forever.
 
 **The boundary is one-way — nothing comes back** (decided 2026-08-19 on the same card). Reply
 outcomes are conversation states that depend on the message and the sender's skill, which is the
@@ -593,20 +651,18 @@ contacted twice unless the operator enables it — say so in every adapter's doc
   rows** from a campaign where most deals were rejections — rows whose `reason` read *"does not
   align well with the target market"*. Both are now excluded, always; there is no flag to include
   them.
-- **No command, and no options.** The file writes itself: `write_campaign_csv` runs after **any**
-  cycle action on that campaign, so a lookup filling in an address updates a row already on disk and
-  a lead becoming `FAILED` drops out of it. `campaign_csv_path` is the one naming rule —
-  `<data dir>/leads/<slugified name>.csv`, `campaign-<pk>` when a name slugifies to nothing, and the
-  newcomer's pk appended on a slug collision so a file the operator is already reading never moves.
-  **Rewrite, never append**: the file is then always the current truth for that campaign, restarts
-  cannot duplicate rows, and a later-resolved email updates the row that is already there — which
-  appending cannot do at all. The rewrite goes to a **sibling** temp file and is swapped in with
-  `os.replace` (atomic only within one filesystem, hence the sibling), because agents poll and a
-  half-flushed CSV is a failure mode worth designing out. A write failure is logged and the daemon
-  carries on: the file is a projection of the database, never the record itself. The run names the
-  path only when the row count changed. *(`export_leads --campaign N`, CSV on stdout, is deleted —
-  along with the format switch, output path, state filter and rejected-leads escape hatch it never
-  grew.)*
+- **No command, no file, and no options — it is the stdout of `find`.** This one took two attempts on
+  one day and the history is the argument. `export_leads --campaign N > leads.csv` was a command
+  nobody discovered, so it became a CSV the daemon wrote and kept current under `<data dir>/leads/`;
+  that needed a naming rule, a collision tie-break, rewrite-vs-append, and an atomic
+  temp-file-and-rename. **Every one of those problems existed only because a background process can
+  change a row after it was written.** Bounding the run to a goal deleted all of them at once: the
+  rows are final when the job ends, so they are simply printed, and the shell does files. What is
+  printed is the **whole campaign**, which is what makes `> leads.csv` correct by construction —
+  the newest file supersedes every earlier one, and a lead whose address resolved since last time
+  comes back with it filled in. It is one file to overwrite, not a batch per run. `find 0` prints
+  without working, which covers *give me that again* at zero cost. *(Also deleted with the command:
+  the format switch, output path, state filter and rejected-leads escape hatch it never grew.)*
 
 ## CRM Data Model
 
@@ -627,8 +683,9 @@ gone** with the `emails` app. See *The Mail Log* above for what they did and whe
 
 Paths relative to `openoutreach/`.
 
-- **`core/cycle.py`** — the loop and the hierarchy (see **The Cycle**): `run_daemon`, `run_one_action` (rows 1–4, first match wins), `_apply` (one save per transition), `HALTING_ERRORS`. `CYCLE_SECONDS` is fixed and derived from nothing. *(Gone with the sending leg: `unanswered_replies` — the follow-up trigger — `room_to_send_today` — the spend gate — and `read_mail_if_due`/`refresh_capacities_if_due`, the two periodic side-effects.)*
-- **`core/operator.py`** — who is running this daemon: `get_active_user()`, `campaigns()` (the cycle's rotation), `self_profile()`, `seller_name()`/`seller_full_name()`. Nothing is cached across calls — both reads are one indexed row, and a cache would only let a renamed operator keep signing with the old name until restart. Replaces the browser era's `OperatorSession`, which by the end held nothing session-like: just the Django `User` and whichever campaign the handler was on (now a real FK on the deal).
+- **`core/job.py`** — the bounded run: `Goal` (count + unit, a **delta** not a total), `JobResult`, `run_job(campaign, goal, on_new_lead)`, `_unit_ids` (progress as a set, per unit). No timeout, by decision — see **The Cycle**.
+- **`core/cycle.py`** — the hierarchy, and no loop at all: `run_one_action` (rows 1–4, first match wins), `_apply` (one save per transition), `pipeline_summary` (also the reason a job stopped short), `HALTING_ERRORS`. *(Gone with the daemon: `run_daemon`, `_rotate`, `CYCLE_SECONDS`, `IDLE_LOG_INTERVAL_S`. Gone with the sending leg: `unanswered_replies` — the follow-up trigger — `room_to_send_today` — the spend gate — and `read_mail_if_due`/`refresh_capacities_if_due`, the two periodic side-effects.)*
+- **`core/operator.py`** — who is running this install: `get_active_user()`, `campaigns()` (what `--campaign` picks from), `self_profile()`, `seller_name()`/`seller_full_name()`. Nothing is cached across calls — both reads are one indexed row, and a cache would only let a renamed operator keep signing with the old name until restart. Replaces the browser era's `OperatorSession`, which by the end held nothing session-like: just the Django `User` and whichever campaign the handler was on (now a real FK on the deal).
 - **`discovery.py`** — Lead Finder client and the provider contract. `search(filters, limit, offset)` → `Page(leads, leads_found)`: the rows plus the corpus count from `summary.leads_found`, surfaced **only at offset 0** (past the end of *any* result set the API reports 0). `SEARCH_FIELDS` is the three axes a node may add tokens to — `lead_industry` is absent because it is **inert** (a nonsense value returns the identical count to no filter), `lead_function` because it and `lead_department` are one field under two names whose values are ORed (naming both *widens* the query), and `lead_department` because no lead row carries a department, so no vocabulary could ever grow for it. `filters_for(keywords, headcount)` is the only place a node becomes provider JSON (same-field tokens space-joined = AND; different fields = separate keys; the include-list OR deliberately unused). `KEYWORD_SOURCE_FIELDS` maps each axis to the row fields that *are* that axis, and `source_fields_for(row)` stores exactly those on the Lead. `profile_text_for(row)` builds the qualifier's text from `TEXT_FIELDS`; `keyword_terms(keywords)` is what rides the embedding. A field earns its `TEXT_FIELDS` slot by **varying between leads**: the GP ranks the pool's candidates against each other, so a field constant across them adds nothing however accurate. That test excludes the `company_*` free text — Lead Finder staples a fuzzy-matched company record onto every row (a law firm's founder comes back as Meta, mission statement and all; 1–4 distinct records per 100-row page), so `company_description` (59% of the old text) and `company_keywords` (21%) were 80% of every vector at ~zero bits; `contact_location` is absent from every response. **Changing `TEXT_FIELDS` moves the vector space — every `Lead` must be re-embedded**, and the raw rows are not persisted, so in practice that means re-discovering. `embed_query`/`embed_queries` were removed with the GP-scored walk. Shares `submit_and_poll` with `enrichment/bettercontact.py`.
 - **`core/pipeline/`** — `icp.py` (the two cold-start priors, same inputs, two shapes — `generate_seed`: one LLM pass → the campaign's opening **keywords** and size band. It is the *only* LLM call discovery makes about queries: with no qualified leads there are no profiles to count words from, so the ICP text is the one available source. The spec's phrases are **split into single-word tokens** (the LLM writes `"Head of Growth"`, which Lead Finder reads as three ANDed tokens — narrow enough to be empty before the walk has learned anything), letting measurement decide which pair is worth conjoining; `generate_anchors`/`ensure_anchors`: the ICP as synthetic ideal *profiles*, embedded as the GP's positives so a campaign whose every verdict is a rejection can fit at all, retired one per real acceptance), `vocabulary.py` (`tokenize`/`profile_tokens`, `refresh` — grow the keyword table from qualified leads' `source_fields` at df≥2, `seed_seniorities` — the closed 12-value list, `admitted_keywords`), `select.py` (**the selector, and it is arithmetic**: `LabelStore` (token sets + verdicts, loaded once per pass), `estimate`/`_beta_params` (the parent-smoothed rate), `frontier`/`next_node` (one pool, Thompson draw, argmax), `expand` (add-only children over co-occurring tokens, dead-subset pruned), `seed_frontier`, `advance`/`retire`/`_prune_descendants`, `token_key`), `discover.py` (`discover(campaign, qualifier)`: ensure vocabulary + frontier → draw a node → page it → harvest into first-touch `Lead`s with keyword-injected embeddings and expand its children (`_harvest`), or classify the empty page and retire (`_handle_empty`) and try the next node; `qualifier` is accepted and ignored), `qualify.py` (`run_qualification` / `fetch_qualification_candidates` — reads `Lead.profile_text`, no scrape), `ready_pool.py` (GP gate: `promote_to_ready`, `find_ready_candidate`; `min_gp_confidence` is the spend gate **and nothing else**), `top_up.py` (`top_up` — **one** acquisition move per call, the cold/explore/exploit strategy ported verbatim from the old `pools._advance`; `_consumable_candidates` is the exploit gate — see its module docstring. The `while True` that used to wrap it is gone: the cycle is the loop). *(`mint.py` is gone — LLM clause minting was replaced by `vocabulary.py`'s counting. `freemium_pool.py` went with the promo campaign.)*
 - **`core/ml/`** — `qualifier.py` (`Qualifier` protocol, `BayesianQualifier`, `qualify_with_llm`, `format_prediction`), `embeddings.py` (`embed_text`/`embed_texts`, cached FastEmbed model). *(`KitQualifier` and `hub.py` — the HuggingFace campaign kit — went with the promo campaign, which had no labels of its own to fit on.)*
@@ -638,7 +695,7 @@ Paths relative to `openoutreach/`.
 - **`core/newsletter.py`** — `subscribe_to_newsletter`, a plain Brevo form POST for the operator's own address at onboarding. Nothing to do with outreach; it moved out of `emails/` when that app was removed.
 - **`core/llm.py`** — `get_llm_model()` factory (reads `SiteConfig`, `split_model_id` parses the provider out of `ai_model`, dispatches to the per-provider builder), `build_llm_model` (from explicit creds), `verify_llm_credentials` (one live ping, tenacity-retried, used by onboarding), and `run_agent_sync(coro)` — the sync boundary that drives async pydantic-ai on a dedicated long-lived worker-thread loop (never `Agent.run_sync`, whose anyio portal poisons the caller thread's loop slot; never per-call `asyncio.run`, which closes loops the SDK HTTP clients still reference).
 - **`core/geo.py`** — jurisdiction sets + predicates: `is_gdpr_protected` (broad opt-in set, drives the newsletter default) and `is_eea_located` / `EEA_UK_CH` (narrow EEA/UK/CH collection-regime set — the client-side pre-gate for contacts-store contribution; the server re-gates authoritatively). Country codes come from onboarding / the discovery row, never from a scrape.
-- **`enrichment/bettercontact.py`** — the provider client. The paid finder is the two-leg `submit(query) → request_id` + `poll_once(request_id) → PollOutcome`, so the daemon never blocks on a poll; the free Lead Finder index uses the blocking `submit_and_poll` transport from the same module, since `discovery.search` genuinely wants a page back. `is_configured()` reads `SiteConfig.bettercontact_api_key` — one key, two endpoints, and only one of them bills.
+- **`enrichment/bettercontact.py`** — the provider client. The paid finder is the two-leg `submit(query) → request_id` + `poll_once(request_id) → PollOutcome`, so a run never blocks on a poll; the free Lead Finder index uses the blocking `submit_and_poll` transport from the same module, since `discovery.search` genuinely wants a page back. `is_configured()` reads `SiteConfig.bettercontact_api_key` — one key, two endpoints, and only one of them bills.
 - **`enrichment/lookup.py`** — the two pipeline steps, `buy_address` / `check_lookup` / `reclaim_lookup`, plus `_store_identity` (the name parts the provider echoes back with the address) and the backoff helpers. The enrichment query is **URL-only by decision** — the provider accepts name and company and resolves better with them, but the less of a lead's record leaves for a third party the better, and URL-only measures ~42% usable. The docstring says not to widen it without a decision to widen it.
 - **`core/business_time.py`** — `business_days_between(start, end)`: whole Mon–Fri days elapsed. It was the agent's only sense of a thread's age; with no agent it is now unused by the pipeline and kept as a small, correct utility. Public holidays are not modelled (per-country data we don't carry).
 - **`core/logging.py`** — `configure_logging` + `print_banner`; `SILENCED_LOGGERS` quiets urllib3/httpx/pydantic_ai/openai/fastembed/etc.
@@ -677,7 +734,7 @@ See the `openoutreach-docs` card `p1-e2-cli-entry-points`.
 
 Two-stage build from `python:3.12-slim-bookworm`: stage one installs the package into a venv at
 `/opt/venv` with `uv`, stage two copies that one directory and carries neither `git` nor `uv`.
-No browser, no VNC. `compose/openoutreach/Dockerfile`. It exists for running the daemon on a server
+No browser, no VNC. `compose/openoutreach/Dockerfile`. It exists for running jobs on a server
 (`openoutreach-docs/docs/infrastructure.md` §7) — **development and tests run natively**, there is no
 `BUILD_ENV` and no dev extras in the image. `OPENOUTREACH_DB=/app/data/db.sqlite3` names the CRM path
 explicitly, since the code no longer sits beside it; `local.yml` mounts `./data` there and nothing else.

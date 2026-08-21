@@ -38,7 +38,16 @@ class ErrorType:
     """Onboarding cannot finish from what is configured, and no TTY is available."""
 
     NOT_INITIALIZED = "not_initialized"
-    """The database has no schema yet — nothing has run here. Only ``run`` creates it."""
+    """The database has no schema yet — nothing has run here. Only ``find`` creates it."""
+
+    GOAL_UNREACHED = "goal_unreached"
+    """A job stopped short of what was asked for. Its rows are still on stdout.
+
+    Exit 0 means *I got what you asked for* and nothing else, which is the property that
+    lets a caller branch without parsing. The message carries what it is short by and
+    what it was waiting on — a drained index and three addresses on order are a dead end
+    and a reason to run again in an hour, and "7 of 10" alone cannot tell them apart.
+    """
 
 
 def format_error(error_type: str, message: str) -> str:

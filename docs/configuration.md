@@ -72,16 +72,24 @@ Not user-configurable per campaign; edit the source to change.
 | Key | Value | Description |
 |:----|:------|:------------|
 | `COLLECT_BACKOFF_BASE_S` / `COLLECT_BACKOFF_MAX_S` | `5` / `30d` | The lookup poll doubles its delay on every still-running attempt and **never gives up** — an unterminated job is queued, not lost, so the leg keeps the same `request_id` rather than abandoning the deal and paying for a second job. MAX rails the interval only, so the schedule stays representable. |
-| `CYCLE_SECONDS` | `5` | How long the daemon waits after each action. Fixed, and derived from nothing. |
 | `CAMPAIGN_CONFIG.min_gp_confidence` | `0.75` | GP probability threshold for promoting `QUALIFIED → READY_TO_FIND_EMAIL`. **A spend gate on the paid lookup and nothing else** — not a quality score, and deliberately absent from the export. |
 | `CAMPAIGN_CONFIG.qualification_n_mc_samples` | `100` | Monte Carlo samples for BALD. |
 | `CAMPAIGN_CONFIG.embedding_model` | `BAAI/bge-small-en-v1.5` | FastEmbed model for 384-dim embeddings. |
 
-**There is no spend cap.** Paid lookups used to be gated by mailbox send-headroom — *never resolve an
-address there is no room to email today* — and nothing replaced that when the sending leg left, because
-what bounds the spend is your own prepaid balance at the provider, which the provider enforces and this
-software cannot see. Discovery and qualification are ungated entirely: searching is free, qualifying
-costs one call against your own LLM key, and the daemon does one thing per cycle.
+**There is no spend cap setting, because the command line is the cap.** Paid lookups used to be gated
+by mailbox send-headroom — *never resolve an address there is no room to email today* — and nothing
+replaced that when the sending leg left. What bounds the spend now is the number you type: one credit
+is one verified address, so `openoutreach find 10 emails` cannot cost more than ten. (Beyond that, your
+own prepaid balance at the provider, which the provider enforces and this software cannot see.)
+Discovery and qualification are ungated entirely: searching is free and qualifying costs one call
+against your own LLM key.
+
+**There is no timeout setting either**, and there should not be one. A run ends when its goal is met or
+when nothing can advance — and every wait that matters is already written on the row that is waiting
+(`Deal.not_before`, the doubling lookup backoff, `urllib3`'s 429 retry). A clock over the top of those
+would be a second answer to a question they already answer, and a worse one: it knows nothing about
+*why* the run is waiting. If you want a deadline, `Ctrl-C` (or your agent's own timeout) prints the
+rows found so far and exits non-zero.
 
 *(Gone with the sending leg: `SEND_WINDOW_*`, `MIN_SEND_INTERVAL_SECONDS`, `SEND_INTERVAL_JITTER_*`,
 `WARM_*`, `COLLECT_TODAY_HORIZON_S`, `MAIL_PASS_INTERVAL_S`.)*

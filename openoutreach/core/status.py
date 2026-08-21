@@ -1,20 +1,22 @@
 # openoutreach/core/status.py
-"""What the daemon would say if you asked it — as data, for a person or a program.
+"""The standing state of the database — as data, for a person or a program.
 
-The reader here is as often a program as a person, and a program does not tail a
-log: it **asks**. So this module builds one dict and the ``status`` command renders
-it, either as a human summary or as ``--json``. Nothing here prints, and nothing
-here mutates — ``status`` is safe to run against a live daemon (SQLite is in WAL
-mode, so a read never blocks on the daemon's writes).
+This module builds one dict and the ``status`` command renders it, as a human summary or
+as ``--json``. Nothing here prints, and nothing here mutates.
 
-Four things it has to answer, and one it has to decide:
+Three things it answers:
 
   * what is configured, and what is not;
   * what is **blocked**, and why — in the stable vocabulary of ``core/errors.py``,
     because *no leads yet* and *your key was rejected* must never look alike;
-  * the counts toward the deliverable, and the credit balance;
-  * **the next action** — one object an agent can relay to its human, carrying what
-    it unlocks, how many leads are waiting, and the URL.
+  * the counts toward the deliverable, and the credit balance.
+
+**It is smaller than it was, on purpose.** It began as the verb an agent asked *instead of
+tailing a log*, because a daemon could not answer for itself: `next_action` existed so a
+caller had something to interrogate, and the counts were the only way to tell whether a
+background process had achieved anything. With `find` bounded by a goal, the work verb
+returns its own result and this one is back to being what it says — what is in the
+database right now, for a reader who did not run the job.
 """
 from __future__ import annotations
 
@@ -44,8 +46,7 @@ def build_status() -> dict:
         "totals": totals,
         "credits": credits,
         "blocked": blocked,
-        "export": _export_hint(campaigns),
-        "next_action": next_action(onboarding_state, credits, totals, campaigns),
+        "next_action": next_action(onboarding_state, credits, totals),
     }
 
 
@@ -68,7 +69,7 @@ def _onboarding_state(onboarding) -> dict:
 
 def _campaign_counts() -> list[dict]:
     """Per-campaign pipeline counts, oldest campaign first."""
-    from openoutreach.core.export import campaign_csv_path
+    from openoutreach.core.export import export_counts
     from openoutreach.core.models import Campaign
     from openoutreach.crm.models import Deal, DealState
 
@@ -86,10 +87,9 @@ def _campaign_counts() -> list[dict]:
                 DealState.FAILED,
             )
         }
-        exportable, with_email = _export_counts(campaign)
+        exportable, with_email = export_counts(campaign)
         rows.append({
             "name": campaign.name,
-            "csv_path": str(campaign_csv_path(campaign)),
             "leads_seen": deals.count(),
             "qualified": by_state[DealState.QUALIFIED],
             "ranked_for_lookup": by_state[DealState.READY_TO_FIND_EMAIL],
@@ -102,24 +102,6 @@ def _campaign_counts() -> list[dict]:
             "exportable_without_email": exportable - with_email,
         })
     return rows
-
-
-def _export_counts(campaign) -> tuple[int, int]:
-    """Rows in the campaign's CSV, and how many carry an address.
-
-    **An exportable row is not necessarily a mailable one.** The export excludes only
-    the two rejections, so a `QUALIFIED` lead exports with a blank ``email`` column —
-    an address is an enrichment on top, never a precondition. A reader who is about to
-    import into a sequencer needs both numbers, so both are counted here, from the
-    records themselves rather than from a state that stands in for them.
-    """
-    from openoutreach.core.export import lead_records
-
-    exportable = with_email = 0
-    for record in lead_records(campaign):
-        exportable += 1
-        with_email += bool(record.get("email"))
-    return exportable, with_email
 
 
 def _totals(campaigns: list[dict]) -> dict:
@@ -195,37 +177,24 @@ def _blocked(onboarding_state: dict, credits: dict, totals: dict) -> list[dict]:
     return blocked
 
 
-# ── the export ───────────────────────────────────────────────────
-
-def _export_hint(campaigns: list[dict]) -> dict:
-    """Where the rows already are. There is nothing to run — the daemon writes the file.
-
-    One file per campaign, so ``path`` names the one with rows in it (the ordinary
-    single-campaign case reads as *the* file); every campaign's own path is on its row
-    under ``campaigns``.
-    """
-    with_rows = next((row for row in campaigns if row["exportable"]), None)
-    return {"path": (with_rows or {}).get("csv_path")}
-
-
 # ── the next action ──────────────────────────────────────────────
 
-def next_action(onboarding_state: dict, credits: dict, totals: dict, campaigns: list[dict]) -> dict:
+def next_action(onboarding_state: dict, credits: dict, totals: dict) -> dict:
     """The one thing to do next — arithmetic, not adjectives.
 
-    Ordered by what actually blocks progress, which is why the credit ask sits above
-    the file rather than below it: a ranked lead is one the run *cannot advance*
-    without credits, whereas the CSV is already on disk at any time and is reported
-    under ``export`` regardless.
-
-    ``read_leads`` is a *read*, not a do — nothing has to be run for the rows to exist.
-    It still earns its place above ``wait`` because it is the only place the operator is
-    told the file is there and where to find it, which is the whole deliverable.
+    Ordered by what actually blocks progress, which is why the credit ask sits above the
+    rows: a ranked lead is one that *cannot advance* without credits, whereas printing
+    what exists costs nothing and is available at any time.
 
     That ordering does not break the *never before value* rule. Ranked leads are
-    qualified leads with written reasons, so ``ranked_for_lookup > 0`` **is** the
-    proof that value exists — a first run with nothing qualified yet reaches the
-    ``wait`` branch and is asked for nothing.
+    qualified leads with written reasons, so ``ranked_for_lookup > 0`` **is** the proof
+    that value exists — a first run with nothing qualified yet is asked for nothing, and
+    told to go find some.
+
+    **It is smaller than it was**, because the work verb now returns its own result. This
+    used to be the only way an agent could learn what a daemon had been doing; with a
+    bounded `find` the answer arrives on stdout, and what is left here is the standing
+    state of the database.
     """
     if not onboarding_state["complete"]:
         variables = sorted({v for names in onboarding_state["missing"].values() for v in names})
@@ -248,17 +217,17 @@ def next_action(onboarding_state: dict, credits: dict, totals: dict, campaigns: 
         }
 
     if totals["exportable"]:
-        row = next(c for c in campaigns if c["exportable"])
         return {
-            "type": "read_leads",
-            "message": f"{row['exportable']} qualified lead(s) are already written to {row['csv_path']}.",
+            "type": "print_leads",
+            "message": f"{totals['exportable']} qualified lead(s) ready.",
             "unlocks": "a CSV your sequencer imports without column mapping",
             "leads": totals["exportable"],
-            "path": row["csv_path"],
+            "command": "openoutreach find 0 > leads.csv",
         }
 
     return {
-        "type": "wait",
-        "message": "Running — no qualified leads yet.",
-        "unlocks": None,
+        "type": "find_leads",
+        "message": "No qualified leads yet.",
+        "unlocks": "leads with a written reason",
+        "command": "openoutreach find 10",
     }

@@ -28,16 +28,6 @@ def _mock_embeddings(request):
             yield
 
 
-@pytest.fixture(autouse=True)
-def _data_dir(settings, tmp_path):
-    """Point the data dir at a temp directory, so the lead CSVs never land in the checkout.
-
-    ``DATABASE_PATH`` is what ``core/export.py`` writes beside; the live connection is
-    pytest-django's own test database and is unaffected by this.
-    """
-    settings.DATABASE_PATH = tmp_path / "db.sqlite3"
-
-
 @pytest.fixture
 def operator(db):
     """The onboarded operator — what ``core.operator.get_active_user()`` will find."""

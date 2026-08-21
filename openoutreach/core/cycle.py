@@ -1,5 +1,13 @@
 # openoutreach/core/cycle.py
-"""The cycle — wake up, do the single most valuable thing available, sleep.
+"""One action — do the single most valuable thing available for a campaign, and say so.
+
+**This module no longer owns a loop.** It used to run a daemon: `run_daemon` rotated over
+the operator's campaigns forever, sleeping `CYCLE_SECONDS` between actions. That process
+never ended, so it could never return a result — which is why `status`, a `next_action`
+object and a CSV on disk all had to exist for anyone to find out what it had done. The
+loop now lives in `core/job.py`, is bounded by a goal, and ends when `run_one_action`
+returns `False`. What is left here is the hierarchy itself, which never depended on the
+loop's shape.
 
 **A queue is a status, not a table.** Work is found by asking the deals what they
 need (``Deal.objects.filter(state=...)``), so a deal is available because of its own
@@ -17,7 +25,8 @@ sends of headroom simply had no token and therefore were not work. The shape was
 inherited from the Playwright era, when a token queue was how access to one browser
 got serialised. The browser went; the queue outlived it.
 
-Here the sleep is a fixed short interval and capacity is re-read every time.
+Here there is no sleep at all: a job asks for one action at a time and stops when there
+is none, and every wait that matters is written on the row that is waiting.
 
 ## The hierarchy
 
@@ -37,18 +46,19 @@ and resting is free because nothing iterates them.
 Both rows used to share one — *never resolve an address, and never spend an LLM call
 qualifying, for someone there is no room to email today* — which was right while
 every lead ended in a send. Nothing rations discovery or qualification now: they cost
-the operator's own LLM key and nothing else, and the loop is bounded the only way
-that matters, at one unit of work per cycle. Row 3 is the single paid step and asks
-only whether there is a provider to pay.
+the operator's own LLM key and nothing else, and the work is bounded the only way that
+matters — one unit per call, and a goal that says how many calls. Row 3 is the single
+paid step and asks only whether there is a provider to pay; what caps the spend is the
+number the operator typed, since one credit is one verified address.
 
 **Two rows are gone with the sending leg** — answering a reply and sending a first
 email — along with the mail pass and the daily warmth re-measure that fed them. They
 live in OpenEmailSequence now. Leads leave this process over a CSV
 (``core/export.py``) and nothing comes back up that wire.
 
-Campaigns take turns (``_rotate``). There is no share, no weight and no allocation:
-with nothing minted in advance there is no budget to split, so the fairness question
-collapses to whose turn it is.
+**Campaigns no longer take turns.** ``_rotate`` round-robined them because a daemon had
+to decide, forever, whose work to do next. A job names its campaign, so the fairness
+question has nobody to be fair between and the scheduler that answered it is gone.
 """
 from __future__ import annotations
 
@@ -63,84 +73,17 @@ from openoutreach.crm.models import DealState
 
 logger = logging.getLogger(__name__)
 
-# How long to wait after each action. Short, fixed, and derived from nothing: the
-# cycle's whole point is that no data decides when it next wakes up. It bounds how
-# precisely a ``not_before`` can be honoured, so keep it well under the send spacing.
-CYCLE_SECONDS = 5
-
-# How often an idle cycle says so. Idle is the *normal* state here — sends are paced
-# minutes apart and a cycle is seconds — so a line per cycle would bury the lines that
-# mean something. One a minute is a pulse: enough to tell a working daemon from a
-# wedged one, and it carries the counts that say why there was nothing to do.
-IDLE_LOG_INTERVAL_S = 60
-
-# Errors that must stop the daemon rather than be retried. A misconfigured LLM key
-# is not a transient fault: every cycle would raise it, log it and try again in five
-# seconds, forever, while the operator sees a daemon that looks alive and does
-# nothing. Everything else is logged and skipped — the row is left untouched and the
-# next cycle moves on.
+# Errors that end the job rather than being retried. A misconfigured LLM key is not a
+# transient fault: every action would raise it, so retrying is a way of failing slowly.
+# `core/job.py` turns this into one typed line and a non-zero exit.
 HALTING_ERRORS = (ModelHTTPError,)
 
-# When the last "nothing to do" line went out, so the pulse is one a minute rather
-# than one a cycle. Reset by any action, so the first idle after work always prints.
-_idle_logged_at: float | None = None
-
 # Per-campaign `(qualified, past-the-gate)` counts as of the last scoring pass, so a
-# pool that has not moved is not re-scored. Process-local by design: there is one
-# process, and a restart simply scores once more than it had to.
+# pool that has not moved is not re-scored. Process-local by design: one process per
+# job, and a second job simply scores once more than it had to.
 _scored_at: dict[int, tuple[int, int]] = {}
 
-# Per-campaign row count as of the last CSV rewrite, so the run names the file when it
-# grows and says nothing when it did not. Process-local like `_scored_at`: a restart
-# announces the file once more than it had to, which is the harmless direction.
-_csv_rows: dict[int, int] = {}
-
 # ── The loop ──────────────────────────────────────────────────────
-
-
-def run_daemon() -> None:
-    """Run the cycle until the process is stopped or a halting error is raised."""
-    from openoutreach.core.operator import campaigns
-
-    known = campaigns()
-    if not known:
-        logger.error("No campaigns found — cannot start daemon")
-        return
-
-    logger.info("%s — %d campaign(s), one action per cycle",
-                colored("Daemon started", "green", attrs=["bold"]), len(known))
-
-    rotation = _rotate()
-    while True:
-        try:
-            run_one_action(next(rotation))
-        except HALTING_ERRORS as exc:
-            logger.error(
-                colored("Daemon stopped", "red", attrs=["bold"]) + " — %s\n"
-                "Check ai_model (provider:model), llm_api_key and llm_api_base "
-                "in Admin → Site Configuration.", exc,
-            )
-            return
-        except Exception:
-            logger.exception("Cycle failed — skipping to the next one")
-        time.sleep(CYCLE_SECONDS)
-
-
-def _rotate():
-    """Endless round-robin over the operator's campaigns, re-read each lap.
-
-    Re-reading matters on a fresh install: the first campaign is created during
-    onboarding, so a rotation frozen at boot would find none and never notice one
-    arriving.
-    """
-    from openoutreach.core.operator import campaigns
-
-    while True:
-        current = campaigns()
-        if not current:
-            yield None
-            continue
-        yield from current
 
 
 def run_one_action(campaign) -> bool:
@@ -153,7 +96,6 @@ def run_one_action(campaign) -> bool:
     where the daemon's time goes: the steps log what they *did*, but a row that takes
     twenty seconds to decide it has nothing to do says so nowhere else.
     """
-    global _idle_logged_at
     if campaign is None:
         return False
 
@@ -165,54 +107,10 @@ def run_one_action(campaign) -> bool:
         if acted:
             logger.info("[%s] %s — %.1fs", campaign,
                         colored(name, "cyan", attrs=["bold"]), elapsed)
-            _idle_logged_at = None
-            _refresh_csv(campaign)
             return True
         logger.debug("[%s] %s: nothing (%.1fs)", campaign, name, elapsed)
-    _log_idle(campaign)
+    logger.info("[%s] nothing to do — %s", campaign, pipeline_summary(campaign))
     return False
-
-
-def _refresh_csv(campaign) -> None:
-    """Rewrite the campaign's CSV after an action, naming it only when the count changed.
-
-    After **any** row that acted, not only after a qualification: `check_lookup` filling in
-    an email changes a row that is already in the file, and so does a lead becoming
-    `FAILED`. Anything narrower leaves the file stale in exactly the cases the operator is
-    waiting on.
-
-    A write failure must not kill the daemon. The file is a projection of the database,
-    never the record itself — a read-only volume or a full disk costs the operator a stale
-    CSV, and stopping the run would cost them the leads too.
-    """
-    from openoutreach.core.export import campaign_csv_path, write_campaign_csv
-
-    try:
-        rows = write_campaign_csv(campaign)
-    except OSError as exc:
-        logger.error("[%s] could not write the leads CSV — %s", campaign, exc)
-        return
-
-    if _csv_rows.get(campaign.pk) != rows:
-        _csv_rows[campaign.pk] = rows
-        logger.info("[%s] %d lead(s) → %s", campaign, rows, campaign_csv_path(campaign))
-
-
-def _log_idle(campaign) -> None:
-    """Say the daemon is alive and why it has nothing to do — at most once a minute.
-
-    The counts are the hierarchy's own queries in summary form, so the line answers
-    the question idleness actually raises: is there no work, or is there work behind
-    a gate? A pipeline that is empty and a pipeline that is full but out of send
-    headroom look identical from outside and are entirely different problems.
-    """
-    global _idle_logged_at
-
-    now = time.monotonic()
-    if _idle_logged_at is not None and now - _idle_logged_at < IDLE_LOG_INTERVAL_S:
-        return
-    _idle_logged_at = now
-    logger.info("[%s] idle — %s", campaign, _pipeline_summary(campaign))
 
 
 # What each waiting state means to someone reading a log, in pipeline order. The state
@@ -227,8 +125,13 @@ _WAITING_ON = (
 )
 
 
-def _pipeline_summary(campaign) -> str:
-    """One line of counts: who is waiting on what, and which gate is holding them."""
+def pipeline_summary(campaign) -> str:
+    """One line of counts: who is waiting on what, and which gate is holding them.
+
+    Public because it is also the answer to *why did the job stop short* — a drained
+    index and three addresses still on order are a dead end and a reason to run again in
+    an hour, and "7 of 10" alone cannot tell them apart.
+    """
     from django.db.models import Count
 
     from openoutreach.crm.models import Deal

@@ -2,13 +2,16 @@
 
 The verbs, in the order a reader meets them:
 
-    openoutreach                                   # run it (onboarding on first run)
-    openoutreach run                               # the same thing, named
-    openoutreach status [--json]                   # what is configured, blocked, counted, and next
+    openoutreach find 10 [emails]                  # find that many more, print the campaign, exit
+    openoutreach status [--json]                   # what is configured, blocked and counted
     openoutreach reset [--campaign N] [--all]      # start a campaign's walk over
 
-The CSV is not a verb: the run writes one file per campaign under the data dir as leads
-qualify, and `status` reports the path.
+`find` is the only verb that does work, and it is bounded: it returns when the goal is
+met, exits 0 only if it was, and prints the campaign as CSV on stdout — so the CSV is not
+a verb either, it is what redirecting the command gives you.
+
+There is no daemon and no default verb. A bare `openoutreach` prints this command list;
+the first run is `openoutreach find 10`, which also creates the database.
 
 Django's own commands remain available — `migrate`, `runserver` (the Admin at
 http://localhost:8000/admin/), `createsuperuser`.
@@ -48,7 +51,13 @@ def extract_db_path(argv):
 
 
 def main(argv=None):
-    """Run a management command, defaulting a bare invocation to `run`."""
+    """Run a management command.
+
+    A bare invocation used to default to `run`, the daemon. With the work verb bounded by
+    a goal there is nothing sensible to default *to* — `find` needs a number, and picking
+    one for the operator would be spending their credits on a guess — so a bare
+    invocation prints the command list.
+    """
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "openoutreach.settings")
 
     from django.core.management import execute_from_command_line
@@ -56,10 +65,6 @@ def main(argv=None):
     argv, db_path = extract_db_path(list(sys.argv if argv is None else argv))
     if db_path:
         os.environ["OPENOUTREACH_DB"] = db_path
-
-    # No subcommand (or first arg is a flag) → default to `run`.
-    if len(argv) == 1 or argv[1].startswith("-"):
-        argv = [argv[0], "run"] + argv[1:]
 
     execute_from_command_line(argv)
 

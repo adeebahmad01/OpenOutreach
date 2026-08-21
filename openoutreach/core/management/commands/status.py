@@ -1,12 +1,12 @@
 # openoutreach/core/management/commands/status.py
-"""Ask the daemon what happened.
+"""What is in the database, without running a job.
 
     openoutreach status            # human summary
     openoutreach status --json     # the whole document, for a program
 
-The verb an agent uses instead of tailing a log. It reads the same SQLite file the
-daemon is writing (WAL, so no lock), touches nothing, and never blocks: a provider
-that will not answer is reported as an unknown balance, not an exception.
+`find` reports what it did; this reports what stands. It touches nothing and never
+blocks: a provider that will not answer is an unknown balance, not an exception. SQLite
+is in WAL mode, so it still answers while another job holds a write lock.
 
 Output contract: the summary is the **result**, so it goes to stdout; logs go to
 stderr. ``--json`` prints one object and nothing else, so it pipes into ``jq``.
@@ -103,8 +103,8 @@ def _render_next(action: dict) -> str:
     lines = [f"Next: {action['message']}"]
     if action.get("unlocks"):
         lines.append(f"  unlocks: {action['unlocks']}")
-    if action.get("path"):
-        lines.append(f"  file: {action['path']}")
+    if action.get("command"):
+        lines.append(f"  run: {action['command']}")
     if action.get("url"):
         lines.append(f"  go to: {action['url']}")
     return "\n".join(lines)

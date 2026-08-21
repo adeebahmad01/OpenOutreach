@@ -1,0 +1,160 @@
+# openoutreach/core/job.py
+"""A bounded run: work until the goal is met, or until nothing can advance.
+
+The daemon this replaces never ended, which is the wrong shape for the reader we care
+about most. An agent invoking a tool gets stdout, stderr and an exit code; a process that
+does not finish gives it none of the three, so everything it wanted to know had to be
+polled out of a second verb or watched in a file. A job with a goal returns all three.
+
+**There is no timeout here, deliberately.** Every unit of work already carries its own
+bound — ``deal.not_before`` is the architecture's one retry mechanism, the lookup poll
+doubles its own backoff, and ``urllib3.Retry`` bounds the 429s. A job-level clock would be
+a second timeout answering a question the first one already answers, and answering it
+worse: a clock knows nothing about *why* it is waiting. So the terminal condition is
+derived from real state instead — **the job ends when nothing can advance right now**,
+which is exactly what ``cycle.run_one_action`` returning ``False`` already means.
+
+**Progress is a set, not a subtraction.** A goal counts the leads that *entered* it during
+this run, so a lead the qualifier rejects mid-run cannot silently cancel out one that was
+found. It also makes ``--new`` exact for both units: for ``emails`` the rows that changed
+are usually leads that were already exportable and merely got an address, which no
+timestamp on the row would identify.
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+
+from openoutreach.core.errors import ErrorType
+
+logger = logging.getLogger(__name__)
+
+LEADS = "leads"
+EMAILS = "emails"
+UNITS = (LEADS, EMAILS)
+
+
+@dataclass(frozen=True)
+class Goal:
+    """How much more of what. ``count`` is a **delta**, not a total.
+
+    *Ten more than you had when I started* is what "next 10" means in English, and the
+    only reading under which running it twice gets you twenty.
+    """
+
+    count: int
+    unit: str = LEADS
+
+    def __str__(self) -> str:
+        return f"{self.count} {self.unit}"
+
+
+@dataclass
+class JobResult:
+    """What the job did — the one thing the exit code and ``--json`` are both built from."""
+
+    goal: Goal
+    produced_ids: list[int] = field(default_factory=list)
+    stopped_because: str | None = None
+    """``None`` when the goal was met; otherwise a type from ``core/errors.py``."""
+
+    detail: str = ""
+
+    @property
+    def produced(self) -> int:
+        return len(self.produced_ids)
+
+    @property
+    def reached(self) -> bool:
+        return self.stopped_because is None
+
+
+def run_job(campaign, goal: Goal, on_new_lead=None) -> JobResult:
+    """Work the cycle until *goal* is met or nothing can advance.
+
+    Never raises on a provider refusal — it stops and reports which one. ``on_new_lead``
+    is called with each lead as it enters the goal, which is how ``--open`` puts a profile
+    in front of the operator while the job runs rather than in a burst at the end.
+    """
+    from openoutreach.core.cycle import HALTING_ERRORS, run_one_action
+
+    baseline = _unit_ids(campaign, goal.unit)
+    result = JobResult(goal=goal)
+
+    while result.produced < goal.count:
+        try:
+            acted = run_one_action(campaign)
+            _collect(campaign, goal, baseline, result, on_new_lead)
+        except HALTING_ERRORS as exc:
+            # A bad LLM key is not a transient fault: every action would raise it. The
+            # daemon stopped the loop loudly for this; a job ends with an answer.
+            result.stopped_because = ErrorType.BAD_CONFIG
+            result.detail = (
+                f"the model rejected the request ({exc}) — check ai_model, llm_api_key "
+                "and llm_api_base"
+            )
+            return result
+        except KeyboardInterrupt:
+            # The operator's own deadline. The one case with no natural bound is a
+            # campaign whose leads are all rejected — the walk keeps finding, the
+            # qualifier keeps saying no, and every row honestly reports that it acted.
+            # An interrupt should hand back the rows, not a stack trace.
+            result.stopped_because = ErrorType.GOAL_UNREACHED
+            result.detail = f"interrupted — {result.produced} of {goal}"
+            return result
+
+        if not acted and result.produced < goal.count:
+            result.stopped_because = ErrorType.GOAL_UNREACHED
+            result.detail = _why_idle(campaign, result)
+            return result
+
+    return result
+
+
+# ── measuring the goal ───────────────────────────────────────────
+
+def _unit_ids(campaign, unit: str) -> set[int]:
+    """The leads that currently count toward *unit*.
+
+    ``leads`` is everything the export would write; ``emails`` narrows that to the rows
+    carrying an address. **Exportable is not mailable** — a `QUALIFIED` lead exports with
+    a blank ``email``, because an address is an enrichment on top and never a
+    precondition — so the two units are genuinely different sets, not a filter applied to
+    one.
+    """
+    from openoutreach.core.export import lead_records
+
+    return {
+        record["lead_id"]
+        for record in lead_records(campaign)
+        if unit != EMAILS or record["email"]
+    }
+
+
+def _collect(campaign, goal: Goal, baseline: set[int], result: JobResult, on_new_lead) -> None:
+    """Record whatever entered the goal since the job started, once each."""
+    from openoutreach.crm.models import Lead
+
+    fresh = _unit_ids(campaign, goal.unit) - baseline - set(result.produced_ids)
+    if not fresh:
+        return
+
+    for lead in Lead.objects.filter(pk__in=fresh):
+        result.produced_ids.append(lead.pk)
+        if on_new_lead is not None:
+            on_new_lead(lead)
+
+
+def _why_idle(campaign, result: JobResult) -> str:
+    """What the job is short by, and what it is waiting on, in one line.
+
+    *Nothing may be reported as an empty result*: "7 of 10" alone leaves the reader unable
+    to tell a drained index from three addresses still on order, which are a dead end and
+    a reason to run again in an hour.
+    """
+    from openoutreach.core.cycle import pipeline_summary
+
+    return (
+        f"{result.produced} of {result.goal} — nothing left to do right now. "
+        f"{pipeline_summary(campaign)}"
+    )

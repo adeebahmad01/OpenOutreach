@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help logs test stop build up install setup run admin
+.PHONY: help logs test stop build up install setup find admin
 
 help:
 	@perl -nle'print $& if m{^[a-zA-Z_-]+:.*?## .*$$}' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-25s\033[0m %s\n", $$1, $$2}'
@@ -11,8 +11,8 @@ install: ## install the package and dev dependencies (editable)
 setup: install ## install + migrate (the CRM bootstraps itself on the first run)
 	python manage.py migrate --no-input
 
-run: ## run it
-	python manage.py run
+find: ## find leads: make find N=10 [UNIT=emails]
+	python manage.py find $(or $(N),1) $(UNIT)
 
 test: ## run the test suite
 	pytest

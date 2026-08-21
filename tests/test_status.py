@@ -133,40 +133,27 @@ def test_next_action_is_onboarding_when_setup_is_incomplete(campaign):
 
 @pytest.mark.django_db
 def test_nothing_is_asked_of_a_run_that_has_qualified_nobody(campaign, configured, has_key, balance):
-    """Never before value: an empty pipeline at zero credits is asked for nothing."""
+    """Never before value: an empty pipeline at zero credits is asked for no money — it
+    is told to go and find some leads, which costs nothing."""
     with balance(value=0):
         document = status_module.build_status()
 
-    assert document["next_action"]["type"] == "wait"
+    assert document["next_action"]["type"] == "find_leads"
 
 
 @pytest.mark.django_db
-def test_the_file_is_the_next_action_once_credits_are_not_the_blocker(
+def test_printing_the_rows_is_the_next_action_once_credits_are_not_the_blocker(
     campaign, configured, has_key, balance
 ):
-    """The rows are already on disk, so the action is a *read* — and it names the file."""
-    from openoutreach.core.export import campaign_csv_path
-
+    """The leads exist; getting them out costs nothing and spends nothing."""
     DealFactory(campaign=campaign, lead=LeadFactory(), state=DealState.RESOLVED, reason="fits")
 
     with balance(value=40):
-        document = status_module.build_status()
+        action = status_module.build_status()["next_action"]
 
-    action = document["next_action"]
-    assert action["type"] == "read_leads"
+    assert action["type"] == "print_leads"
     assert action["leads"] == 1
-    assert action["path"] == str(campaign_csv_path(campaign)) == document["export"]["path"]
-    assert "command" not in action
-
-
-@pytest.mark.django_db
-def test_the_export_path_is_unknown_until_there_is_something_in_it(
-    campaign, configured, has_key, balance
-):
-    """No rows, no file — and `path: null` says that rather than naming a file that
-    is not there."""
-    with balance(value=40):
-        assert status_module.build_status()["export"]["path"] is None
+    assert action["command"] == "openoutreach find 0 > leads.csv"
 
 
 @pytest.mark.django_db
@@ -183,11 +170,13 @@ def test_credit_ask_carries_the_count_and_the_attributed_url(campaign, configure
 
 
 @pytest.mark.django_db
-def test_a_running_campaign_with_nothing_yet_says_so(campaign, configured, has_key, balance):
+def test_a_campaign_with_nothing_yet_is_told_to_go_and_find_some(
+    campaign, configured, has_key, balance
+):
     with balance(value=40):
         action = status_module.build_status()["next_action"]
 
-    assert action["type"] == "wait"
+    assert action["type"] == "find_leads"
 
 
 # ── rendering ────────────────────────────────────────────────────
@@ -201,7 +190,7 @@ def test_json_is_one_object_and_nothing_else(campaign, configured, has_key, bala
 
     document = json.loads(capsys.readouterr().out)  # would raise on any stray line
     assert set(document) == {
-        "onboarding", "campaigns", "totals", "credits", "blocked", "export", "next_action",
+        "onboarding", "campaigns", "totals", "credits", "blocked", "next_action",
     }
 
 
@@ -214,4 +203,4 @@ def test_human_summary_reports_the_balance_and_the_next_action(campaign, configu
 
     assert "Credits: 38 left." in text
     assert "1 exportable" in text
-    assert "Next: 1 qualified lead(s) are already written to " in text
+    assert "Next: 1 qualified lead(s) ready." in text

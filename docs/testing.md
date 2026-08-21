@@ -48,4 +48,4 @@ tests/
 
 - **Mock at the boundary.** Patch the BetterContact HTTP client, the hub client and the pydantic-ai model — not the pipeline functions that call them.
 - **CRM objects** come from `factories.py` (factory-boy) or direct model creation.
-- **No browser, no network.** There is nothing to launch and no live API to hit; the daemon is browserless and every external call is stubbed.
+- **No browser, no network.** There is nothing to launch and no live API to hit; the tool is browserless and every external call is stubbed.

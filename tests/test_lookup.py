@@ -74,7 +74,12 @@ class TestBuyAddress:
         assert deal.lookup_attempt == 0
         assert deal.not_before > timezone.now()
 
-    def test_an_unconfigured_finder_leaves_the_deal_queued(self, campaign):
+    def test_an_unconfigured_finder_leaves_the_deal_queued_but_backs_it_off(self, campaign):
+        """**Queued is not the same as due.** A deal we could not submit has to stop
+        being eligible, or the next pass picks the same one and a bounded job never
+        returns — noise every few seconds under the old daemon, an endless run now.
+        `not_before` is the architecture's one waiting mechanism and this is exactly the
+        case it exists for."""
         deal = _ready_to_find(campaign)
 
         with patch("openoutreach.contacts.service.resolve", return_value=None), \
@@ -84,9 +89,12 @@ class TestBuyAddress:
 
         submit.assert_not_called()
         assert deal.lookup_request_id == ""
+        assert deal.not_before > timezone.now()
 
-    def test_an_outage_spends_no_credit_and_leaves_it_queued(self, campaign):
-        """No handle exists to poll, so the next cycle simply tries again."""
+    def test_an_outage_spends_no_credit_and_backs_the_deal_off(self, campaign):
+        """No handle exists to poll, so it will be tried again — after a wait that
+        doubles, the same one an in-flight poll takes. Two ways of waiting would be two
+        retry policies."""
         deal = _ready_to_find(campaign)
 
         with patch("openoutreach.contacts.service.resolve", return_value=None), \
@@ -96,6 +104,8 @@ class TestBuyAddress:
             assert buy_address(deal) is None
 
         assert deal.lookup_request_id == ""
+        assert deal.lookup_attempt == 1
+        assert deal.not_before > timezone.now()
 
 
 # ── check_lookup ──────────────────────────────────────────────────
