@@ -14,12 +14,40 @@ def test_verify_llm_credentials_ok(monkeypatch):
     assert llm.verify_llm_credentials("anthropic:claude", "sk-key") is None
 
 
-def test_verify_llm_credentials_reports_error(monkeypatch):
+def test_verify_llm_credentials_reports_a_provider_refusal(monkeypatch):
+    from pydantic_ai.exceptions import ModelHTTPError
+
     def boom(*a, **k):
-        raise RuntimeError("invalid api key")
+        raise ModelHTTPError(status_code=401, model_name="claude", body="invalid api key")
 
     monkeypatch.setattr(llm, "_ping_model", boom)
-    assert llm.verify_llm_credentials("anthropic:claude", "bad") == "invalid api key"
+    assert "invalid api key" in llm.verify_llm_credentials("anthropic:claude", "bad")
+
+
+def test_verify_llm_credentials_reports_an_unusable_model_id(monkeypatch):
+    # `build_llm_model` rejects the id before any request is made; that is an answer
+    # about a value the operator set, not a bug.
+    def boom(*a, **k):
+        raise ValueError("AI_MODEL 'mystery' has no provider prefix.")
+
+    monkeypatch.setattr(llm, "_ping_model", boom)
+    assert "no provider prefix" in llm.verify_llm_credentials("mystery", "sk-key")
+
+
+def test_verify_llm_credentials_does_not_swallow_a_bug(monkeypatch):
+    """A library incompatibility must not read as a rejected key.
+
+    This is the `anthropic` 1.0.0 failure: it dropped `temperature`, pydantic-ai
+    passed it anyway, and the `TypeError` came back as
+    `bad_config: OPENOUTREACH_LLM_API_KEY` — sending the operator after a key that
+    was fine. Only what a configuration can cause is an answer here.
+    """
+    def boom(*a, **k):
+        raise TypeError("create() got an unexpected keyword argument 'temperature'")
+
+    monkeypatch.setattr(llm, "_ping_model", boom)
+    with pytest.raises(TypeError, match="temperature"):
+        llm.verify_llm_credentials("anthropic:claude", "sk-key")
 
 
 def test_every_provider_sdk_is_silenced_at_debug():

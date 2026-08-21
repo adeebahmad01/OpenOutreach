@@ -37,6 +37,9 @@ class ErrorType:
     ONBOARDING_INCOMPLETE = "onboarding_incomplete"
     """Onboarding cannot finish from what is configured, and no TTY is available."""
 
+    NO_TTY = "no_tty"
+    """A destructive action needs confirmation and there is no terminal to ask."""
+
     NOT_INITIALIZED = "not_initialized"
     """The database has no schema yet — nothing has run here. Only ``find`` creates it."""
 

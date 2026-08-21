@@ -22,6 +22,7 @@ existed, and a global irreversible wipe is not a thing to keep two ways of doing
 from __future__ import annotations
 
 import shutil
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from django.conf import settings
 from django.core.management.base import CommandError
 from django.db import transaction
 
+from openoutreach.core.errors import ErrorType, OpenOutreachError
 from openoutreach.core.management.base import OpenOutreachCommand
 
 
@@ -117,6 +119,16 @@ class Command(OpenOutreachCommand):
                 self.stdout.write(f"  {verb.lower():>12} {count:>6} {name}")
 
     def _confirm(self) -> bool:
+        """Ask a human, or refuse — headless there is nobody to ask.
+
+        Reading stdin without a TTY raises ``EOFError``, which is a traceback for
+        what is really an answer: silence is not consent to a delete.
+        """
+        if not sys.stdin.isatty():
+            raise OpenOutreachError(
+                ErrorType.NO_TTY,
+                "reset needs confirmation and there is no terminal — pass --yes",
+            )
         answer = input("Proceed? [y/N] ").strip().lower()
         return answer in ("y", "yes")
 

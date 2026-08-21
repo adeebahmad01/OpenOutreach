@@ -225,9 +225,19 @@ def _ping_model(ai_model: str, api_key: str, api_base: str) -> None:
 
 
 def verify_llm_credentials(ai_model: str, api_key: str, api_base: str = "") -> str | None:
-    """Live ping for onboarding: return ``None`` if the model answers, else the error."""
+    """Live ping for onboarding: return ``None`` if the model answers, else the error.
+
+    Only the provider's own refusals and an unusable model id are answers. Anything
+    else — an incompatible library, a broken install — propagates as the bug it is,
+    because the caller reports what it catches here as the operator's credentials
+    being wrong, and sending someone after a key that is fine is worse than a
+    traceback. (`anthropic` 1.0.0 dropping `temperature` read as a rejected key for
+    an afternoon; it was a `TypeError` in our own process.)
+    """
+    from pydantic_ai.exceptions import ModelAPIError, UserError
+
     try:
         _ping_model(ai_model, api_key, api_base)
         return None
-    except Exception as exc:  # noqa: BLE001 — verification reports every failure mode
+    except (ModelAPIError, UserError, ValueError) as exc:
         return str(exc)

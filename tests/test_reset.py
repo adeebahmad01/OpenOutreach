@@ -5,6 +5,7 @@ from io import StringIO
 import pytest
 from django.core.management import CommandError, call_command
 
+from openoutreach.core.errors import OpenOutreachError
 from openoutreach.core.models import Campaign, Keyword, QueryNode, SiteConfig
 from openoutreach.core.pipeline.select import token_key
 from openoutreach.crm.models import Deal, DealState, Lead
@@ -102,3 +103,20 @@ class TestScoping:
     def test_nothing_to_reset_is_not_an_error(self, db):
         _campaign()
         assert "Nothing to reset" in _run(yes=True)
+
+
+class TestConfirmation:
+    def test_no_tty_refuses_instead_of_raising_eoferror(self, db, monkeypatch):
+        # Every other call in this file passes `--yes`, which is why the hole lived:
+        # headless, `input()` raises EOFError and the operator gets a traceback for
+        # what is really an answer.
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        c = _campaign()
+        _populate(c)
+
+        with pytest.raises(OpenOutreachError) as exc:
+            _run()
+
+        assert exc.value.error_type == "no_tty"
+        assert "--yes" in exc.value.message
+        assert QueryNode.objects.count() == 1  # and nothing was deleted
