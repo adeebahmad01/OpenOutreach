@@ -138,8 +138,28 @@ def resolve_log_level(log_level: str | None, verbosity: int) -> int:
     return logging.DEBUG if verbosity >= 2 else logging.INFO
 
 
+def _pin_termcolor_to_stderr() -> None:
+    """Make every ``colored()`` call in the codebase key off stderr, not stdout.
+
+    termcolor's own ``can_colorize()`` gates on ``sys.stdout.isatty()`` and caches
+    the answer forever (``@cache``) — wrong stream for a tool where every colored
+    call (logs, the banner, ``qualify``'s per-lead status) writes to stderr, and a
+    one-shot cache that would freeze in the answer from whichever stream happened
+    to get checked first. ``find ... > leads.csv`` redirects stdout but leaves
+    stderr a live terminal, so without this every colored call goes dark the
+    moment stdout stops being a TTY. Only acts if the operator hasn't already
+    forced an answer via ``NO_COLOR``/``FORCE_COLOR``, and runs before any
+    ``colored()`` call so the cached decision is the right one from the start.
+    """
+    if "NO_COLOR" in os.environ or "FORCE_COLOR" in os.environ:
+        return
+    os.environ["FORCE_COLOR" if _color_enabled() else "NO_COLOR"] = "1"
+
+
 def configure_logging(level: int = logging.INFO):
     """Configure root logger with colored output and silence noisy libraries."""
+    _pin_termcolor_to_stderr()
+
     root = logging.getLogger()
     root.handlers.clear()
 
