@@ -83,6 +83,7 @@ def run_job(campaign, goal: Goal, on_new_lead=None, buy_addresses: bool = False)
     confidence gate on an earlier pass. That is what it used to do.
     """
     from openoutreach.core.cycle import HALTING_ERRORS, run_one_action
+    from openoutreach.enrichment.bettercontact import BetterContactUnavailable
 
     baseline = _unit_ids(campaign, goal.unit)
     result = JobResult(goal=goal)
@@ -99,6 +100,14 @@ def run_job(campaign, goal: Goal, on_new_lead=None, buy_addresses: bool = False)
                 f"the model rejected the request ({exc}) — check ai_model, llm_api_key "
                 "and llm_api_base"
             )
+            return result
+        except BetterContactUnavailable as exc:
+            # A refusal the provider will repeat — a rejected key, an empty wallet, a
+            # 429 that outlasted its backoff. Discovery raises these rather than
+            # returning an empty page, so the run ends naming the refusal instead of
+            # reporting the leads it did not find. The rows already produced stand.
+            result.stopped_because = exc.error_type
+            result.detail = f"{result.produced} of {goal} — {exc}"
             return result
         except KeyboardInterrupt:
             # The operator's own deadline. The one case with no natural bound is a

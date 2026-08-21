@@ -11,12 +11,14 @@ from unittest.mock import patch
 
 import pytest
 
+from openoutreach.core.errors import ErrorType
 from openoutreach.core.models import Campaign, Keyword, QueryNode, SiteConfig
 from openoutreach.core.pipeline import discover as discover_mod
 from openoutreach.core.pipeline import select, vocabulary
 from openoutreach.core.pipeline.discover import discover
 from openoutreach.crm.models import Deal, DealState, Lead, Outcome
 from openoutreach.discovery import Page
+from openoutreach.enrichment.bettercontact import BetterContactUnavailable
 
 
 @pytest.fixture(autouse=True)
@@ -206,6 +208,26 @@ class TestOutage:
 
         node.refresh_from_db()
         assert node.state == QueryNode.State.FRONTIER
+
+    @pytest.mark.parametrize("error_type", [
+        ErrorType.PROVIDER_AUTH,
+        ErrorType.PROVIDER_OUT_OF_CREDITS,
+        ErrorType.PROVIDER_RATE_LIMITED,
+    ])
+    def test_a_refusal_is_raised_rather_than_returned_as_an_empty_page(self, db, error_type):
+        """The worst failure this product has is telling an operator *no leads match
+        your product* when the truth is *your key was rejected*. A refusal is a final
+        answer every subsequent call would repeat, so it leaves discovery by the one
+        route that cannot be mistaken for a count of zero."""
+        c = _campaign()
+        _node(c, [("lead_job_title", "founder")])
+
+        with patch("openoutreach.discovery.search",
+                   side_effect=BetterContactUnavailable("refused", error_type)):
+            with pytest.raises(BetterContactUnavailable) as raised:
+                discover(c)
+
+        assert raised.value.error_type == error_type
 
 
 class TestVocabulary:

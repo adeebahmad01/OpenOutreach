@@ -100,7 +100,15 @@ def _fetch(node, offset: int):
     An outage is explicitly *not* evidence about the query. The old walk called
     ``mark_exhausted`` here, which was final and had no retry path, so one hiccup during
     a seed fetch permanently retired a campaign's best query.
+
+    **A refusal is not an outage, and it is re-raised.** A 401, a 402 and an exhausted
+    429 backoff are each a final answer that every subsequent call would repeat, so
+    swallowing one turns *your key was rejected* into ``0`` new leads — the one failure
+    ``core/errors.py`` exists to prevent. The job above catches it and stops with that
+    error's own name. Only ``provider_unavailable`` — genuinely could not be reached —
+    keeps its place on the frontier and returns ``None``.
     """
+    from openoutreach.core.errors import ErrorType
     from openoutreach.core.pipeline.select import DISCOVERY_PAGE_SIZE
     from openoutreach.discovery import search, step_line
     from openoutreach.enrichment import bettercontact
@@ -108,6 +116,8 @@ def _fetch(node, offset: int):
     try:
         return search(node.to_filters(), limit=DISCOVERY_PAGE_SIZE, offset=offset)
     except bettercontact.BetterContactUnavailable as exc:
+        if exc.error_type != ErrorType.PROVIDER_UNAVAILABLE:
+            raise
         logger.warning("%s", step_line(
             "fetch", f"provider unavailable ({exc}) — leaving the node on the frontier",
             glyph="⚠", color="red"))
@@ -162,7 +172,9 @@ def discover(campaign, qualifier=None) -> int:
 
     ``0`` means the frontier is spanned (nothing unfired and nothing left to deepen) or a
     fetch was unavailable — both best-effort, since a provider outage must not fail the
-    enclosing task. ``qualifier`` is accepted and ignored: the GP no longer selects
+    enclosing task. A provider *refusal* is the exception and propagates
+    (``_fetch``): a rejected key must never be read as a query that matches nobody.
+    ``qualifier`` is accepted and ignored: the GP no longer selects
     queries (§13), and the parameter stays only so the call sites in ``pools`` read the
     same for one release.
 
