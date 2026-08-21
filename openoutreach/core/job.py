@@ -86,11 +86,14 @@ def run_job(campaign, goal: Goal, on_new_lead=None, buy_addresses: bool = False)
     from openoutreach.enrichment.bettercontact import BetterContactUnavailable
 
     baseline = _unit_ids(campaign, goal.unit)
+    presented_baseline = _presented_ids(campaign) if goal.unit == EMAILS else None
     result = JobResult(goal=goal)
 
     while result.produced < goal.count:
         try:
-            acted = run_one_action(campaign, buy_addresses=buy_addresses)
+            acted = run_one_action(
+                campaign, buy_addresses=buy_addresses,
+                max_new_lookups=_lookup_budget(campaign, goal, presented_baseline))
             _collect(campaign, goal, baseline, result, on_new_lead)
         except HALTING_ERRORS as exc:
             # A bad LLM key is not a transient fault: every action would raise it. The
@@ -144,6 +147,39 @@ def _unit_ids(campaign, unit: str) -> set[int]:
         for record in lead_records(campaign)
         if unit != EMAILS or record["email"]
     }
+
+
+def _presented_ids(campaign) -> set[int]:
+    """Deals this campaign has handed to ``buy_address`` — resolved, in flight, or
+    determined unfindable.
+
+    This, not ``produced``, is what caps *new* paid submissions for an ``emails``
+    goal: a submission almost never resolves synchronously, so it never shows up in
+    ``produced`` (which only counts *resolved* addresses) — but it has still spent a
+    credit and sent a profile to the resolver. Counting it here, and capping new
+    submissions at ``goal.count`` minus this count, is what stops a goal of 1 from
+    quietly submitting a lookup for every lead that clears the confidence gate.
+    """
+    from openoutreach.crm.models import Deal, DealState
+
+    return set(
+        Deal.objects.filter(
+            campaign=campaign,
+            state__in=(DealState.FINDING_EMAIL, DealState.RESOLVED, DealState.NO_EMAIL_BETTERCONTACT),
+        ).values_list("pk", flat=True)
+    )
+
+
+def _lookup_budget(campaign, goal: Goal, presented_baseline: set[int] | None) -> int | None:
+    """How many *more* paid lookups this run may still submit, or ``None`` (no cap).
+
+    Only an ``emails`` goal has a budget at all — ``leads`` isn't counted in paid
+    lookups, so nothing here should throttle it.
+    """
+    if presented_baseline is None:
+        return None
+    new_presented = len(_presented_ids(campaign) - presented_baseline)
+    return max(0, goal.count - new_presented)
 
 
 def _collect(campaign, goal: Goal, baseline: set[int], result: JobResult, on_new_lead) -> None:

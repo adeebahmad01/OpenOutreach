@@ -7,9 +7,11 @@ subtraction**, so a lead the qualifier rejects mid-run cannot silently cancel ou
 was found. And **the job ends when nothing can advance**, which is the whole reason there
 is no timeout: every wait that matters is already written on the row that is waiting.
 """
+from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
+from django.utils import timezone
 
 from openoutreach.core import job
 from openoutreach.core.errors import ErrorType
@@ -26,7 +28,7 @@ def _exportable(campaign, email=None):
 
 def _finds(campaign, per_action=1, email=None):
     """A `run_one_action` that produces leads, so a goal can actually be reached."""
-    def action(_campaign, buy_addresses=True):
+    def action(_campaign, buy_addresses=True, max_new_lookups=None):
         for _ in range(per_action):
             _exportable(campaign, email=email)
         return True
@@ -70,7 +72,7 @@ class TestReachingTheGoal:
         report zero here, having found a lead and lost an unrelated one."""
         doomed = _exportable(campaign)
 
-        def find_one_lose_one(_campaign, buy_addresses=True):
+        def find_one_lose_one(_campaign, buy_addresses=True, max_new_lookups=None):
             _exportable(campaign)
             doomed.state = DealState.FAILED
             doomed.outcome = "wrong_fit"
@@ -102,7 +104,7 @@ class TestUnits:
         the row."""
         deal = _exportable(campaign, email=None)
 
-        def resolve(_campaign, buy_addresses=True):
+        def resolve(_campaign, buy_addresses=True, max_new_lookups=None):
             deal.lead.email = "ada@acme.com"
             deal.lead.save()
             return True
@@ -119,6 +121,55 @@ class TestUnits:
                 result = run_job(campaign, Goal(1, EMAILS))
 
         assert not result.reached and result.produced == 0
+
+
+# ── capping new paid submissions ─────────────────────────────────
+
+
+@pytest.mark.django_db
+class TestEmailsGoalCapsNewSubmissions:
+    """A submission almost never resolves synchronously (BetterContact is async), so it
+    never shows up in ``produced`` — but it has already spent a credit and sent a
+    profile to the resolver. Without a cap independent of ``produced``, a goal of 1
+    would keep calling ``run_one_action`` and submitting a *different* lead's lookup
+    every time, since nothing else stops the loop before the goal-met check."""
+
+    def test_a_goal_of_one_submits_at_most_one_lookup(self, campaign):
+        deals = [
+            DealFactory(campaign=campaign, lead=LeadFactory(email=None),
+                        state=DealState.QUALIFIED)
+            for _ in range(3)
+        ]
+        submissions = []
+
+        def fake_promote(_campaign, _qualifier):
+            promoted = 0
+            for deal in deals:
+                deal.refresh_from_db()
+                if deal.state == DealState.QUALIFIED:
+                    deal.state = DealState.READY_TO_FIND_EMAIL
+                    deal.save()
+                    promoted += 1
+            return promoted
+
+        def fake_buy_address(deal):
+            # Mirrors the real paid-submit path: parks at FINDING_EMAIL with a job
+            # handle and a backoff far enough out that this run never re-polls it.
+            submissions.append(deal.pk)
+            deal.lookup_request_id = f"job-{deal.pk}"
+            deal.not_before = timezone.now() + timedelta(hours=1)
+            return DealState.FINDING_EMAIL
+
+        with patch("openoutreach.core.ml.qualifier.qualifier_for", return_value=object()), \
+             patch("openoutreach.core.pipeline.ready_pool.promote_to_ready",
+                   side_effect=fake_promote), \
+             patch("openoutreach.enrichment.lookup.buy_address",
+                   side_effect=fake_buy_address), \
+             patch("openoutreach.core.pipeline.top_up.top_up", return_value=False):
+            result = run_job(campaign, Goal(1, EMAILS), buy_addresses=True)
+
+        assert submissions == [deals[0].pk]
+        assert not result.reached  # the one submission is still in flight, not resolved
 
 
 # ── stopping short ────────────────────────────────────────────────
@@ -151,7 +202,7 @@ class TestStoppingShort:
         """Seven leads are seven leads, and the caller gets both the count and the rows."""
         acted = []
 
-        def once(_campaign, buy_addresses=True):
+        def once(_campaign, buy_addresses=True, max_new_lookups=None):
             if acted:
                 return False
             acted.append(True)
@@ -179,7 +230,7 @@ class TestStoppingShort:
         """The operator's own deadline, for the one case with no natural bound: a
         campaign whose leads are all rejected keeps finding, keeps rejecting, and every
         row honestly reports that it acted."""
-        def find_then_interrupt(_campaign, buy_addresses=True):
+        def find_then_interrupt(_campaign, buy_addresses=True, max_new_lookups=None):
             if not campaign.deals.exists():
                 _exportable(campaign)
                 return True

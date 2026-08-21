@@ -173,7 +173,7 @@ class TestTheCommandContract:
         _exportable(campaign, "old@acme.com")
 
         with patch("openoutreach.core.cycle.run_one_action",
-                   side_effect=lambda c, buy_addresses=True: bool(
+                   side_effect=lambda c, buy_addresses=True, max_new_lookups=None: bool(
                        _exportable(c, "new@acme.com"))):
             rows = _run("1")
 
@@ -183,7 +183,7 @@ class TestTheCommandContract:
         _exportable(campaign, "old@acme.com")
 
         with patch("openoutreach.core.cycle.run_one_action",
-                   side_effect=lambda c, buy_addresses=True: bool(
+                   side_effect=lambda c, buy_addresses=True, max_new_lookups=None: bool(
                        _exportable(c, "new@acme.com"))):
             rows = _run("1", "--new")
 

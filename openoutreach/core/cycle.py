@@ -88,7 +88,7 @@ _scored_at: dict[int, tuple[int, int]] = {}
 # ── The loop ──────────────────────────────────────────────────────
 
 
-def run_one_action(campaign, buy_addresses: bool = False) -> bool:
+def run_one_action(campaign, buy_addresses: bool = False, max_new_lookups: int | None = None) -> bool:
     """Do the highest-priority thing available for *campaign*. Returns whether it did.
 
     Each row is a query and a step. The first one that produces work wins and the
@@ -103,13 +103,27 @@ def run_one_action(campaign, buy_addresses: bool = False) -> bool:
     deals have queued up past the confidence gate. The default used to be True, which
     made *not* spending the thing you had to remember to ask for — and a caller who
     forgets a flag should lose a feature, never money.
+
+    **``max_new_lookups`` bounds how many *more* leads may be handed to ``buy_address``
+    this call, independent of ``buy_addresses``.** Without it, a goal counted in
+    ``emails`` could submit far more paid lookups than asked for: ``core/job.py``'s loop
+    keeps calling this function until a lookup *resolves*, but a submission almost never
+    resolves synchronously (BetterContact is async), so every call that doesn't resolve
+    one just goes and submits a *different* lead's lookup instead — one credit and one
+    profile handed to the resolver per call, with nothing stopping it at the count the
+    operator typed. ``0`` (not ``None``) skips row 3 for this call the same way
+    ``buy_addresses=False`` does, so a caller can throttle without disabling spending
+    outright.
     """
     if campaign is None:
         return False
 
+    may_spend = buy_addresses and (max_new_lookups is None or max_new_lookups > 0)
     for name, row, spends in ROWS:
-        if spends and not buy_addresses:
-            logger.debug("[%s] → %s? skipped — addresses not requested", campaign, name)
+        if spends and not may_spend:
+            reason = "addresses not requested" if not buy_addresses \
+                else "this run's lookup budget is spent"
+            logger.debug("[%s] → %s? skipped — %s", campaign, name, reason)
             continue
         logger.debug("[%s] → %s?", campaign, name)
         started = time.monotonic()
