@@ -35,7 +35,7 @@ can do, so priority is just the order these are written in:
 
     1  FINDING_EMAIL          check the lookup            (not_before elapsed)
     2  QUALIFIED              score with the campaign's model
-    3  READY_TO_FIND_EMAIL    buy the address             (a provider is configured)
+    3  READY_TO_FIND_EMAIL    buy the address             (free sources first)
     4  (the campaign itself)  top up the pipeline         (always)
 
 A state that is not listed is terminal, and terminal costs nothing: RESOLVED,
@@ -48,8 +48,10 @@ qualifying, for someone there is no room to email today* — which was right whi
 every lead ended in a send. Nothing rations discovery or qualification now: they cost
 the operator's own LLM key and nothing else, and the work is bounded the only way that
 matters — one unit per call, and a goal that says how many calls. Row 3 is the single
-paid step and asks only whether there is a provider to pay; what caps the spend is the
-number the operator typed, since one credit is one verified address.
+paid step, and even there the payment is the last resort: an address in hand and the
+hub cache are tried first and cost nothing, so the key and the credit are checked on
+the paid leg alone rather than at the row. What caps the spend is the number the
+operator typed, since one credit is one verified address.
 
 **Two rows are gone with the sending leg** — answering a reply and sending a first
 email — along with the mail pass and the daily warmth re-measure that fed them. They
@@ -229,18 +231,19 @@ def _pool_signature(campaign) -> tuple[int, int]:
 
 
 def _buy_addresses(campaign) -> bool:
-    from openoutreach.enrichment import bettercontact
     from openoutreach.enrichment.lookup import buy_address
 
-    # The only gate left on the one paid step: is there a provider to pay. What
-    # bounds the spend is the operator's own prepaid credit balance, which the
-    # provider enforces — see ``_top_up`` for why nothing here rations it on our
-    # side. The balance is **readable** (``bettercontact.credit_balance``), which is
-    # how ``status`` reports it and how the run can warn before a lead fails rather
-    # than after a 402; it is deliberately not consulted here, because one extra
-    # request per purchase would buy nothing the provider's own answer does not say.
-    if not bettercontact.is_configured():
-        return False
+    # **This row has no gate on it any more, and that is deliberate.** It used to
+    # decline unless a provider key was configured, which was a gate on the *row*
+    # standing in for a gate on the *spend* — and the row does more than spend. An
+    # address already on the lead and the hub's cross-operator cache are both free,
+    # both tried first, and a missing or exhausted key switched them off along with
+    # the paid leg, exactly when a free hit was worth the most.
+    #
+    # ``buy_address`` now owns both checks, on the paid leg alone: a key to pay with
+    # (``is_configured``) and a credit to pay (``reserve_credit``). What bounds the
+    # spend is still the operator's own prepaid balance — see ``_top_up`` for why
+    # nothing here rations it on our side.
     deal = _due(campaign, DealState.READY_TO_FIND_EMAIL).filter(
         lead__disqualified=False).first()
     if deal is None:

@@ -9,7 +9,13 @@ FINDING_EMAIL carrying the handle, and ``check_lookup`` polls it later.
     already has email  → RESOLVED                (no lookup, no credit)
     free hub-cache hit → RESOLVED                (no provider job, no credit)
     hub miss           → FINDING_EMAIL           (job submitted, poll from the deal)
-    couldn't submit    → stays READY_TO_FIND_EMAIL (no key / API down — try later)
+    couldn't submit    → stays READY_TO_FIND_EMAIL (no key / no credits / API down)
+
+**The free sources are not gated on the paid one.** The key check sits in ``_submit``,
+on the paid leg alone, and an empty wallet is a 402 raised from the same place — so an
+address already in hand and the hub cache still resolve when there is neither key nor
+credit, which is precisely when a free hit is worth the most. The gate used to stand one
+level up, in ``cycle._buy_addresses``, where a missing key turned off the free reads too.
 
 **The handle lives on the deal**, not in an external row: ``lookup_request_id`` and
 ``lookup_attempt`` are columns, so an in-flight job survives a restart and its
@@ -71,9 +77,10 @@ def buy_address(deal) -> DealState | None:
 def _submit(deal) -> DealState | None:
     """Fire the paid provider job and park the deal on its handle.
 
-    A couldn't-submit (no key, API down) leaves the deal in `READY_TO_FIND_EMAIL` — no
-    credit was spent and there is no handle to poll — but **backs it off first**. Without
-    that the row is still due on the very next pass, so the same deal is re-picked
+    A couldn't-submit (no key, no credits, API down) leaves the deal in
+    `READY_TO_FIND_EMAIL` — no credit was spent and there is no handle to poll — but
+    **backs it off first**. Without that the row is still due on the very next pass,
+    so the same deal is re-picked
     immediately and forever: noise every few seconds under the old daemon, and a job that
     never returns now that a bounded run stops only when nothing can advance. Writing
     ``not_before`` is the architecture's one waiting mechanism, and an unreachable
