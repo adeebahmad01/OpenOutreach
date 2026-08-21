@@ -82,4 +82,6 @@ packages = ["openoutreach"]
 "LEGAL_NOTICE.md" = "openoutreach/LEGAL_NOTICE.md"
 
 [tool.hatch.build.targets.sdist]
-include = ["openoutreach", "README.md", "LICENCE.md", "pyproject.toml"]
+# LEGAL_NOTICE.md is here because the wheel force-includes it: `python -m build`
+# builds the wheel *from the sdist*, so a file missing here fails the release.
+include = ["openoutreach", "README.md", "LICENCE.md", "LEGAL_NOTICE.md", "pyproject.toml"]
