@@ -4,7 +4,6 @@ The verbs, in the order a reader meets them:
 
     openoutreach find 10 [emails]                  # find that many more, print the campaign, exit
     openoutreach status [--json]                   # what is configured, blocked and counted
-    openoutreach reset [--campaign N] [--all]      # start a campaign's walk over
 
 `find` is the only verb that does work, and it is bounded: it returns when the goal is
 met, exits 0 only if it was, and prints the campaign as CSV on stdout — so the CSV is not

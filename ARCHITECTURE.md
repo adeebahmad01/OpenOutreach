@@ -60,21 +60,34 @@ Three verbs, chosen rather than accumulated — they are what the two readers ac
 
 | verb | |
 |:-----|:--|
-| `run` | run it. The bare invocation defaults here. |
+| `init [--product-docs F] [--target F] [--name N] [--json]` | create the pipeline and the campaign, print what it made, spend nothing. Safe to run twice. |
+| `find N [emails] [--emails] [--campaign N] [--new] [--json] [--open] [--debug]` | find that many more, print the campaign as CSV, exit. |
 | `status [--json]` | what is configured, blocked, counted, and next — including where the CSV is. |
-| `reset [--campaign N] [--all]` | start a campaign's walk over without losing its config. |
+
+**`--campaign` is optional**: `find` takes the only campaign when there is one and raises a
+`bad_config` listing them all when there are several. Ambiguity is an error, never a guess — picking
+one would spend the operator's credits on the wrong ICP.
 
 **The CSV is not a verb.** `export_leads` was deleted once the run started writing the file itself:
 a second way to do one thing, and the one nobody found.
 
-**`--json` belongs on every verb with a result**, which today is `status` alone: `run` streams
-progress, `reset` performs an action, and a flag that serializes nothing is a promise the surface
-cannot keep.
+**`--json` belongs on every verb with a result** — `init`, `find` and `status`, which is all of them.
+A failure answers in the caller's format too: `--json` turns the `error:` line into
+`{"error": {"type", "message"}}` on stderr, so a program never has to parse prose to find out why.
 
-Two were removed rather than renamed. **`setup_crm`** was an implementation detail with a verb around
-it — `run` calls the function directly, so nothing is lost. **`reset_data`** deleted every lead and
-deal across every campaign; that is `reset --all` without `--campaign`, minus the backup `reset` takes
-first, so it was a blunter duplicate of a verb that already existed.
+**`reset` was removed rather than kept lean** (2026-08-21). It reset a campaign's discovery walk so
+the next run re-seeded from the ICP, with `--all` additionally dropping leads, deals, anchors and
+the fitted GP behind a database backup and a confirmation prompt. Two verbs' worth of surface for
+something the state directory already does: everything an install writes hangs off one root
+(`settings.state_dir()`), so **`rm -rf ~/.openoutreach` followed by `openoutreach find` is the
+reset**, and configuration comes back from the environment. What that costs is real and worth
+naming: the ICP seed only runs for a campaign with **no** query nodes, so there is now no way to
+re-seed a walk *while keeping* its leads and verdicts. Changing the ICP text means starting the
+evidence over too.
+
+Others were removed rather than renamed. **`setup_crm`** was an implementation detail with a verb
+around it — `find` calls the function directly, so nothing is lost. **`reset_data`** deleted every
+lead and deal across every campaign, which `reset` already did with a backup first; both are gone now.
 
 ### `find` management command (`management/commands/find.py`)
 
@@ -127,8 +140,8 @@ Docker's `start` script `exec`s `openoutreach find "$@"` — one job, then the c
 
 ### The other two verbs
 
+- `init` — **the phase that already happened, given a name.** Migrate, bootstrap the CRM, onboard, create the campaign, validate the operator — then stop and print what it made. It cannot spend, so it is the one verb always safe to run.
 - `status` — **what is in the database, without running a job.** Human summary by default, `--json` for a program. See *Status* below.
-- `reset [--campaign NAME] [--all]` — start a campaign's discovery walk over; `--all` also drops its leads, deals, anchors and fitted GP, after a database backup.
 
 ## The Output Contract (`core/management/base.py`, `core/errors.py`)
 
@@ -151,11 +164,12 @@ What a program depends on, and the reason both exist as one place rather than a 
   schema in `execute()` — **after** argument parsing, so `--help` still answers — and raises
   `not_initialized`, naming the database path. Reporting zero campaigns instead would be precisely
   the empty-result failure `core/errors.py` exists to prevent: nothing was found because nothing has
-  ever run. `reset` moved onto `OpenOutreachCommand` to inherit it.
-- **A missing terminal is an answer too.** `reset` asks before deleting, and `input()` with no TTY
-  raises `EOFError` — a traceback for what is really a refusal, since silence is not consent to a
-  delete. It reports `no_tty` naming `--yes` instead. Every test in `test_reset.py` passed `--yes`,
-  which is why the hole lived.
+  ever run.
+- **A failure answers in the caller's format.** `run_from_argv` renders `OpenOutreachError` through
+  `format_failure`: the `error: <type>: <message>` line, or `{"error": {"type", "message"}}` when
+  `--json` is in argv. **Both on stderr** — a caller that asked for JSON is parsing rather than
+  reading, but stdout stays result-only either way, or `find 10 --json > leads.json` would write an
+  error object into the file the operator is keeping.
 - **Only what a configuration can cause is a credential answer.** `verify_llm_credentials` catches
   the provider's own refusals (`ModelAPIError`), an unusable model id (`UserError`/`ValueError`) —
   and nothing else, because its caller reports whatever it returns as

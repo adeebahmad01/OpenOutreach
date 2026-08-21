@@ -152,7 +152,6 @@ openoutreach find 0              # no work — just print what the campaign alre
 openoutreach find 1 --open       # ...and open each new profile in your browser as it lands
 openoutreach find 1 --debug      # ...and show the discovery walk's reasoning as it goes
 openoutreach status              # what is configured, blocked and counted
-openoutreach reset --campaign X  # start a campaign's search over
 ```
 
 Running it on a server instead? A Docker image is published to GitHub Container Registry for exactly that — see the **[Docker Guide](./docs/docker.md)**.

@@ -7,7 +7,10 @@ Three rules, and they exist because the reader is as often a program as a person
     and progress go to stderr (``core/logging.py``), so redirecting stdout yields
     data and nothing else.
   * **errors are one line with a stable type** — ``error: <type>: <message>`` on
-    stderr, from the vocabulary in ``core/errors.py``, and a non-zero exit.
+    stderr, from the vocabulary in ``core/errors.py``, and a non-zero exit. Under
+    ``--json`` that line becomes ``{"error": {"type", "message"}}``, still on stderr:
+    a caller that asked for JSON is parsing rather than reading, and the same
+    vocabulary answers both.
   * **no traceback for an expected failure.** A rejected API key is not a bug; it is
     an answer, and it should read like one.
 
@@ -17,6 +20,7 @@ the database file exists (``settings.py`` creates its directory) but has no sche
 """
 from __future__ import annotations
 
+import json
 import sys
 
 from django.core.management.base import BaseCommand
@@ -37,7 +41,7 @@ class OpenOutreachCommand(BaseCommand):
         return super().execute(*args, **options)
 
     def run_from_argv(self, argv):
-        """Render ``OpenOutreachError`` as the contract's line, then exit non-zero.
+        """Render ``OpenOutreachError`` in the caller's own format, then exit non-zero.
 
         Anything else keeps Django's behaviour — an unexpected exception is a bug and
         deserves its traceback.
@@ -45,8 +49,21 @@ class OpenOutreachCommand(BaseCommand):
         try:
             super().run_from_argv(argv)
         except OpenOutreachError as exc:
-            sys.stderr.write(f"{exc}\n")
+            sys.stderr.write(format_failure(exc, as_json="--json" in argv))
             sys.exit(1)
+
+
+def format_failure(exc: OpenOutreachError, *, as_json: bool) -> str:
+    """The failure as the caller asked to be spoken to — one line, or one object.
+
+    **Both go to stderr.** A caller that passed ``--json`` is parsing, not reading, so
+    an error it cannot parse is barely better than none; but stdout stays result-only
+    either way, or ``find 10 --json > leads.json`` would write an error object into the
+    file the operator is keeping.
+    """
+    if as_json:
+        return json.dumps({"error": {"type": exc.error_type, "message": exc.message}}) + "\n"
+    return f"{exc}\n"
 
 
 def require_initialized_database() -> None:

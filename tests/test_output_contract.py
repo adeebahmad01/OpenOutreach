@@ -71,6 +71,30 @@ def test_command_renders_the_error_line_and_exits_non_zero(capsys):
     assert captured.out == ""
 
 
+def test_json_callers_get_the_failure_as_json(capsys):
+    """A caller that asked for JSON is parsing, not reading — the same vocabulary,
+    in the shape it can consume."""
+    import json
+
+    class Failing(OpenOutreachCommand):
+        def add_arguments(self, parser):
+            parser.add_argument("--json", action="store_true", dest="as_json")
+
+        def handle(self, *args, **options):
+            raise OpenOutreachError(ErrorType.BAD_CONFIG, "several campaigns: 'A', 'B'")
+
+    with pytest.raises(SystemExit) as exc:
+        Failing().run_from_argv(["openoutreach", "failing", "--json"])
+
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.err) == {
+        "error": {"type": "bad_config", "message": "several campaigns: 'A', 'B'"}}
+    # Still stderr: stdout stays result-only, or `find --json > leads.json` would
+    # collect an error object into the file the operator is keeping.
+    assert captured.out == ""
+
+
 def test_an_unexpected_exception_still_raises():
     """Only *expected* failures are flattened; a bug keeps its traceback."""
     class Buggy(OpenOutreachCommand):
