@@ -9,11 +9,19 @@ The verbs, in the order a reader meets them:
 met, exits 0 only if it was, and prints the campaign as CSV on stdout — so the CSV is not
 a verb either, it is what redirecting the command gives you.
 
-There is no daemon and no default verb. A bare `openoutreach` prints this command list;
-the first run is `openoutreach find 10`, which also creates the database.
+There is no daemon and no default verb. A bare `openoutreach` prints `OVERVIEW` — the
+three verbs and nothing else; the first run is `openoutreach find 10`, which also creates
+the database.
 
-Django's own commands remain available — `migrate`, `runserver` (the Admin at
-http://localhost:8000/admin/), `createsuperuser`.
+**It deliberately does not hand a bare invocation to Django.** `execute_from_command_line`
+answers with every management command it can find, which is fifty lines of
+`squashmigrations`, `startproject`, `sendtestemail` and `createcachetable` with the three
+verbs buried in a `[core]` block halfway down. That is the first thing anyone sees after
+`pip install openoutreach`, and it reads as a Django project shipped by accident.
+
+Django's own commands remain available and reachable — `migrate`, `runserver` (the Admin
+at http://localhost:8000/admin/), `createsuperuser` — they are just not the answer to
+*what does this tool do*. `openoutreach help <command>` still goes straight to Django.
 
 Any command accepts `--db PATH` (or `--db=PATH`) to work against a SQLite file
 other than the default `~/.openoutreach/data/db.sqlite3`; the `OPENOUTREACH_DB`
@@ -24,6 +32,24 @@ env var does the same.
 
 import os
 import sys
+
+OVERVIEW = """\
+OpenOutreach — find B2B leads that fit, with the reason written out.
+
+  openoutreach init             create the campaign and the database
+  openoutreach find 10          ten more qualified leads → CSV on stdout
+  openoutreach find 10 emails   ...with a verified work email (1 credit each)
+  openoutreach status           what is configured, blocked and counted
+
+  openoutreach help <command>   details for one command
+
+Django's own commands (migrate, createsuperuser, runserver) still work.
+"""
+
+
+def wants_the_overview(argv) -> bool:
+    """Whether this invocation asks *what can I do*, rather than naming a command."""
+    return len(argv) <= 1 or (len(argv) == 2 and argv[1] in ("-h", "--help", "help"))
 
 
 def extract_db_path(argv):
@@ -55,13 +81,21 @@ def main(argv=None):
     A bare invocation used to default to `run`, the daemon. With the work verb bounded by
     a goal there is nothing sensible to default *to* — `find` needs a number, and picking
     one for the operator would be spending their credits on a guess — so a bare
-    invocation prints the command list.
+    invocation prints `OVERVIEW`.
+
+    The overview is answered before Django is imported at all, which is why the empty
+    invocation is instant: the settings module, the ORM and the command registry are the
+    cost of doing work, not of asking what the work is.
     """
+    argv, db_path = extract_db_path(list(sys.argv if argv is None else argv))
+    if wants_the_overview(argv):
+        print(OVERVIEW, end="")
+        return
+
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "openoutreach.settings")
 
     from django.core.management import execute_from_command_line
 
-    argv, db_path = extract_db_path(list(sys.argv if argv is None else argv))
     if db_path:
         os.environ["OPENOUTREACH_DB"] = db_path
 
