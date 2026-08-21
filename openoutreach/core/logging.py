@@ -131,7 +131,14 @@ SILENCED_LOGGERS = (
 )
 
 
-def configure_logging(level: int = logging.DEBUG):
+def resolve_log_level(log_level: str | None, verbosity: int) -> int:
+    """``--log-level`` wins; Django's ``-v 2`` stays as the shorthand for debug."""
+    if log_level:
+        return getattr(logging, log_level.upper())
+    return logging.DEBUG if verbosity >= 2 else logging.INFO
+
+
+def configure_logging(level: int = logging.INFO):
     """Configure root logger with colored output and silence noisy libraries."""
     root = logging.getLogger()
     root.handlers.clear()

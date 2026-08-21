@@ -141,14 +141,9 @@ class Command(OpenOutreachCommand):
     # ── logging ──────────────────────────────────────────────────
 
     def _configure_logging(self, log_level: str | None, verbosity: int):
-        """``--log-level`` wins; Django's ``-v 2`` stays as the shorthand for debug."""
-        from openoutreach.core.logging import configure_logging, print_banner
+        from openoutreach.core.logging import configure_logging, print_banner, resolve_log_level
 
-        if log_level:
-            level = getattr(logging, log_level.upper())
-        else:
-            level = logging.DEBUG if verbosity >= 2 else logging.INFO
-        configure_logging(level=level)
+        configure_logging(level=resolve_log_level(log_level, verbosity))
         print_banner()
 
 

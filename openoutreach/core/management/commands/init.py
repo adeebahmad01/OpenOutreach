@@ -54,11 +54,20 @@ class Command(OpenOutreachCommand):
         parser.add_argument("--name", help="Campaign name. Defaults to the built-in name.")
         parser.add_argument("--json", action="store_true", dest="as_json",
                             help="Emit the campaign as one JSON object.")
+        parser.add_argument(
+            "--log-level",
+            choices=("debug", "info", "warning", "error"),
+            help="Log verbosity (default: info).",
+        )
+        # Same dest, so the two cannot disagree: whichever comes last on the command
+        # line wins. `--debug` is the one an operator reaches for mid-run.
+        parser.add_argument("--debug", action="store_const", const="debug",
+                            dest="log_level", help="Shorthand for --log-level debug.")
 
     def handle(self, *args, **options):
-        from openoutreach.core.logging import configure_logging, print_banner
+        from openoutreach.core.logging import configure_logging, print_banner, resolve_log_level
 
-        configure_logging()
+        configure_logging(level=resolve_log_level(options.get("log_level"), options["verbosity"]))
         print_banner()
 
         ensure_database(self.stderr)
