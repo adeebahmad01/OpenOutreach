@@ -78,12 +78,24 @@ first, so it was a blunter duplicate of a verb that already existed.
 
 ### `find` management command (`management/commands/find.py`)
 
-    openoutreach find 10 [emails] [--campaign N] [--new] [--json] [--open]
+    openoutreach find 10 [emails] [--emails] [--campaign N] [--new] [--json] [--open] [--debug]
 
-**The unit is a noun, not a flag**, and that is a spend decision: the provider bills one credit per
+**Finding is free, and the free thing is the default.** A bare `find 10` cannot spend a credit,
+however many deals have queued up past the confidence gate; `--emails` permits the lookup and the
+`emails` unit implies it. **This was inverted on 2026-08-21** — buying used to be on unless
+`--no-emails` turned it off, so a run counting *leads* quietly bought addresses for what an earlier
+run left ready, and the docstring called it free. A flag you forget should cost a feature, never
+money. The default is `buy_addresses=False` in `run_job` and `run_one_action` too, not just at the
+CLI, so no caller can spend by omission.
+
+**The unit is a noun, not a flag**, and that is a budget decision: the provider bills one credit per
 verified hit, so `find 10 emails` is capped at ten credits by construction — the number typed is the
 budget, in the same unit as the invoice. A `--with-email` modifier would have hidden the money, and
-`--max-credits` would be a second ceiling saying the same thing. `find 0` does no work and prints
+`--max-credits` would be a second ceiling saying the same thing. The noun says what to **count**;
+`--emails` says what may be **paid for**. They meet in exactly one place: a goal counted in addresses
+cannot be met without buying them, so the unit implies the flag.
+
+`--debug` is the shorthand for `--log-level debug`; both write the same dest, so they cannot disagree. `find 0` does no work and prints
 what is already there; it is not a special case, it is `produced >= count` being true before the loop.
 
 Startup sequence, inherited whole from the deleted `run`:

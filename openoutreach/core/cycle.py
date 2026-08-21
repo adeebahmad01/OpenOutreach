@@ -86,7 +86,7 @@ _scored_at: dict[int, tuple[int, int]] = {}
 # ── The loop ──────────────────────────────────────────────────────
 
 
-def run_one_action(campaign, buy_addresses: bool = True) -> bool:
+def run_one_action(campaign, buy_addresses: bool = False) -> bool:
     """Do the highest-priority thing available for *campaign*. Returns whether it did.
 
     Each row is a query and a step. The first one that produces work wins and the
@@ -96,15 +96,18 @@ def run_one_action(campaign, buy_addresses: bool = True) -> bool:
     where the daemon's time goes: the steps log what they *did*, but a row that takes
     twenty seconds to decide it has nothing to do says so nowhere else.
 
-    ``buy_addresses=False`` skips the one paid row, so the run cannot spend a credit no
-    matter how many deals have queued up past the confidence gate.
+    **``buy_addresses`` defaults to False, so spending is opt-in at every layer.** It
+    enables the one paid row; without it no caller can spend a credit, however many
+    deals have queued up past the confidence gate. The default used to be True, which
+    made *not* spending the thing you had to remember to ask for — and a caller who
+    forgets a flag should lose a feature, never money.
     """
     if campaign is None:
         return False
 
     for name, row, spends in ROWS:
         if spends and not buy_addresses:
-            logger.debug("[%s] → %s? skipped — --no-emails", campaign, name)
+            logger.debug("[%s] → %s? skipped — addresses not requested", campaign, name)
             continue
         logger.debug("[%s] → %s?", campaign, name)
         started = time.monotonic()
@@ -292,8 +295,8 @@ def _top_up(campaign) -> bool:
 # lead, not which function ran. "top up" named the function and explained nothing;
 # "find & qualify new leads" is what that row actually does.
 #
-# The third element is whether the row spends money, which is what `--no-emails` turns
-# off. Only row 3 carries it: checking a lookup we already submitted is free, and
+# The third element is whether the row spends money, which is what `--emails` turns
+# *on*. Only row 3 carries it: checking a lookup we already submitted is free, and
 # abandoning one would waste a credit already committed rather than save it.
 ROWS = (
     ("check for the email address we ordered", _check_lookups, False),

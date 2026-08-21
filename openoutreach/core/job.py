@@ -69,18 +69,18 @@ class JobResult:
         return self.stopped_because is None
 
 
-def run_job(campaign, goal: Goal, on_new_lead=None, buy_addresses: bool = True) -> JobResult:
+def run_job(campaign, goal: Goal, on_new_lead=None, buy_addresses: bool = False) -> JobResult:
     """Work the cycle until *goal* is met or nothing can advance.
 
     Never raises on a provider refusal — it stops and reports which one. ``on_new_lead``
     is called with each lead as it enters the goal, which is how ``--open`` puts a profile
     in front of the operator while the job runs rather than in a burst at the end.
 
-    **The unit caps the goal, not the spend.** ``find 10 emails`` is bounded at ten credits
-    because ten addresses is what it is counting, but ``find 10 leads`` still buys for
-    whatever cleared the confidence gate on an earlier pass — the cycle does the most
-    valuable thing available, and that is sometimes a lookup. ``buy_addresses=False`` is
-    the way to ask for a run that cannot spend.
+    **The unit caps the goal; ``buy_addresses`` is what permits the spend**, and it is
+    off unless asked for. A goal counted in ``emails`` still needs it — the unit says
+    what to count, never what may be paid for, and keeping those separate is what stops
+    a run counting *leads* from quietly buying an address for whatever cleared the
+    confidence gate on an earlier pass. That is what it used to do.
     """
     from openoutreach.core.cycle import HALTING_ERRORS, run_one_action
 

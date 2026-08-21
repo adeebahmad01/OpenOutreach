@@ -85,7 +85,7 @@ class TestPriority:
 
         with patch("openoutreach.enrichment.bettercontact.is_configured",
                    return_value=True):
-            cycle.run_one_action(campaign)
+            cycle.run_one_action(campaign, buy_addresses=True)
         assert _called(steps) == {"buy"}
 
     def test_topping_up_is_the_last_resort(self, campaign, steps):
@@ -100,12 +100,12 @@ class TestPriority:
 
 
 @pytest.mark.django_db
-class TestBuyingCanBeTurnedOff:
-    """`--no-emails` reaches the cycle as ``buy_addresses=False``.
+class TestBuyingIsOffUnlessAskedFor:
+    """``buy_addresses=False`` is the default, and it reaches the paid row.
 
-    The unit bounds the goal, not the spend: a run counting *leads* still reaches the
-    buy row for anything an earlier run left past the confidence gate. This is the one
-    way to ask for a run that cannot spend a credit.
+    A run counting *leads* would otherwise reach the buy row for anything an earlier
+    run left past the confidence gate — which is what it used to do, before `--emails`
+    made the spend opt-in.
     """
 
     def test_the_paid_row_is_skipped(self, campaign, steps):
@@ -118,8 +118,8 @@ class TestBuyingCanBeTurnedOff:
         assert "buy" not in _called(steps)
 
     def test_the_free_rows_still_run(self, campaign, steps):
-        """Turning off spending must not turn off the work that costs nothing, or
-        `--no-emails` would just mean "do less"."""
+        """Withholding permission to spend must not turn off the work that costs
+        nothing, or the default would just mean "do less"."""
         _deal(campaign, DealState.READY_TO_FIND_EMAIL)
 
         with patch("openoutreach.enrichment.bettercontact.is_configured",
@@ -210,7 +210,7 @@ class TestTheFinderRunsWithoutASender:
 
         with patch("openoutreach.enrichment.bettercontact.is_configured",
                    return_value=True):
-            assert cycle.run_one_action(campaign) is True
+            assert cycle.run_one_action(campaign, buy_addresses=True) is True
         assert _called(steps) == {"buy"}
 
     def test_no_finder_key_means_no_buying(self, campaign, steps):

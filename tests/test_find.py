@@ -206,34 +206,40 @@ class TestTheCommandContract:
 
         assert exc.value.error_type == ErrorType.BAD_CONFIG
 
-    def test_no_emails_reaches_the_cycle(self, campaign, booted):
-        """The flag is only worth having if it arrives where the spending happens."""
+    def test_buying_is_off_by_default(self, campaign, booted):
+        """A bare `find` cannot spend, however many deals are queued past the gate.
+
+        This is the inversion of 2026-08-21: buying used to be on unless `--no-emails`
+        turned it off, so a run counting *leads* quietly bought addresses. A flag you
+        forget should cost a feature, never money.
+        """
         _exportable(campaign, "ada@acme.com")
 
         with patch("openoutreach.core.cycle.run_one_action",
                    return_value=False) as action:
             with pytest.raises(OpenOutreachError):
-                call_command("find", "1", "--no-emails", stdout=io.StringIO())
+                call_command("find", "1", stdout=io.StringIO())
 
         assert action.call_args.kwargs["buy_addresses"] is False
 
-    def test_buying_is_on_by_default(self, campaign, booted):
+    def test_emails_flag_reaches_the_cycle(self, campaign, booted):
+        """The flag is only worth having if it arrives where the spending happens."""
         with patch("openoutreach.core.cycle.run_one_action",
                    return_value=False) as action:
             with pytest.raises(OpenOutreachError):
-                call_command("find", "1", stdout=io.StringIO())
+                call_command("find", "1", "--emails", stdout=io.StringIO())
 
         assert action.call_args.kwargs["buy_addresses"] is True
 
-    def test_no_emails_with_an_emails_goal_is_refused(self, campaign, booted):
-        """Asking for addresses while forbidding the only step that produces one is a
-        goal that cannot be met — say so at argument time, not after a long run."""
-        with patch("openoutreach.core.cycle.run_one_action") as action:
-            with pytest.raises(OpenOutreachError) as exc:
-                call_command("find", "5", "emails", "--no-emails", stdout=io.StringIO())
+    def test_an_emails_goal_implies_the_flag(self, campaign, booted):
+        """The noun says what to count and the flag says what may be paid for — but a
+        goal counted in addresses cannot be met without buying them."""
+        with patch("openoutreach.core.cycle.run_one_action",
+                   return_value=False) as action:
+            with pytest.raises(OpenOutreachError):
+                call_command("find", "5", "emails", stdout=io.StringIO())
 
-        assert exc.value.error_type == ErrorType.BAD_CONFIG
-        action.assert_not_called()
+        assert action.call_args.kwargs["buy_addresses"] is True
 
     def test_open_without_a_browser_fails_before_any_work(self, campaign, booted):
         """A flag that silently does nothing is the bug you find at 2am."""
@@ -244,6 +250,16 @@ class TestTheCommandContract:
 
         assert exc.value.error_type == ErrorType.BAD_CONFIG
         action.assert_not_called()
+
+    def test_debug_is_the_shorthand_for_log_level_debug(self, campaign, booted):
+        """Both flags write the same dest, so they cannot disagree."""
+        from openoutreach.core.management.commands.find import Command
+
+        with patch("openoutreach.core.cycle.run_one_action", return_value=False), \
+                patch.object(Command, "_configure_logging") as configure:
+            call_command("find", "0", "--debug", stdout=io.StringIO())
+
+        assert configure.call_args.args[0] == "debug"
 
 
 # ── helpers ──────────────────────────────────────────────────────

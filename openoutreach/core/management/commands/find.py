@@ -1,21 +1,28 @@
 """Find leads until a goal is met, then print the campaign and exit.
 
-    openoutreach find 1                   # one qualified lead, with its reason
-    openoutreach find 10                  # ten more leads (may still buy queued addresses)
-    openoutreach find 10 emails           # ten more carrying an address (≤10 credits)
-    openoutreach find 10 --no-emails      # ten more, guaranteed to spend nothing
+    openoutreach find 1                   # one qualified lead, with its reason — free
+    openoutreach find 10                  # ten more leads, guaranteed to spend nothing
+    openoutreach find 10 --emails         # ...and buy addresses for what is ready
+    openoutreach find 10 emails           # ten more *carrying* an address (≤10 credits)
     openoutreach find 0                   # no work; print what the campaign already has
     openoutreach find 10 --open           # ...and open each new profile in the browser
+    openoutreach find 10 --debug          # ...and show the walk's reasoning as it goes
 
-**The unit is a noun, not a flag**, and that is a spend decision rather than a style one:
+**Finding is free; buying an address is not, and the free thing is the default.**
+Discovery and qualification cost only the operator's own LLM key, so a bare ``find 10``
+cannot spend a credit however many deals have queued up past the confidence gate. The
+address lookup is opt-in — ``--emails`` permits it, and the ``emails`` unit implies it.
+
+This was the other way round until 2026-08-21: buying was on unless ``--no-emails``
+turned it off, so ``find 10 leads`` quietly bought an address for whatever an earlier run
+had left ready. The docstring even called it free. **A flag you forget should cost you a
+feature, never money**, which is the whole argument for the inversion.
+
+**The unit is a noun, not a flag**, and that is a budget decision rather than a style one:
 the provider bills one credit per verified hit, so ``find 10 emails`` is capped at ten
 credits by construction. The number typed is the budget, in the same unit as the invoice.
-
-**But the unit bounds the goal, not the spend, and ``leads`` does not mean free.** The
-cycle always does the most valuable thing available, so a run counting leads still buys an
-address for any deal an earlier run left past the confidence gate. Discovery and
-qualification cost only the operator's own LLM key; the lookup costs a credit. ``--no-emails``
-is the way to say *this run must not spend*, and it is the only way to say it.
+The noun says what to *count*; the flag says what may be *paid for*. They are independent
+in the one direction that matters — counting leads never authorises a purchase.
 
 **stdout carries the whole campaign, not just this run's rows**, which is what makes
 ``> leads.csv`` correct by construction: the newest file supersedes every earlier one, and
@@ -59,9 +66,10 @@ class Command(OpenOutreachCommand):
         parser.add_argument("--campaign", help="Campaign name. Required only if there are several.")
         parser.add_argument("--new", action="store_true", dest="only_new",
                             help="Print only the rows this run produced.")
-        parser.add_argument("--no-emails", action="store_true", dest="no_emails",
-                            help="Never buy an address. Discovery and qualification only, "
-                                 "so the run cannot spend a credit.")
+        parser.add_argument("--emails", action="store_true", dest="buy_emails",
+                            help="Also buy an address for any lead that has cleared the "
+                                 "confidence gate — one credit per verified hit. Without "
+                                 "this the run cannot spend. Implied by the `emails` unit.")
         parser.add_argument("--json", action="store_true", dest="as_json",
                             help="Emit one JSON object: the goal, the outcome, and the rows.")
         parser.add_argument("--open", action="store_true", dest="open_profiles",
@@ -73,16 +81,18 @@ class Command(OpenOutreachCommand):
                  "reasoning — the frontier, each node's counts and draw, why a node "
                  "was expanded or not, and the provider's raw answer.",
         )
+        # Same dest, so the two cannot disagree: whichever comes last on the command
+        # line wins. `--debug` is the one an operator reaches for mid-run.
+        parser.add_argument("--debug", action="store_const", const="debug",
+                            dest="log_level", help="Shorthand for --log-level debug.")
 
     def handle(self, *args, **options):
         if options["count"] < 0:
             raise OpenOutreachError(ErrorType.BAD_CONFIG, "count cannot be negative")
-        if options["no_emails"] and options["unit"] == EMAILS:
-            raise OpenOutreachError(
-                ErrorType.BAD_CONFIG,
-                f"--no-emails cannot reach a goal counted in {EMAILS} — the only step "
-                f"that produces one is the step it turns off",
-            )
+        # The unit says what to count; the flag says what may be paid for. A goal counted
+        # in addresses cannot be met without buying them, so the noun implies the flag —
+        # that is the one place the two are not independent.
+        buy_addresses = options["buy_emails"] or options["unit"] == EMAILS
         opener = _browser() if options["open_profiles"] else None
 
         self._configure_logging(options.get("log_level"), options["verbosity"])
@@ -94,7 +104,7 @@ class Command(OpenOutreachCommand):
         goal = Goal(count=options["count"], unit=options["unit"])
 
         result = run_job(campaign, goal, on_new_lead=opener,
-                         buy_addresses=not options["no_emails"])
+                         buy_addresses=buy_addresses)
         self._report(campaign, result, options)
 
         if not result.reached:

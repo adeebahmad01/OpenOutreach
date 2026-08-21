@@ -145,10 +145,12 @@ The interactive onboarding walks you through the inputs above on first run — p
 **The three verbs:**
 
 ```bash
-openoutreach find 10             # ten more qualified leads (free)
-openoutreach find 10 emails      # ten more with a work email (one credit each)
+openoutreach find 10             # ten more qualified leads — free, and cannot spend
+openoutreach find 10 --emails    # ...and buy an address for whatever is ready
+openoutreach find 10 emails      # ten more *with* a work email (one credit each)
 openoutreach find 0              # no work — just print what the campaign already has
 openoutreach find 1 --open       # ...and open each new profile in your browser as it lands
+openoutreach find 1 --debug      # ...and show the discovery walk's reasoning as it goes
 openoutreach status              # what is configured, blocked and counted
 openoutreach reset --campaign X  # start a campaign's search over
 ```
