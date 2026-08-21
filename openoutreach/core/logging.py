@@ -123,8 +123,9 @@ SILENCED_LOGGERS = (
     # LLM SDKs — one entry per supported provider
     "openai", "anthropic", "google", "google_genai", "googleapiclient",
     "groq", "mistralai", "cohere", "pydantic_ai",
-    # HTTP transports underneath them
-    "urllib3", "httpx", "httpcore", "h11", "hpack",
+    # HTTP transports underneath them — httpx2/httpcore2 are the renamed transport
+    # the anthropic SDK vendors; same noise, different logger names.
+    "urllib3", "httpx", "httpcore", "httpx2", "httpcore2", "h11", "hpack",
     # Embeddings + runtime
     "fastembed", "huggingface_hub", "filelock", "onnxruntime", "asyncio",
 )
