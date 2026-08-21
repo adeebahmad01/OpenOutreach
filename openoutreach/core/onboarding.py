@@ -437,8 +437,8 @@ def _run_account() -> None:
     )).strip()
 
     country = _required(wiz.text(
-        "Your country (ISO 3166 alpha-2, e.g. US, GB, DE) — sets your active-hours "
-        "timezone and email-jurisdiction defaults",
+        "Your country (ISO 3166 alpha-2, e.g. US, GB, DE) — sets your email-jurisdiction "
+        "defaults and filters leads to that country",
         validate=_looks_like_country,
     )).lower()
 
@@ -473,11 +473,11 @@ def _account_from_env() -> bool:
 
 
 def _looks_like_country(value: str) -> bool | str:
-    """Validate an ISO 3166-1 alpha-2 code against the same table active-hours uses.
+    """Validate an ISO 3166-1 alpha-2 code.
 
-    ``pytz.country_timezones`` is the country→zone authority ``timezone_for_country``
-    reads; validating against it rejects made-up codes (XX, ZZ) and guarantees the
-    accepted code resolves a timezone later.
+    ``pytz.country_timezones`` is used only as a ready-made table of real country
+    codes — nothing here reads a timezone from it — so a made-up code (XX, ZZ) is
+    rejected without adding a second dependency just to validate two letters.
     """
     import pytz
 
