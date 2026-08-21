@@ -1,6 +1,8 @@
 ![OpenOutreach Logo](docs/logo.png)
 
-> **Describe your product. Define your target market. The AI finds the people who fit — and tells you why each one does.**
+# OpenOutreach — open-source AI agent for B2B lead generation
+
+> **Describe your product, and it finds the people who fit and explains why each one does, then exports a CSV your cold-email tool can send. Self-hosted CLI.**
 
 <div align="center">
 
@@ -11,7 +13,7 @@
 
 <br/>
 
-# Demo:
+## Demo
 
 <img src="docs/demo.gif" alt="Demo Animation" width="100%"/>
 
