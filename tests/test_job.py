@@ -26,7 +26,7 @@ def _exportable(campaign, email=None):
 
 def _finds(campaign, per_action=1, email=None):
     """A `run_one_action` that produces leads, so a goal can actually be reached."""
-    def action(_campaign):
+    def action(_campaign, buy_addresses=True):
         for _ in range(per_action):
             _exportable(campaign, email=email)
         return True
@@ -70,7 +70,7 @@ class TestReachingTheGoal:
         report zero here, having found a lead and lost an unrelated one."""
         doomed = _exportable(campaign)
 
-        def find_one_lose_one(_campaign):
+        def find_one_lose_one(_campaign, buy_addresses=True):
             _exportable(campaign)
             doomed.state = DealState.FAILED
             doomed.outcome = "wrong_fit"
@@ -102,7 +102,7 @@ class TestUnits:
         the row."""
         deal = _exportable(campaign, email=None)
 
-        def resolve(_campaign):
+        def resolve(_campaign, buy_addresses=True):
             deal.lead.email = "ada@acme.com"
             deal.lead.save()
             return True
@@ -151,7 +151,7 @@ class TestStoppingShort:
         """Seven leads are seven leads, and the caller gets both the count and the rows."""
         acted = []
 
-        def once(_campaign):
+        def once(_campaign, buy_addresses=True):
             if acted:
                 return False
             acted.append(True)
@@ -179,7 +179,7 @@ class TestStoppingShort:
         """The operator's own deadline, for the one case with no natural bound: a
         campaign whose leads are all rejected keeps finding, keeps rejecting, and every
         row honestly reports that it acted."""
-        def find_then_interrupt(_campaign):
+        def find_then_interrupt(_campaign, buy_addresses=True):
             if not campaign.deals.exists():
                 _exportable(campaign)
                 return True

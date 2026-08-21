@@ -17,6 +17,7 @@ import pytest
 from django.core.management import call_command
 
 from openoutreach.core.errors import ErrorType, OpenOutreachError
+from openoutreach.core.management.bootstrap import ensure_onboarded
 from openoutreach.core.management.commands.find import Command, _select_campaign
 
 FULL_ENV = {
@@ -49,18 +50,22 @@ def command():
 @pytest.fixture
 def booted(campaign):
     """Skip the preamble. Migrating, bootstrapping, onboarding and validating each have
-    their own tests above; none of them is what the command contract asserts."""
+    their own tests above; none of them is what the command contract asserts.
+
+    Patched where `find` looks them up rather than where they are defined — the command
+    imports the three by name, so patching `core.management.bootstrap` would rebind a
+    module attribute nothing reads."""
     with patch.object(Command, "_configure_logging"), \
-            patch.object(Command, "_ensure_db"), \
-            patch.object(Command, "_ensure_onboarded"), \
-            patch.object(Command, "_validate_operator"):
+            patch("openoutreach.core.management.commands.find.ensure_database"), \
+            patch("openoutreach.core.management.commands.find.ensure_onboarded"), \
+            patch("openoutreach.core.management.commands.find.validate_operator"):
         yield
 
 
 @pytest.mark.django_db
-def test_headless_and_unconfigured_names_the_variables(headless, command):
+def test_headless_and_unconfigured_names_the_variables(headless):
     with pytest.raises(OpenOutreachError) as exc:
-        command._ensure_onboarded()
+        ensure_onboarded()
 
     assert exc.value.error_type == ErrorType.ONBOARDING_INCOMPLETE
     message = str(exc.value)
@@ -72,7 +77,7 @@ def test_headless_and_unconfigured_names_the_variables(headless, command):
 
 
 @pytest.mark.django_db
-def test_headless_and_fully_configured_runs_without_a_prompt(headless, command, monkeypatch):
+def test_headless_and_fully_configured_runs_without_a_prompt(headless, monkeypatch):
     for name, value in FULL_ENV.items():
         monkeypatch.setenv(name, value)
 
@@ -80,20 +85,20 @@ def test_headless_and_fully_configured_runs_without_a_prompt(headless, command, 
          patch("openoutreach.core.newsletter.subscribe_to_newsletter"), \
          patch("openoutreach.core.onboarding.onboard_interactive",
                side_effect=AssertionError("wizard ran without a TTY")):
-        command._ensure_onboarded()  # returns, having onboarded from the environment
+        ensure_onboarded()  # returns, having onboarded from the environment
 
     from openoutreach.core.onboarding import missing_keys
     assert missing_keys() == set()
 
 
 @pytest.mark.django_db
-def test_a_tty_still_gets_the_wizard(command, monkeypatch):
+def test_a_tty_still_gets_the_wizard(monkeypatch):
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     for name in FULL_ENV:
         monkeypatch.delenv(name, raising=False)
 
     with patch("openoutreach.core.onboarding.onboard_interactive") as wizard:
-        command._ensure_onboarded()
+        ensure_onboarded()
 
     wizard.assert_called_once()
 
@@ -168,7 +173,8 @@ class TestTheCommandContract:
         _exportable(campaign, "old@acme.com")
 
         with patch("openoutreach.core.cycle.run_one_action",
-                   side_effect=lambda c: bool(_exportable(c, "new@acme.com"))):
+                   side_effect=lambda c, buy_addresses=True: bool(
+                       _exportable(c, "new@acme.com"))):
             rows = _run("1")
 
         assert {row["email"] for row in rows} == {"old@acme.com", "new@acme.com"}
@@ -177,7 +183,8 @@ class TestTheCommandContract:
         _exportable(campaign, "old@acme.com")
 
         with patch("openoutreach.core.cycle.run_one_action",
-                   side_effect=lambda c: bool(_exportable(c, "new@acme.com"))):
+                   side_effect=lambda c, buy_addresses=True: bool(
+                       _exportable(c, "new@acme.com"))):
             rows = _run("1", "--new")
 
         assert [row["email"] for row in rows] == ["new@acme.com"]
@@ -198,6 +205,35 @@ class TestTheCommandContract:
             call_command("find", "-1", stdout=io.StringIO())
 
         assert exc.value.error_type == ErrorType.BAD_CONFIG
+
+    def test_no_emails_reaches_the_cycle(self, campaign, booted):
+        """The flag is only worth having if it arrives where the spending happens."""
+        _exportable(campaign, "ada@acme.com")
+
+        with patch("openoutreach.core.cycle.run_one_action",
+                   return_value=False) as action:
+            with pytest.raises(OpenOutreachError):
+                call_command("find", "1", "--no-emails", stdout=io.StringIO())
+
+        assert action.call_args.kwargs["buy_addresses"] is False
+
+    def test_buying_is_on_by_default(self, campaign, booted):
+        with patch("openoutreach.core.cycle.run_one_action",
+                   return_value=False) as action:
+            with pytest.raises(OpenOutreachError):
+                call_command("find", "1", stdout=io.StringIO())
+
+        assert action.call_args.kwargs["buy_addresses"] is True
+
+    def test_no_emails_with_an_emails_goal_is_refused(self, campaign, booted):
+        """Asking for addresses while forbidding the only step that produces one is a
+        goal that cannot be met — say so at argument time, not after a long run."""
+        with patch("openoutreach.core.cycle.run_one_action") as action:
+            with pytest.raises(OpenOutreachError) as exc:
+                call_command("find", "5", "emails", "--no-emails", stdout=io.StringIO())
+
+        assert exc.value.error_type == ErrorType.BAD_CONFIG
+        action.assert_not_called()
 
     def test_open_without_a_browser_fails_before_any_work(self, campaign, booted):
         """A flag that silently does nothing is the bug you find at 2am."""

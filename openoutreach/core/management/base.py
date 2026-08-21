@@ -63,5 +63,5 @@ def require_initialized_database() -> None:
 
     raise OpenOutreachError(
         ErrorType.NOT_INITIALIZED,
-        f"no pipeline yet at {settings.DATABASE_PATH} — run `openoutreach find 1` to create it",
+        f"no pipeline yet at {settings.DATABASE_PATH} — run `openoutreach init` to create it",
     )

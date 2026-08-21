@@ -96,6 +96,47 @@ class TestPriority:
         assert cycle.run_one_action(campaign) is False
 
 
+# ── the paid row ──────────────────────────────────────────────────
+
+
+@pytest.mark.django_db
+class TestBuyingCanBeTurnedOff:
+    """`--no-emails` reaches the cycle as ``buy_addresses=False``.
+
+    The unit bounds the goal, not the spend: a run counting *leads* still reaches the
+    buy row for anything an earlier run left past the confidence gate. This is the one
+    way to ask for a run that cannot spend a credit.
+    """
+
+    def test_the_paid_row_is_skipped(self, campaign, steps):
+        _deal(campaign, DealState.READY_TO_FIND_EMAIL)
+
+        with patch("openoutreach.enrichment.bettercontact.is_configured",
+                   return_value=True):
+            cycle.run_one_action(campaign, buy_addresses=False)
+
+        assert "buy" not in _called(steps)
+
+    def test_the_free_rows_still_run(self, campaign, steps):
+        """Turning off spending must not turn off the work that costs nothing, or
+        `--no-emails` would just mean "do less"."""
+        _deal(campaign, DealState.READY_TO_FIND_EMAIL)
+
+        with patch("openoutreach.enrichment.bettercontact.is_configured",
+                   return_value=True):
+            cycle.run_one_action(campaign, buy_addresses=False)
+
+        assert _called(steps) == {"top_up"}
+
+    def test_an_lookup_already_paid_for_is_still_collected(self, campaign, steps):
+        """Abandoning an in-flight lookup would waste a credit already committed
+        rather than save one, so the poll row is not a paid row."""
+        _deal(campaign, DealState.FINDING_EMAIL, lookup_request_id="req1")
+
+        assert cycle.run_one_action(campaign, buy_addresses=False) is True
+        assert _called(steps) == {"check"}
+
+
 # ── not_before ────────────────────────────────────────────────────
 
 
