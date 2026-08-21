@@ -128,6 +128,20 @@ class TestBuyingIsOffUnlessAskedFor:
 
         assert _called(steps) == {"top_up"}
 
+    def test_the_row_is_reached_without_a_provider_key(self, campaign, steps):
+        """**The row is not a gate on the spend.** It used to decline unless a key was
+        configured, which also switched off the free sources inside ``buy_address`` —
+        an address in hand and the hub cache — exactly when a free hit was worth most.
+        The key is now checked on the paid leg alone, so the row still runs.
+        """
+        _deal(campaign, DealState.READY_TO_FIND_EMAIL, email="known@corp.com")
+
+        with patch("openoutreach.enrichment.bettercontact.is_configured",
+                   return_value=False):
+            cycle.run_one_action(campaign, buy_addresses=True)
+
+        assert "buy" in _called(steps)
+
     def test_an_lookup_already_paid_for_is_still_collected(self, campaign, steps):
         """Abandoning an in-flight lookup would waste a credit already committed
         rather than save one, so the poll row is not a paid row."""

@@ -91,6 +91,35 @@ class TestBuyAddress:
         assert deal.lookup_request_id == ""
         assert deal.not_before > timezone.now()
 
+    def test_a_known_address_resolves_with_no_provider_key_at_all(self, campaign):
+        """**The free sources are not gated on the paid one.** An address already on the
+        lead costs nothing to use, so an operator with no key — or one whose credits ran
+        out — still gets it. The gate belongs on the paid leg, and this is the case that
+        says why: a missing key used to switch off the reads that were already free.
+        """
+        deal = _ready_to_find(campaign, email="known@corp.com")
+
+        with patch("openoutreach.enrichment.bettercontact.is_configured", return_value=False), \
+                patch("openoutreach.enrichment.bettercontact.submit") as submit:
+            assert buy_address(deal) == DealState.RESOLVED
+
+        submit.assert_not_called()
+
+    def test_the_hub_cache_still_resolves_with_no_provider_key(self, campaign):
+        """The cross-operator cache is free and is exactly what an operator out of
+        credits has left. Reaching it must not require the thing they have run out of.
+        """
+        deal = _ready_to_find(campaign)
+
+        with patch("openoutreach.contacts.service.resolve", return_value="hub@corp.com"), \
+                patch("openoutreach.enrichment.bettercontact.is_configured", return_value=False), \
+                patch("openoutreach.enrichment.bettercontact.submit") as submit:
+            assert buy_address(deal) == DealState.RESOLVED
+
+        submit.assert_not_called()
+        deal.lead.refresh_from_db()
+        assert deal.lead.email == "hub@corp.com"
+
     def test_an_outage_spends_no_credit_and_backs_the_deal_off(self, campaign):
         """No handle exists to poll, so it will be tried again — after a wait that
         doubles, the same one an in-flight poll takes. Two ways of waiting would be two
