@@ -29,14 +29,21 @@ from openoutreach.core.logblock import step_line
 
 logger = logging.getLogger(__name__)
 
-SIGNUP_URL = "https://bettercontact.rocks?fpr=openoutreach"
+SIGNUP_URL = "https://openoutreach.app/go/email-finder"
 """The one path to an account, and it lives here so no caller can write it without the
 affiliate parameter.
 
 Attribution is won at **signup**, not at payment: an operator who creates the account
 unattributed and later spends thousands earns the project nothing, and there is no way to
 repair it afterwards. Every place the product offers an account — onboarding, ``status``,
-the README, an error message — resolves to this constant.
+an error message — resolves to this constant.
+
+**It carries no query string, deliberately.** The direct link is
+``https://bettercontact.rocks?fpr=openoutreach``, and plenty of terminals stop linkifying
+at the ``?`` — so a printed URL is one careless click away from an unattributed signup
+that nothing downstream can fix. A path-only URL survives that. The redirect
+(``openoutreach.app/netlify.toml``, 302) is where the parameter is actually applied, which
+also makes the destination swappable in one line without shipping a release.
 """
 
 _ENRICH_URL = "https://app.bettercontact.rocks/api/v2/async"

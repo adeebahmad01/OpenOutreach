@@ -187,8 +187,12 @@ class TestSignupUrl:
     parameter is guarded rather than trusted to whoever writes the next call site.
     """
 
-    def test_carries_the_affiliate_parameter(self):
-        assert "fpr=openoutreach" in bettercontact.SIGNUP_URL
+    def test_survives_a_terminal_that_linkifies_only_part_of_a_url(self):
+        """No query string: a terminal that stops at the `?` would otherwise hand the
+        reader a bare domain, and an unattributed signup cannot be repaired.
+        """
+        assert "?" not in bettercontact.SIGNUP_URL
+        assert bettercontact.SIGNUP_URL.startswith("https://openoutreach.app/go/")
 
     def test_nothing_we_ship_writes_the_signup_url_without_it(self):
         """The one path to an account is the constant. A bare literal — in code or in

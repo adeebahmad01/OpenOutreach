@@ -16,6 +16,7 @@ from openoutreach.core import status as status_module
 from openoutreach.core.errors import ErrorType
 from openoutreach.core.management.commands.status import render
 from openoutreach.crm.models import DealState
+from openoutreach.enrichment import bettercontact
 from tests.factories import DealFactory, LeadFactory
 
 
@@ -165,8 +166,9 @@ def test_credit_ask_carries_the_count_and_the_attributed_url(campaign, configure
 
     assert action["type"] == "add_credits"
     assert action["leads"] == 1
-    # Attribution is won at signup, so every path we show carries it.
-    assert action["url"].endswith("?fpr=openoutreach")
+    # Attribution is won at signup, so every path we show goes through the one URL
+    # that applies it — never a hand-written link.
+    assert action["url"] == bettercontact.SIGNUP_URL
 
 
 @pytest.mark.django_db
