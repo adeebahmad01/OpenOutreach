@@ -1,7 +1,7 @@
 # Default Campaign — OpenOutreach ICP
 
 This document outlines the target customer and keyword strategy for acquiring new users for OpenOutreach, the
-open-source B2B outreach automation tool.
+open-source B2B lead finder that qualifies for you.
 
 ## Ideal Customer Profile: The Indie Hacker
 
@@ -18,8 +18,8 @@ building their businesses from the ground up.
   well-documented tools ("Pythonic" values of simplicity and readability). They are data-driven and want to measure,
   test, and optimize their outreach with scientific rigor.
 * **Ambitious & Growth-Oriented:** They are looking for a "secret weapon" to level the playing field and compete with
-  larger, better-funded companies. They need a scalable solution that can grow with them, from simple automated outreach
-  to a sophisticated, multi-mailbox lead-generation engine.
+  larger, better-funded companies. They need a solution that grows with them, from a first list of ten qualified leads
+  to a standing pipeline feeding whatever they already send with.
 * **Value-Driven:** They feel smart and empowered by choosing a free, powerful tool over an expensive, black-box
   service. They are not just looking for a cheap solution; they are looking for a *better* one.
 

@@ -36,7 +36,7 @@ It has **zero platform-ToS surface**: browserless, no social-network account, no
 2. **An LLM turns that into opening search keywords** and pages matching firmographic profiles from a **licensed discovery source** (BetterContact **Lead Finder**) — no emails yet, billed nothing
 3. **Discovery walks the keyword index by counting**, adding one word at a time and spending its next query where the accepted-lead counts say the best ones came from. No model, no cadence knob
 4. **An LLM qualifies each candidate** against your ICP and **writes down why**. A per-campaign model (Gaussian Process over profile embeddings) learns from those verdicts and picks who to qualify next
-5. **The qualified leads are written to a CSV as they qualify** — one file per campaign, no command to run — name, title, company, website, profile URL, and the `reason`. Optionally, the best-fit leads get a **paid email lookup** first (one credit per verified hit), gated on the model's confidence so the spend goes to the leads most likely to fit
+5. **The whole campaign prints as CSV when the run ends** — name, title, company, website, profile URL, and the `reason` — so `> leads.csv` is the only file there is. Ask for addresses (`find 10 emails`, or `--emails`) and the best-fit leads get a **paid email lookup** first, one credit per verified hit, gated on the model's confidence so the spend goes to the leads most likely to fit
 
 Searching the licensed source is free, so the system can afford to look at a lot and spend paid lookups only on the best fits. *(The learning loop is an active experiment — it is not yet shown to beat picking at random, and no claim is made that it does.)*
 
@@ -64,7 +64,7 @@ openoutreach status --json     # the same thing, for a script or an agent
 ```
 
 ```
-email, first_name, last_name, company, title, website, linkedin_url, reason, lead_id
+email, first_name, last_name, company, title, website, linkedin_url, reason, lead_id, qualified_at
 ```
 
 Those column names are **the importers', not ours**. Instantly and Smartlead both require `email`/`first_name`/`last_name` and recognise `company`/`title`/`website`/`linkedin_url` as standard fields, so an exported file imports **without column mapping**. Anything else — including `reason` — arrives as a custom variable you can merge into a template.
@@ -140,11 +140,12 @@ or, if you would rather install it:
 pip install openoutreach && openoutreach find 10
 ```
 
-The interactive onboarding walks you through the inputs above on first run — product/objective → LLM key (live-verified) → BetterContact key → your email → country → newsletter/legal. Four steps. Everything lives in `~/.openoutreach/data`, so stopping and starting loses nothing: the number you ask for is *more than you already have*, so running it again continues where it left off. No browser, no daemon manager, no container.
+The interactive onboarding walks you through the inputs above on first run — four steps: product/objective → LLM key (live-verified) → BetterContact key → your email, country and the legal notice. `find` does it for you if it hasn't happened yet; `openoutreach init` does it deliberately, prints the campaign it created and stops before spending anything. Either way every answer can come from the environment instead (`OPENOUTREACH_*`), which is what makes a headless install possible. Everything lives in `~/.openoutreach/data`, so stopping and starting loses nothing: the number you ask for is *more than you already have*, so running it again continues where it left off. No browser, no daemon manager, no container.
 
 **The three verbs:**
 
 ```bash
+openoutreach init                # set up the pipeline and the campaign, print it, stop
 openoutreach find 10             # ten more qualified leads — free, and cannot spend
 openoutreach find 10 --emails    # ...and buy an address for whatever is ready
 openoutreach find 10 emails      # ten more *with* a work email (one credit each)
@@ -200,15 +201,17 @@ Browse Leads, Companies and Deals — every qualification decision, with its rea
 
 ### 4. Collect the file
 
-The run writes it for you, one per campaign, under the data dir — `openoutreach status` reports
-the exact path:
+The run prints the whole campaign as CSV on **stdout**, so the file is wherever you redirect it —
+the tool writes nothing for you and there is no path to go looking for:
 
-```
-~/.openoutreach/data/leads/my-campaign.csv
+```bash
+make find N=10 > leads.csv          # or: python manage.py find 0 > leads.csv
 ```
 
-A row exports as soon as the qualifier accepts it — an email address is an enrichment on top, never a
-precondition — so a CSV can carry rows with a blank `email`. `openoutreach status` counts both.
+`find 0` does no work and prints what the campaign already has, which is how you re-export without
+spending anything. A row exports as soon as the qualifier accepts it — an email address is an
+enrichment on top, never a precondition — so the file can carry rows with a blank `email`.
+`openoutreach status` counts both.
 
 ---
 ## ✨ Features
@@ -275,7 +278,7 @@ Configure behavior via Django Admin (`SiteConfig` + `Campaign`).
 ├── manage.py                         # checkout shim over openoutreach/__main__.py
 ├── pyproject.toml                   # package metadata, dependencies, console script
 ├── local.yml                        # Docker Compose — the server deploy only
-└── Makefile                         # Shortcuts (setup, run, admin, test)
+└── Makefile                         # Shortcuts (setup, find, admin, test)
 ```
 
 ---

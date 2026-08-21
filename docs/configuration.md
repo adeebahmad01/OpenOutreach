@@ -5,7 +5,8 @@ Configuration lives in two places: the **`SiteConfig`** DB singleton and per-cam
 ## Configure without a terminal
 
 Every onboarding field is also an environment variable, so an install with no TTY (an agent, a
-container, CI) never needs the wizard. Set these and run `openoutreach`:
+container, CI) never needs the wizard. Set these and run `openoutreach init` — or go straight to
+`openoutreach find 10`, which does the same setup before it starts working:
 
 | Variable | Step | Notes |
 |:---------|:-----|:------|
@@ -36,7 +37,7 @@ Set during onboarding, editable in Django Admin. `SiteConfig` is the single sour
 | `llm_api_base` | Base URL — **only** for `openai_compatible:*`. | (none) |
 | `bettercontact_api_key` | [BetterContact](https://bettercontact.rocks?fpr=openoutreach) key (affiliate link — no markup to you). Powers **both** Lead Finder discovery **and** work-email enrichment. **Blank disables discovery + enrichment.** | (empty) |
 | `contacts_api_token` / `contacts_api_url` | Cross-operator contacts-store token (earned on first contribution) and URL (blank → default hub). | (empty) |
-| `country_code` | ISO-3166 alpha-2. The only persisted operator setting — drives the sending-window timezone and the email/GDPR jurisdiction rules. | (from onboarding) |
+| `country_code` | ISO-3166 alpha-2. The only persisted operator setting — decides the newsletter opt-in default (`geo.is_gdpr_protected`) and whether this install contributes to the contacts store at all (`geo.is_eea_located`). | (from onboarding) |
 
 The operator's own email and name live on the Django `User` (created at onboarding), not on `SiteConfig`.
 
@@ -76,10 +77,11 @@ Not user-configurable per campaign; edit the source to change.
 | `CAMPAIGN_CONFIG.qualification_n_mc_samples` | `100` | Monte Carlo samples for BALD. |
 | `CAMPAIGN_CONFIG.embedding_model` | `BAAI/bge-small-en-v1.5` | FastEmbed model for 384-dim embeddings. |
 
-**There is no spend cap setting, because the command line is the cap.** Paid lookups used to be gated
-by mailbox send-headroom — *never resolve an address there is no room to email today* — and nothing
-replaced that when the sending leg left. What bounds the spend now is the number you type: one credit
-is one verified address, so `openoutreach find 10 emails` cannot cost more than ten. (Beyond that, your
+**There is no spend cap setting, because the command line is the cap.** A run cannot spend at all
+unless you ask it to: `--emails` permits the paid lookup, and the `emails` unit implies it, so a bare
+`find 10` is free however many deals have queued up past the confidence gate. When you do ask, the
+number you type is the budget — one credit is one verified address, so `openoutreach find 10 emails`
+cannot cost more than ten. (Beyond that, your
 own prepaid balance at the provider, which the provider enforces and this software cannot see.)
 Discovery and qualification are ungated entirely: searching is free and qualifying costs one call
 against your own LLM key.

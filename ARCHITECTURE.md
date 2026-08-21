@@ -48,8 +48,9 @@ upgradeable — see *Migrations* below.
 ## Entry Flow
 
 `openoutreach/__main__.py:main` — the `openoutreach` console script, and the entry point
-(`manage.py` is a shim over it for a checkout). A bare invocation (no subcommand, or a leading flag)
-defaults to `run`. A global `--db PATH` (or `--db=PATH`) is stripped from argv before Django
+(`manage.py` is a shim over it for a checkout). **There is no default verb**: a bare invocation prints
+the command list, because the work verb needs a number and picking one would spend the operator's
+credits on a guess. A global `--db PATH` (or `--db=PATH`) is stripped from argv before Django
 parses it and exported as `OPENOUTREACH_DB`, which `settings.py` reads for the SQLite file (default
 `~/.openoutreach/data/db.sqlite3` installed, `data/db.sqlite3` in a checkout); the parent directory
 is created if missing.
@@ -62,14 +63,15 @@ Three verbs, chosen rather than accumulated — they are what the two readers ac
 |:-----|:--|
 | `init [--product-docs F] [--target F] [--name N] [--json]` | create the pipeline and the campaign, print what it made, spend nothing. Safe to run twice. |
 | `find N [emails] [--emails] [--campaign N] [--new] [--json] [--open] [--debug]` | find that many more, print the campaign as CSV, exit. |
-| `status [--json]` | what is configured, blocked, counted, and next — including where the CSV is. |
+| `status [--json]` | what is configured, blocked, counted, and the next action — including the command that prints the CSV. |
 
 **`--campaign` is optional**: `find` takes the only campaign when there is one and raises a
 `bad_config` listing them all when there are several. Ambiguity is an error, never a guess — picking
 one would spend the operator's credits on the wrong ICP.
 
-**The CSV is not a verb.** `export_leads` was deleted once the run started writing the file itself:
-a second way to do one thing, and the one nobody found.
+**The CSV is not a verb and not a file the tool writes** — it is the stdout of `find`, so redirecting
+the command is what produces it. `export_leads` was deleted as a second way to do one thing, and the
+one nobody found. See *The Lead Export* below.
 
 **`--json` belongs on every verb with a result** — `init`, `find` and `status`, which is all of them.
 A failure answers in the caller's format too: `--json` turns the `error:` line into
@@ -616,9 +618,11 @@ regenerated, and with it went `core/migration_compat.py` and the `migrate` comma
 existed only to reconcile the pre-pivot `linkedin`→`legacy` app rename for existing installs.
 
 The consequence is deliberate and is the reason the decision was recorded: **a database created
-before this cut cannot upgrade past it.** The two production daemons stay pinned to the tag
-`pre-finder-cut` (the last commit where sending works) and are not upgraded. A fresh install
-migrates from nothing and is unaffected.
+before this cut cannot upgrade past it.** A pre-cut install has to stay on the `pre-finder-cut` tag
+(the last commit where sending works) — pulling `main` onto it leaves a database that cannot migrate
+onto the new `0001_initial`, so the process will not start. There is no upgrade path and none is
+planned: export what you need and start fresh. A fresh install migrates from nothing and is
+unaffected.
 
 ## The Lead Export (`core/export.py`)
 
