@@ -54,8 +54,12 @@ DEFAULT_CAMPAIGN_NAME = "Email Outreach"
 _INTRO = """
   Welcome to OpenOutreach — a self-hosted lead finder that qualifies for you.
   Describe your product and who you sell to; it discovers matching people, judges
-  each one against your ICP, and writes down why it chose them. Export the result
-  as CSV and send with whatever you already use.
+  each one against your ICP, and writes down why it chose them.
+
+  OpenOutreach does not send email. The result prints as CSV with the column
+  names your cold-email tool already reads (Instantly, Smartlead, or any CRM/
+  spreadsheet) — import it into whatever you already send with, no column
+  mapping needed.
 
   Setup takes a few minutes. Have two things ready:
     • an LLM provider key — the agent qualifies your leads and writes the reasons
