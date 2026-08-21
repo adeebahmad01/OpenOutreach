@@ -93,9 +93,9 @@ def test_account_not_done_for_blank_email_user():
 
 
 @pytest.mark.django_db
-def test_account_shows_funding_notice_before_legal_gate():
-    """The plain-language funding-behaviour notice (Legal Notice §4/§6) is shown
-    during the account step, before the Legal Notice acceptance prompt."""
+def test_account_gates_on_legal_notice():
+    """The account step runs the Legal Notice acceptance gate before finalizing —
+    no rendered §4/§6 excerpt any more, just the link the gate's own prompt carries."""
     from openoutreach.core.models import Campaign
 
     Campaign.objects.create(name="C", product_docs="p", campaign_target="o")
@@ -103,34 +103,10 @@ def test_account_shows_funding_notice_before_legal_gate():
     with patch("openoutreach.core.onboarding.wiz.text", side_effect=["me@posteo.eu", "US"]), \
          patch("openoutreach.core.onboarding.wiz.confirm", side_effect=[True, True]), \
          patch("openoutreach.core.newsletter.subscribe_to_newsletter"), \
-         patch("openoutreach.core.onboarding._show_information_notice") as notice, \
          patch("openoutreach.core.onboarding._require_legal") as legal:
         onboarding._run_account()
 
-    notice.assert_called_once()  # the funding/contacts notice is rendered…
-    legal.assert_called_once()   # …and the acceptance gate still runs after it
-
-
-def test_legal_notice_sections_are_read_verbatim():
-    """§4/§6 are lifted verbatim from the authoritative LEGAL_NOTICE.md, and
-    neighbouring sections (§5, §7) don't leak into the excerpt."""
-    assert onboarding.LEGAL_NOTICE_PATH.exists()
-    text = onboarding._legal_notice_sections(4, 6)
-
-    assert text.startswith("### 4. How the Project Is Funded")
-    assert "### 6. Central Contacts Store" in text
-    # Verbatim, not paraphrased — exact phrases (with markdown) from the notice survive.
-    assert "**affiliate links**" in text
-    assert "No name, headline, company, title, phone, or profile text is sent." in text
-    # Boundaries: the sections between/around §4 and §6 are excluded.
-    assert "### 5." not in text
-    assert "### 7." not in text
-
-
-def test_legal_notice_sections_fall_back_to_url_when_missing(tmp_path, monkeypatch):
-    """A missing notice file degrades to the canonical link, never a crash."""
-    monkeypatch.setattr(onboarding, "LEGAL_NOTICE_PATH", tmp_path / "nope.md")
-    assert onboarding.LEGAL_NOTICE_URL in onboarding._legal_notice_sections(4, 6)
+    legal.assert_called_once()
 
 
 @pytest.mark.django_db
