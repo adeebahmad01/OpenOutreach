@@ -11,6 +11,7 @@ LLM call, nothing mutated.
 """
 import csv
 import io
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -36,6 +37,12 @@ def _lead(**kwargs):
 def _deal(campaign, reason="fits the ICP", **lead_kwargs):
     return DealFactory(campaign=campaign, lead=_lead(**lead_kwargs),
                        state=DealState.RESOLVED, reason=reason)
+
+
+def _campaign(name):
+    from openoutreach.core.models import Campaign
+
+    return Campaign.objects.create(name=name)
 
 
 # ── the record ────────────────────────────────────────────────────
@@ -151,3 +158,94 @@ class TestWriters:
         _deal(campaign, email="second@acme.com")
 
         assert export.write_csv(export.lead_records(campaign), io.StringIO()) == 2
+
+
+# ── the file that writes itself ───────────────────────────────────
+
+
+@pytest.mark.django_db
+class TestCampaignCsv:
+    """The deliverable is a file that is already there — no command to discover."""
+
+    def test_the_path_is_stable_and_beside_the_database(self, campaign, settings):
+        campaign.name = "Acme Q3"
+        campaign.save()
+
+        path = export.campaign_csv_path(campaign)
+
+        assert path == export.campaign_csv_path(campaign)
+        assert path.parent == Path(settings.DATABASE_PATH).parent / "leads"
+        assert path.name == "acme-q3.csv"
+
+    def test_two_campaigns_never_share_a_file(self, campaign):
+        other = _campaign("Beta Co")
+
+        assert export.campaign_csv_path(campaign) != export.campaign_csv_path(other)
+
+    def test_a_name_that_slugifies_to_nothing_falls_back_to_the_pk(self, campaign):
+        campaign.name = "!!!"
+        campaign.save()
+
+        assert export.campaign_csv_path(campaign).name == f"campaign-{campaign.pk}.csv"
+
+    def test_a_slug_collision_is_broken_by_the_pk(self, campaign):
+        """``Campaign.name`` is unique; ``slugify`` is not injective."""
+        campaign.name = "Acme Co"
+        campaign.save()
+        other = _campaign("acme co")
+
+        assert export.campaign_csv_path(campaign).name == "acme-co.csv"
+        assert export.campaign_csv_path(other).name == f"acme-co-{other.pk}.csv"
+
+    def test_writing_creates_the_file_with_the_qualified_rows(self, campaign):
+        _deal(campaign)
+
+        rows = export.write_campaign_csv(campaign)
+
+        path = export.campaign_csv_path(campaign)
+        assert rows == 1
+        assert list(csv.DictReader(path.open()))[0]["email"] == "ada@acme.com"
+
+    def test_a_rewrite_updates_a_row_already_written(self, campaign):
+        """An address resolved *later* changes a row that is already in the file —
+        which is the whole reason this rewrites rather than appends."""
+        deal = _deal(campaign, email=None)
+        export.write_campaign_csv(campaign)
+
+        deal.lead.email = "ada@acme.com"
+        deal.lead.save()
+        rows = export.write_campaign_csv(campaign)
+
+        records = list(csv.DictReader(export.campaign_csv_path(campaign).open()))
+        assert rows == 1 and len(records) == 1
+        assert records[0]["email"] == "ada@acme.com"
+
+    def test_a_reader_never_sees_a_partial_file(self, campaign):
+        """Agents poll, so the file must never exist half-written. It is swapped in."""
+        _deal(campaign)
+        export.write_campaign_csv(campaign)
+        path = export.campaign_csv_path(campaign)
+        seen = []
+
+        original = export.write_csv
+
+        def peek(records, stream):
+            count = original(records, stream)
+            seen.append(path.read_text())  # mid-write: the old file, whole
+            return count
+
+        _deal(campaign, email="second@acme.com")
+        with patch.object(export, "write_csv", peek):
+            export.write_campaign_csv(campaign)
+
+        assert len(list(csv.DictReader(io.StringIO(seen[0])))) == 1
+        assert len(list(csv.DictReader(path.open()))) == 2
+
+    def test_the_temp_file_does_not_survive_a_failed_write(self, campaign):
+        _deal(campaign)
+
+        with patch.object(export, "write_csv", side_effect=OSError("disk full")):
+            with pytest.raises(OSError):
+                export.write_campaign_csv(campaign)
+
+        assert list(export.campaign_csv_path(campaign).parent.glob("*.tmp")) == []

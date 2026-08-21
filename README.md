@@ -36,7 +36,7 @@ It has **zero platform-ToS surface**: browserless, no social-network account, no
 2. **An LLM turns that into opening search keywords** and pages matching firmographic profiles from a **licensed discovery source** (BetterContact **Lead Finder**) — no emails yet, billed nothing
 3. **Discovery walks the keyword index by counting**, adding one word at a time and spending its next query where the accepted-lead counts say the best ones came from. No model, no cadence knob
 4. **An LLM qualifies each candidate** against your ICP and **writes down why**. A per-campaign model (Gaussian Process over profile embeddings) learns from those verdicts and picks who to qualify next
-5. **You export the qualified leads** as CSV — name, title, company, website, profile URL, and the `reason`. Optionally, the best-fit leads get a **paid email lookup** first (one credit per verified hit), gated on the model's confidence so the spend goes to the leads most likely to fit
+5. **The qualified leads are written to a CSV as they qualify** — one file per campaign, no command to run — name, title, company, website, profile URL, and the `reason`. Optionally, the best-fit leads get a **paid email lookup** first (one credit per verified hit), gated on the model's confidence so the spend goes to the leads most likely to fit
 
 Searching the licensed source is free, so the system can afford to look at a lot and spend paid lookups only on the best fits. *(The learning loop is an active experiment — it is not yet shown to beat picking at random, and no claim is made that it does.)*
 
@@ -44,10 +44,11 @@ Searching the licensed source is free, so the system can afford to look at a lot
 
 ## 📤 What You Get Out
 
-The deliverable is a file, and it is shaped for the tools you already send with:
+The deliverable is a file, and it is shaped for the tools you already send with. There is no
+command to run — the daemon writes one CSV per campaign as leads qualify:
 
-```bash
-openoutreach export_leads --campaign "My Campaign" > leads.csv
+```
+~/.openoutreach/data/leads/my-campaign.csv
 ```
 
 Want to know where it's up to without reading logs? Ask it:
@@ -180,10 +181,13 @@ Then open:
 
 Browse Leads, Companies and Deals — every qualification decision, with its reason, is a row you can read.
 
-### 4. Export
+### 4. Collect the file
 
-```bash
-openoutreach export_leads --campaign "My Campaign" > leads.csv
+The run writes it for you, one per campaign, under the data dir — `openoutreach status` reports
+the exact path:
+
+```
+~/.openoutreach/data/leads/my-campaign.csv
 ```
 
 A row exports as soon as the qualifier accepts it — an email address is an enrichment on top, never a

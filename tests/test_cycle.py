@@ -252,3 +252,69 @@ class TestScoringIsSkippedWhenNothingMoved:
         with patch("openoutreach.core.ml.qualifier.qualifier_for") as build:
             assert cycle._score_qualified(campaign) is False
         build.assert_not_called()
+
+
+# ── The CSV writes itself ─────────────────────────────────────────
+
+
+@pytest.mark.django_db
+class TestTheCsvFollowsTheWork:
+    """The deliverable is a file that is already there, refreshed after **any** action.
+
+    Not only after a qualification: a lookup filling in an email changes a row that is
+    already in the file, and so does a lead becoming FAILED. Anything narrower leaves
+    the file stale in exactly the cases the operator is waiting on.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear(self):
+        cycle._csv_rows.clear()
+        yield
+        cycle._csv_rows.clear()
+
+    def test_an_action_writes_the_file_without_anyone_running_a_command(
+        self, campaign, steps
+    ):
+        from openoutreach.core.export import campaign_csv_path
+
+        _deal(campaign, DealState.RESOLVED, reason="fits", email="ada@acme.com")
+        _deal(campaign, DealState.QUALIFIED)
+
+        assert cycle.run_one_action(campaign) is True
+        assert campaign_csv_path(campaign).exists()
+
+    def test_a_cycle_that_did_nothing_writes_nothing(self, campaign, steps):
+        from openoutreach.core.export import campaign_csv_path
+
+        assert cycle.run_one_action(campaign) is False
+        assert not campaign_csv_path(campaign).exists()
+
+    def test_the_path_is_named_when_the_file_grows_and_not_when_it_did_not(
+        self, campaign, steps, caplog
+    ):
+        # A lookup poll acts every cycle without changing a row, so the second cycle is
+        # the case the count guard exists for.
+        _deal(campaign, DealState.RESOLVED, reason="fits", email="ada@acme.com")
+        _deal(campaign, DealState.FINDING_EMAIL, lookup_request_id="req1")
+
+        def named():
+            return [r.getMessage() for r in caplog.records if "lead(s) →" in r.getMessage()]
+
+        with caplog.at_level("INFO"):
+            cycle.run_one_action(campaign)
+            first = named()
+            caplog.clear()
+            cycle.run_one_action(campaign)
+            again = named()
+
+        assert len(first) == 1 and "2 lead(s)" in first[0]
+        assert again == []
+
+    def test_a_write_failure_does_not_stop_the_daemon(self, campaign, steps):
+        """The file is a projection of the database, never the record itself. A
+        read-only volume costs a stale CSV; it must not cost the leads."""
+        _deal(campaign, DealState.QUALIFIED)
+
+        with patch("openoutreach.core.export.write_campaign_csv",
+                   side_effect=OSError("read-only file system")):
+            assert cycle.run_one_action(campaign) is True

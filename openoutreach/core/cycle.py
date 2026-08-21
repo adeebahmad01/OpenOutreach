@@ -90,6 +90,11 @@ _idle_logged_at: float | None = None
 # process, and a restart simply scores once more than it had to.
 _scored_at: dict[int, tuple[int, int]] = {}
 
+# Per-campaign row count as of the last CSV rewrite, so the run names the file when it
+# grows and says nothing when it did not. Process-local like `_scored_at`: a restart
+# announces the file once more than it had to, which is the harmless direction.
+_csv_rows: dict[int, int] = {}
+
 # ── The loop ──────────────────────────────────────────────────────
 
 
@@ -161,10 +166,36 @@ def run_one_action(campaign) -> bool:
             logger.info("[%s] %s — %.1fs", campaign,
                         colored(name, "cyan", attrs=["bold"]), elapsed)
             _idle_logged_at = None
+            _refresh_csv(campaign)
             return True
         logger.debug("[%s] %s: nothing (%.1fs)", campaign, name, elapsed)
     _log_idle(campaign)
     return False
+
+
+def _refresh_csv(campaign) -> None:
+    """Rewrite the campaign's CSV after an action, naming it only when the count changed.
+
+    After **any** row that acted, not only after a qualification: `check_lookup` filling in
+    an email changes a row that is already in the file, and so does a lead becoming
+    `FAILED`. Anything narrower leaves the file stale in exactly the cases the operator is
+    waiting on.
+
+    A write failure must not kill the daemon. The file is a projection of the database,
+    never the record itself — a read-only volume or a full disk costs the operator a stale
+    CSV, and stopping the run would cost them the leads too.
+    """
+    from openoutreach.core.export import campaign_csv_path, write_campaign_csv
+
+    try:
+        rows = write_campaign_csv(campaign)
+    except OSError as exc:
+        logger.error("[%s] could not write the leads CSV — %s", campaign, exc)
+        return
+
+    if _csv_rows.get(campaign.pk) != rows:
+        _csv_rows[campaign.pk] = rows
+        logger.info("[%s] %d lead(s) → %s", campaign, rows, campaign_csv_path(campaign))
 
 
 def _log_idle(campaign) -> None:

@@ -6,7 +6,9 @@ The verbs, in the order a reader meets them:
     openoutreach run                               # the same thing, named
     openoutreach status [--json]                   # what is configured, blocked, counted, and next
     openoutreach reset [--campaign N] [--all]      # start a campaign's walk over
-    openoutreach export_leads --campaign N         # the CSV (until it writes itself)
+
+The CSV is not a verb: the run writes one file per campaign under the data dir as leads
+qualify, and `status` reports the path.
 
 Django's own commands remain available — `migrate`, `runserver` (the Admin at
 http://localhost:8000/admin/), `createsuperuser`.

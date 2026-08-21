@@ -56,14 +56,16 @@ is created if missing.
 
 ### The verb surface
 
-Four verbs, chosen rather than accumulated — they are what the two readers actually need:
+Three verbs, chosen rather than accumulated — they are what the two readers actually need:
 
 | verb | |
 |:-----|:--|
 | `run` | run it. The bare invocation defaults here. |
-| `status [--json]` | what is configured, blocked, counted, and next. |
+| `status [--json]` | what is configured, blocked, counted, and next — including where the CSV is. |
 | `reset [--campaign N] [--all]` | start a campaign's walk over without losing its config. |
-| `export_leads --campaign N` | the CSV — **until it writes itself** (`p1-e1-leads-csv-default-output` deletes this one). |
+
+**The CSV is not a verb.** `export_leads` was deleted once the run started writing the file itself:
+a second way to do one thing, and the one nobody found.
 
 **`--json` belongs on every verb with a result**, which today is `status` alone: `run` streams
 progress, `reset` performs an action, and a flag that serializes nothing is a promise the surface
@@ -85,11 +87,10 @@ Startup sequence:
 
 Docker's `start` script `exec`s `openoutreach run` (no Xvfb/VNC — there is no browser).
 
-### The other three verbs
+### The other two verbs
 
 - `status` — **what the daemon would say if you asked it.** Human summary by default, `--json` for a program. See *Status* below.
 - `reset [--campaign NAME] [--all]` — start a campaign's discovery walk over; `--all` also drops its leads, deals, anchors and fitted GP, after a database backup.
-- `export_leads --campaign NAME` — **the lead export**. One argument; CSV on stdout, redirect for a file. The record lives in `core/export.py`. See *The Lead Export* below.
 
 ## The Output Contract (`core/management/base.py`, `core/errors.py`)
 
@@ -112,7 +113,7 @@ What a program depends on, and the reason both exist as one place rather than a 
   schema in `execute()` — **after** argument parsing, so `--help` still answers — and raises
   `not_initialized`, naming the database path. Reporting zero campaigns instead would be precisely
   the empty-result failure `core/errors.py` exists to prevent: nothing was found because nothing has
-  ever run. `reset` and `export_leads` moved onto `OpenOutreachCommand` to inherit it.
+  ever run. `reset` moved onto `OpenOutreachCommand` to inherit it.
 - **The provider's refusals are three different things**, typed at the HTTP boundary in
   `bettercontact._request`: 401 → `provider_auth`, 402 → `provider_out_of_credits`, an exhausted 429
   backoff → `provider_rate_limited`. Everything else stays `provider_unavailable`.
@@ -136,7 +137,7 @@ against a held `BEGIN IMMEDIATE`).
 | `campaigns` / `totals` | the pipeline counts, per campaign and summed |
 | `credits` | `balance` + `error` — `GET /api/v2/account` → `credits_left` |
 | `blocked` | what stands between now and more qualified rows, typed from `core/errors.py` |
-| `export` | the command that writes the CSV (`path` is `null` until the default-output card lands) |
+| `export` | `path` — the CSV the run has already written, or `null` while no campaign has a row in one |
 | `next_action` | the one thing to do next, with what it unlocks, how many leads, and the URL |
 
 Three decisions inside it:
@@ -148,8 +149,8 @@ Three decisions inside it:
   lead exports with a blank `email` column — an address is an enrichment on top, never a
   precondition. The counts therefore split `exportable_with_email` / `exportable_without_email`, and
   they are counted **from the records** rather than from `RESOLVED` standing in for them.
-- **`next_action` is ordered by what blocks progress**, so `add_credits` sits above `export_leads`:
-  a ranked lead cannot advance without credits, while the export is available at any time. This does
+- **`next_action` is ordered by what blocks progress**, so `add_credits` sits above `read_leads`:
+  a ranked lead cannot advance without credits, while the CSV is already on disk. This does
   not break the *never before value* rule — `ranked_for_lookup > 0` is itself the proof that
   qualified leads with written reasons exist, and a run that has qualified nobody reaches `wait` and
   is asked for nothing.
@@ -592,9 +593,20 @@ contacted twice unless the operator enables it — say so in every adapter's doc
   rows** from a campaign where most deals were rejections — rows whose `reason` read *"does not
   align well with the target market"*. Both are now excluded, always; there is no flag to include
   them.
-- **No options.** One required `--campaign`, CSV on stdout, shell redirection for a file. A format
-  switch, an output path, a state filter and a rejected-leads escape hatch were all removed as
-  answers to questions nobody had asked.
+- **No command, and no options.** The file writes itself: `write_campaign_csv` runs after **any**
+  cycle action on that campaign, so a lookup filling in an address updates a row already on disk and
+  a lead becoming `FAILED` drops out of it. `campaign_csv_path` is the one naming rule —
+  `<data dir>/leads/<slugified name>.csv`, `campaign-<pk>` when a name slugifies to nothing, and the
+  newcomer's pk appended on a slug collision so a file the operator is already reading never moves.
+  **Rewrite, never append**: the file is then always the current truth for that campaign, restarts
+  cannot duplicate rows, and a later-resolved email updates the row that is already there — which
+  appending cannot do at all. The rewrite goes to a **sibling** temp file and is swapped in with
+  `os.replace` (atomic only within one filesystem, hence the sibling), because agents poll and a
+  half-flushed CSV is a failure mode worth designing out. A write failure is logged and the daemon
+  carries on: the file is a projection of the database, never the record itself. The run names the
+  path only when the row count changed. *(`export_leads --campaign N`, CSV on stdout, is deleted —
+  along with the format switch, output path, state filter and rejected-leads escape hatch it never
+  grew.)*
 
 ## CRM Data Model
 

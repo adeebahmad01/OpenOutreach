@@ -1,5 +1,5 @@
 # openoutreach/core/export.py
-"""The lead export contract — one record shape, one command, no options.
+"""The lead export contract — one record shape, one file per campaign, no command.
 
 This is the finder's **public output**: what leaves OpenOutreach and reaches whatever
 the operator actually sends with. The boundary card
@@ -37,7 +37,12 @@ database.
 from __future__ import annotations
 
 import csv
+import os
+from pathlib import Path
 from typing import IO, Iterable
+
+from django.conf import settings
+from django.utils.text import slugify
 
 # The record, in order.
 #
@@ -129,3 +134,62 @@ def write_csv(records: Iterable[dict], stream: IO[str]) -> int:
         writer.writerow(record)
         count += 1
     return count
+
+
+# ── the file the operator came for ───────────────────────────────
+#
+# There is no export command. The deliverable is a file that is already there, one per
+# campaign, beside the database — so `~/.openoutreach/data/leads/…` installed, `data/leads/…`
+# in a checkout, `/app/data/leads/…` in the container. A subdirectory keeps it out of the
+# puddle of `db.sqlite3-wal` files, and `status` reports the real path, so the naming rule
+# below never has to be guessed at by eye.
+
+def campaign_csv_path(campaign) -> Path:
+    """Where *campaign*'s leads are written. The naming rule lives here and nowhere else."""
+    from openoutreach.core.models import Campaign
+
+    slug = slugify(campaign.name)
+    if not slug:
+        # A name of only punctuation or non-Latin script slugifies to nothing.
+        return _leads_dir() / f"campaign-{campaign.pk}.csv"
+
+    # `Campaign.name` is unique but `slugify` is not injective, so two distinct names can
+    # collide on one file. The **older** campaign keeps the bare slug and the newcomer
+    # takes its pk as a suffix — a first-come rule, so a file an operator is already
+    # reading never moves because someone created a similarly named campaign.
+    collides = (
+        Campaign.objects.filter(pk__lt=campaign.pk)
+        .filter(name__isnull=False)
+        .values_list("name", flat=True)
+    )
+    if any(slugify(other) == slug for other in collides):
+        slug = f"{slug}-{campaign.pk}"
+    return _leads_dir() / f"{slug}.csv"
+
+
+def _leads_dir() -> Path:
+    return Path(settings.DATABASE_PATH).parent / "leads"
+
+
+def write_campaign_csv(campaign) -> int:
+    """Rewrite *campaign*'s CSV from the database. Returns the row count.
+
+    **The whole file, every time.** It is a projection of the database, so a rewrite makes
+    it the current truth for that campaign: a restart cannot duplicate rows, and an email
+    resolved *later* updates the row already written — which appending cannot do at all.
+
+    The write is atomic. Agents poll, so a reader will eventually open this file mid-write
+    unless it never exists mid-write: the rows go to a sibling temp file and `os.replace`
+    swaps it in. A sibling and not `/tmp`, because `os.replace` is only atomic within one
+    filesystem.
+    """
+    path = campaign_csv_path(campaign)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / (path.name + ".tmp")
+    try:
+        with tmp.open("w", newline="", encoding="utf-8") as stream:
+            count = write_csv(lead_records(campaign), stream)
+        os.replace(tmp, path)
+        return count
+    finally:
+        tmp.unlink(missing_ok=True)

@@ -68,6 +68,7 @@ def _onboarding_state(onboarding) -> dict:
 
 def _campaign_counts() -> list[dict]:
     """Per-campaign pipeline counts, oldest campaign first."""
+    from openoutreach.core.export import campaign_csv_path
     from openoutreach.core.models import Campaign
     from openoutreach.crm.models import Deal, DealState
 
@@ -88,6 +89,7 @@ def _campaign_counts() -> list[dict]:
         exportable, with_email = _export_counts(campaign)
         rows.append({
             "name": campaign.name,
+            "csv_path": str(campaign_csv_path(campaign)),
             "leads_seen": deals.count(),
             "qualified": by_state[DealState.QUALIFIED],
             "ranked_for_lookup": by_state[DealState.READY_TO_FIND_EMAIL],
@@ -103,7 +105,7 @@ def _campaign_counts() -> list[dict]:
 
 
 def _export_counts(campaign) -> tuple[int, int]:
-    """Rows ``export_leads`` would write, and how many carry an address.
+    """Rows in the campaign's CSV, and how many carry an address.
 
     **An exportable row is not necessarily a mailable one.** The export excludes only
     the two rejections, so a `QUALIFIED` lead exports with a blank ``email`` column —
@@ -196,12 +198,14 @@ def _blocked(onboarding_state: dict, credits: dict, totals: dict) -> list[dict]:
 # ── the export ───────────────────────────────────────────────────
 
 def _export_hint(campaigns: list[dict]) -> dict:
-    """How to get the rows out. There is no CSV path yet — the export writes stdout."""
-    name = campaigns[0]["name"] if campaigns else "<campaign>"
-    return {
-        "path": None,
-        "command": f'openoutreach export_leads --campaign "{name}" > leads.csv',
-    }
+    """Where the rows already are. There is nothing to run — the daemon writes the file.
+
+    One file per campaign, so ``path`` names the one with rows in it (the ordinary
+    single-campaign case reads as *the* file); every campaign's own path is on its row
+    under ``campaigns``.
+    """
+    with_rows = next((row for row in campaigns if row["exportable"]), None)
+    return {"path": (with_rows or {}).get("csv_path")}
 
 
 # ── the next action ──────────────────────────────────────────────
@@ -210,9 +214,13 @@ def next_action(onboarding_state: dict, credits: dict, totals: dict, campaigns: 
     """The one thing to do next — arithmetic, not adjectives.
 
     Ordered by what actually blocks progress, which is why the credit ask sits above
-    the export rather than below it: a ranked lead is one the run *cannot advance*
-    without credits, whereas the export is available at any time and is reported
+    the file rather than below it: a ranked lead is one the run *cannot advance*
+    without credits, whereas the CSV is already on disk at any time and is reported
     under ``export`` regardless.
+
+    ``read_leads`` is a *read*, not a do — nothing has to be run for the rows to exist.
+    It still earns its place above ``wait`` because it is the only place the operator is
+    told the file is there and where to find it, which is the whole deliverable.
 
     That ordering does not break the *never before value* rule. Ranked leads are
     qualified leads with written reasons, so ``ranked_for_lookup > 0`` **is** the
@@ -240,13 +248,13 @@ def next_action(onboarding_state: dict, credits: dict, totals: dict, campaigns: 
         }
 
     if totals["exportable"]:
-        name = next((c["name"] for c in campaigns if c["exportable"]), campaigns[0]["name"])
+        row = next(c for c in campaigns if c["exportable"])
         return {
-            "type": "export_leads",
-            "message": f"{totals['exportable']} qualified lead(s) ready to export.",
+            "type": "read_leads",
+            "message": f"{row['exportable']} qualified lead(s) are already written to {row['csv_path']}.",
             "unlocks": "a CSV your sequencer imports without column mapping",
             "leads": totals["exportable"],
-            "command": f'openoutreach export_leads --campaign "{name}" > leads.csv',
+            "path": row["csv_path"],
         }
 
     return {

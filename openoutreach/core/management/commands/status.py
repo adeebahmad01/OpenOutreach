@@ -103,8 +103,8 @@ def _render_next(action: dict) -> str:
     lines = [f"Next: {action['message']}"]
     if action.get("unlocks"):
         lines.append(f"  unlocks: {action['unlocks']}")
-    if action.get("command"):
-        lines.append(f"  run: {action['command']}")
+    if action.get("path"):
+        lines.append(f"  file: {action['path']}")
     if action.get("url"):
         lines.append(f"  go to: {action['url']}")
     return "\n".join(lines)
