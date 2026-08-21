@@ -119,7 +119,7 @@ Two other funding mechanisms have been **removed**, and it is worth saying so pl
 | # | What | Example |
 |---|------|---------|
 | 1 | **An LLM API key** | OpenAI, Anthropic, or any OpenAI-compatible endpoint |
-| 2 | **An email-finder API key** ([BetterContact](https://bettercontact.rocks?fpr=openoutreach)) | Powers **both** discovery (Lead Finder, free) and enrichment (work-email resolution, one credit per hit) |
+| 2 | **An email-finder API key** ([BetterContact](https://bettercontact.rocks?fpr=openoutreach)) | **Free account: 40 credits, no card.** Powers **both** discovery (Lead Finder, billed nothing) and enrichment (one credit per verified work email, only with `--emails`) |
 | 3 | **A product description + target market** | "We sell cloud cost optimization for DevOps teams at mid-market SaaS companies" |
 
 That's it. **No mailbox**, no social-network account, no spreadsheets, no lead databases, no scraping setup. The BetterContact key is required because it drives discovery *and* enrichment — note the barrier is an **account, not a bill**, since searching the index costs nothing and only resolving an address spends a credit.

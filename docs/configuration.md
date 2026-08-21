@@ -35,7 +35,7 @@ Set during onboarding, editable in Django Admin. `SiteConfig` is the single sour
 | `ai_model` | pydantic-ai `provider:model` id (e.g. `anthropic:claude-sonnet-4-5-...`); bare `gpt-*`/`claude-*`/`gemini-*` are auto-prefixed. Providers: openai/anthropic/google/groq/mistral/cohere/openai_compatible. | (required) |
 | `llm_api_key` | API key for the chosen provider. Live-verified at onboarding. | (required) |
 | `llm_api_base` | Base URL — **only** for `openai_compatible:*`. | (none) |
-| `bettercontact_api_key` | [BetterContact](https://bettercontact.rocks?fpr=openoutreach) key (affiliate link — no markup to you). Powers **both** Lead Finder discovery **and** work-email enrichment. **Blank disables discovery + enrichment.** | (empty) |
+| `bettercontact_api_key` | [BetterContact](https://bettercontact.rocks?fpr=openoutreach) key — **free account, 40 credits, no card** (affiliate link, no markup to you). Powers **both** Lead Finder discovery (billed nothing) **and** work-email enrichment (one credit per verified address, only with `--emails`). **Blank disables discovery + enrichment.** | (empty) |
 | `contacts_api_token` / `contacts_api_url` | Cross-operator contacts-store token (earned on first contribution) and URL (blank → default hub). | (empty) |
 | `country_code` | ISO-3166 alpha-2. The only persisted operator setting — decides the newsletter opt-in default (`geo.is_gdpr_protected`) and whether this install contributes to the contacts store at all (`geo.is_eea_located`). | (from onboarding) |
 

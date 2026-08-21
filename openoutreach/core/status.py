@@ -23,11 +23,9 @@ from __future__ import annotations
 import logging
 
 from openoutreach.core.errors import ErrorType
+from openoutreach.enrichment.bettercontact import SIGNUP_URL as BETTERCONTACT_SIGNUP_URL
 
 logger = logging.getLogger(__name__)
-
-BETTERCONTACT_SIGNUP_URL = "https://bettercontact.rocks?fpr=openoutreach"
-"""Attribution is won at **signup**, not at payment, so every path we show carries it."""
 
 
 def build_status() -> dict:

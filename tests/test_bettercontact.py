@@ -6,6 +6,7 @@ its ``request_id``; ``poll_once`` checks that job exactly once and reports
 running / hit / miss. A missing key or an unreachable service raises
 BetterContactUnavailable rather than a bare error.
 """
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -179,3 +180,29 @@ class TestIsConfigured:
 
     def test_true_when_key_set(self, keyed):
         assert bettercontact.is_configured() is True
+
+
+class TestSignupUrl:
+    """Attribution is won at signup and cannot be repaired afterwards, so the
+    parameter is guarded rather than trusted to whoever writes the next call site.
+    """
+
+    def test_carries_the_affiliate_parameter(self):
+        assert "fpr=openoutreach" in bettercontact.SIGNUP_URL
+
+    def test_nothing_we_ship_writes_the_signup_url_without_it(self):
+        """The one path to an account is the constant. A bare literal — in code or in
+        the docs a reader follows — is an unattributed signup waiting to happen.
+        """
+        package = Path(bettercontact.__file__).parent.parent
+        root = package.parent
+        prose = [path for path in (root / "README.md", *root.glob("docs/**/*.md")) if path.exists()]
+        offenders = [
+            path.relative_to(root)
+            for path in (*package.rglob("*.py"), *prose)
+            for line in path.read_text().splitlines()
+            # `://bettercontact.rocks` is the signup host as a URL — it does not match
+            # the API host (`app.bettercontact.rocks`) or a prose mention of the name.
+            if "://bettercontact.rocks" in line and "fpr=openoutreach" not in line
+        ]
+        assert not offenders, f"signup URL without the affiliate parameter: {offenders}"

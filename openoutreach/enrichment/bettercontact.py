@@ -29,6 +29,16 @@ from openoutreach.core.logblock import step_line
 
 logger = logging.getLogger(__name__)
 
+SIGNUP_URL = "https://bettercontact.rocks?fpr=openoutreach"
+"""The one path to an account, and it lives here so no caller can write it without the
+affiliate parameter.
+
+Attribution is won at **signup**, not at payment: an operator who creates the account
+unattributed and later spends thousands earns the project nothing, and there is no way to
+repair it afterwards. Every place the product offers an account — onboarding, ``status``,
+the README, an error message — resolves to this constant.
+"""
+
 _ENRICH_URL = "https://app.bettercontact.rocks/api/v2/async"
 _ACCOUNT_URL = "https://app.bettercontact.rocks/api/v2/account"
 _POLL_INTERVAL_S = 5

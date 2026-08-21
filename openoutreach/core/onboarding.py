@@ -372,15 +372,15 @@ def _bettercontact_done() -> bool:
 
 def _run_bettercontact() -> None:
     from openoutreach.core.models import SiteConfig
+    from openoutreach.enrichment.bettercontact import SIGNUP_URL
 
     print(
-        "\n  BetterContact — the one paid step, and it does double duty: lead\n"
-        "  DISCOVERY (ICP search — billed nothing) and email FINDING (one credit\n"
-        "  per verified work email, top-ranked leads only). Free tier is ~50\n"
-        "  lookups to start.\n\n"
+        "\n  BetterContact — free account, 40 credits, no card.\n\n"
+        "  Finding leads costs nothing. One credit buys one verified work\n"
+        "  email, and only when you ask with --emails.\n\n"
         "  Get a key (affiliate link — supports OpenOutreach, no markup to you):\n"
-        "  https://bettercontact.rocks?fpr=openoutreach\n"
-        "  Then copy your API key from the dashboard and paste it below."
+        f"  {SIGNUP_URL}\n"
+        "  Then paste the API key from your dashboard below."
     )
     cfg = SiteConfig.load()
     cfg.bettercontact_api_key = _required(wiz.text("BetterContact API key", secret=True))
