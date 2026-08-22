@@ -126,7 +126,17 @@ correct by construction: the newest file supersedes every earlier one, and a lea
 resolved since last time comes back with it filled in. It is one file you overwrite, not a batch per
 run. `--new` narrows to what this run produced — the escape hatch for a caller reading stdout into a
 context window rather than into a file — and `--json` emits one object carrying the goal, the
-outcome and the rows.
+outcome, the next action and the rows.
+
+**The run ends with the one thing to do next, and it derives none of it.** `_report` reads
+`build_status()["next_action"]` and renders it with `status.render_next_action` — on stderr beside the
+counts, or as the `next_action` key when `--json` is asked for. That matters most on a run that stops
+with ranked leads and an empty wallet: the moment to offer a top-up is the moment the run ends, and
+nothing else prints it. **Two earlier attempts put the arithmetic in the wrong place** — the balance
+read and a deal count inside `core/job.py` gave the bounded-goal loop an HTTP call to a payment
+provider, and inside `enrichment/lookup.py` it went per-deal, so *read once* and *ask once* both
+needed module-level mutable state. The ask is about the state the run **left behind**, so it is read
+once after the work rather than carried through it, and there is one derivation with two callers.
 
 **Exit 0 means the goal was met, and nothing else.** Short of it, the rows still print and one
 `error: <type>: <message>` line goes to stderr: *the code says how much you got, the type says why it
@@ -192,6 +202,8 @@ What a program depends on, and the reason both exist as one place rather than a 
 
 `build_status()` assembles one dict and reads nothing else; the command renders it. SQLite runs in
 WAL, so it still answers while a job holds a write lock (verified against a held `BEGIN IMMEDIATE`).
+One renderer lives in `core/status.py` rather than in the command — `render_next_action` — because
+the end of a `find` run prints the same ask, and the sentence must have one spelling.
 
 **It is smaller than it was, on purpose.** It began as the verb an agent asked *instead of tailing a
 log*, because a daemon could not answer for itself — `next_action` existed so a caller had something

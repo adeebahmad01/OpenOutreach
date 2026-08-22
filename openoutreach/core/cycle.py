@@ -170,11 +170,13 @@ def pipeline_summary(campaign) -> str:
     )
     waiting = [f"{counts.get(state, 0)} {phrase}" for state, phrase in _WAITING_ON]
 
-    # The one gate left, said as its consequence rather than as its name — "no finder
-    # key, so not buying addresses" tells you why a row declined; a boolean tells you
-    # nothing. Discovery and qualification have no gate to report: they always run.
+    # The one gate left, said as its consequence rather than as its name — a boolean
+    # tells you nothing. The consequence is *narrower than it reads*: without a key the
+    # row still resolves an address already on the lead and still reads the hub's cache,
+    # and only the paid leg is off. Discovery and qualification have no gate to report:
+    # they always run.
     held = "" if bettercontact.is_configured() else (
-        " · no finder key, so not buying addresses")
+        " · no finder key, so free address sources only")
     return f"{' · '.join(waiting)}{held}"
 
 
@@ -254,10 +256,11 @@ def _buy_addresses(campaign) -> bool:
     # both tried first, and a missing or exhausted key switched them off along with
     # the paid leg, exactly when a free hit was worth the most.
     #
-    # ``buy_address`` now owns both checks, on the paid leg alone: a key to pay with
-    # (``is_configured``) and a credit to pay (``reserve_credit``). What bounds the
-    # spend is still the operator's own prepaid balance — see ``_top_up`` for why
-    # nothing here rations it on our side.
+    # ``buy_address`` now owns the key check on the paid leg alone (``is_configured``,
+    # inside ``_submit``). Nothing checks a credit before spending one: an empty wallet
+    # is a 402 from the provider, typed at the HTTP boundary. What bounds the spend is
+    # the operator's own prepaid balance — see ``_top_up`` for why nothing here rations
+    # it on our side.
     deal = _due(campaign, DealState.READY_TO_FIND_EMAIL).filter(
         lead__disqualified=False).first()
     if deal is None:

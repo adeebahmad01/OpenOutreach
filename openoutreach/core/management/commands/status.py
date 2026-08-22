@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 
 from openoutreach.core.management.base import OpenOutreachCommand
-from openoutreach.core.status import build_status
+from openoutreach.core.status import build_status, render_next_action
 
 
 class Command(OpenOutreachCommand):
@@ -47,7 +47,7 @@ def render(status: dict) -> str:
         _render_pipeline(status["campaigns"], status["totals"]),
         _render_credits(status["credits"]),
         _render_blocked(status["blocked"]),
-        _render_next(status["next_action"]),
+        render_next_action(status["next_action"]),
     )
     return "\n".join(section for section in sections if section)
 
@@ -96,15 +96,3 @@ def _render_blocked(blocked: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _render_next(action: dict) -> str:
-    """The next action, minus its ``variables`` — the configuration section listed those
-    already, per step, which is the more useful grouping for a human. They stay in
-    ``--json``, where an agent wants them flat."""
-    lines = [f"Next: {action['message']}"]
-    if action.get("unlocks"):
-        lines.append(f"  unlocks: {action['unlocks']}")
-    if action.get("command"):
-        lines.append(f"  run: {action['command']}")
-    if action.get("url"):
-        lines.append(f"  go to: {action['url']}")
-    return "\n".join(lines)

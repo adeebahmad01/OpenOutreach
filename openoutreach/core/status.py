@@ -2,7 +2,9 @@
 """The standing state of the database — as data, for a person or a program.
 
 This module builds one dict and the ``status`` command renders it, as a human summary or
-as ``--json``. Nothing here prints, and nothing here mutates.
+as ``--json``. Nothing here prints, and nothing here mutates. One renderer does live here
+— ``render_next_action`` — because the end of a `find` run renders the same ask, and the
+sentence must have one spelling.
 
 Three things it answers:
 
@@ -229,3 +231,28 @@ def next_action(onboarding_state: dict, credits: dict, totals: dict) -> dict:
         "unlocks": "leads with a written reason",
         "command": "openoutreach find 10",
     }
+
+
+def render_next_action(action: dict) -> str:
+    """The next action as a short block of text — returned, never printed.
+
+    It lives here rather than in the ``status`` command because ``find`` ends with it
+    too: a run that stops with ranked leads and no credits has to say so, and the ask is
+    already derived above. **The end of a run renders this; it does not recompute it.**
+    Two earlier attempts put the balance read and a deal count inside `core/job.py` and
+    `enrichment/lookup.py`, which gave the bounded-goal loop an HTTP call to a payment
+    provider and made *read once* need module-level mutable state. One spelling, one
+    derivation, two callers.
+
+    ``variables`` is left out: ``status`` lists those per step under configuration, which
+    is the more useful grouping for a human, and they stay in ``--json`` where an agent
+    wants them flat.
+    """
+    lines = [f"Next: {action['message']}"]
+    if action.get("unlocks"):
+        lines.append(f"  unlocks: {action['unlocks']}")
+    if action.get("command"):
+        lines.append(f"  run: {action['command']}")
+    if action.get("url"):
+        lines.append(f"  go to: {action['url']}")
+    return "\n".join(lines)

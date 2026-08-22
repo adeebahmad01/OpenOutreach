@@ -7,9 +7,11 @@ on a missing TTY with a message that named a mailbox (gone with the sending leg)
 said which variables to set. And **the command's own contract**: which campaign it acts
 on, what it prints, and the fact that exit 0 means the goal was met and nothing else.
 """
+import contextlib
 import csv
 import io
 import json
+import logging
 import webbrowser
 from unittest.mock import patch
 
@@ -19,6 +21,7 @@ from django.core.management import call_command
 from openoutreach.core.errors import ErrorType, OpenOutreachError
 from openoutreach.core.management.bootstrap import ensure_onboarded
 from openoutreach.core.management.commands.find import Command, _select_campaign
+from openoutreach.enrichment import bettercontact
 
 FULL_ENV = {
     "OPENOUTREACH_PRODUCT_DESCRIPTION": "A self-hosted CI dashboard for small dev teams",
@@ -251,6 +254,40 @@ class TestTheCommandContract:
         assert exc.value.error_type == ErrorType.BAD_CONFIG
         action.assert_not_called()
 
+    def test_the_run_ends_with_the_ask_and_the_csv_stays_a_csv(self, campaign, booted, caplog):
+        """A run that leaves ranked leads behind and an empty wallet has to say so.
+
+        The sentence is `status`'s, rendered here — the run derives nothing. It goes to
+        stderr with everything else that is not a row: a stray line in a CSV is not a
+        CSV, and this one carries a URL.
+        """
+        _exportable(campaign, "ada@acme.com")
+        _ranked(campaign)
+        out = io.StringIO()
+
+        with _wallet(balance=0), caplog.at_level(logging.INFO):
+            call_command("find", "0", stdout=out)
+
+        assert "0 credits left" in caplog.text
+        assert bettercontact.SIGNUP_URL in caplog.text
+        # Both rows export — the ranked one with a blank address, which is the whole
+        # reason it is still waiting.
+        rows = list(csv.DictReader(io.StringIO(out.getvalue())))
+        assert sorted(row["email"] for row in rows) == ["", "ada@acme.com"]
+
+    def test_json_carries_the_next_action_for_the_agent_to_relay(self, campaign, booted, caplog):
+        """An agent reads the object, not the log, so the ask has to be in both."""
+        _ranked(campaign)
+        out = io.StringIO()
+
+        with _wallet(balance=0), caplog.at_level(logging.INFO):
+            call_command("find", "0", "--json", stdout=out)
+
+        document = json.loads(out.getvalue())  # would raise on any stray line
+        assert document["next_action"]["type"] == "add_credits"
+        assert document["next_action"]["leads"] == 1
+        assert "Next:" not in caplog.text  # the object is the whole answer
+
     def test_debug_is_the_shorthand_for_log_level_debug(self, campaign, booted):
         """Both flags write the same dest, so they cannot disagree."""
         from openoutreach.core.management.commands.find import Command
@@ -280,6 +317,25 @@ def _exportable(campaign, email):
 
     return DealFactory(campaign=campaign, lead=LeadFactory(email=email),
                        state=DealState.RESOLVED, reason="fits the ICP")
+
+
+def _ranked(campaign):
+    """One lead that cannot advance without a credit."""
+    from openoutreach.crm.models import DealState
+    from tests.factories import DealFactory, LeadFactory
+
+    return DealFactory(campaign=campaign, lead=LeadFactory(email=None),
+                       state=DealState.READY_TO_FIND_EMAIL, reason="fits the ICP")
+
+
+@contextlib.contextmanager
+def _wallet(balance):
+    """A configured provider with a known balance, and onboarding out of the way — the
+    two inputs the next action is derived from."""
+    with patch("openoutreach.core.onboarding.missing_env_keys", return_value={}), \
+            patch("openoutreach.enrichment.bettercontact.is_configured", return_value=True), \
+            patch("openoutreach.enrichment.bettercontact.credit_balance", return_value=balance):
+        yield
 
 
 def _run(*args):

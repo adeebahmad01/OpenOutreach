@@ -33,6 +33,10 @@ caller reading stdout into a context window rather than into a file.
 Exit 0 means the goal was met, and nothing else. Anything short prints its rows anyway and
 exits non-zero with one ``error: <type>: <message>`` line — the code says how much you
 got, the type says why it stopped.
+
+**The run ends with the one thing to do next**, from `status` and rendered as-is: on
+stderr beside the counts, or as the ``next_action`` key under ``--json``. A run that stops
+with ranked leads and an empty wallet has to say so, and this is the only moment it can.
 """
 from __future__ import annotations
 
@@ -49,6 +53,7 @@ from openoutreach.core.management.bootstrap import (
     ensure_onboarded,
     validate_operator,
 )
+from openoutreach.core.status import build_status, render_next_action
 
 logger = logging.getLogger(__name__)
 
@@ -113,13 +118,22 @@ class Command(OpenOutreachCommand):
     # ── output ───────────────────────────────────────────────────
 
     def _report(self, campaign, result: JobResult, options) -> None:
-        """Write the rows to stdout. Called whether or not the goal was met — seven
-        leads are seven leads, and a caller that only wanted rows should not have to
-        care that it asked for ten."""
+        """Write the rows to stdout, then the one thing to do next.
+
+        Called whether or not the goal was met — seven leads are seven leads, and a
+        caller that only wanted rows should not have to care that it asked for ten.
+
+        **The next action is derived once, by `status`, and rendered here.** A run that
+        ends with ranked leads and an empty wallet has to say so, and this is the only
+        moment it can: the ask is about the state the run left behind, so it is read
+        after the work rather than carried through it.
+        """
         records = list(lead_records(campaign))
         if options["only_new"]:
             produced = set(result.produced_ids)
             records = [row for row in records if row["lead_id"] in produced]
+
+        action = build_status()["next_action"]
 
         if options["as_json"]:
             self.stdout.write(json.dumps({
@@ -129,14 +143,16 @@ class Command(OpenOutreachCommand):
                 "reached": result.reached,
                 "stopped_because": result.stopped_because,
                 "detail": result.detail or None,
+                "next_action": action,
                 "leads": records,
             }, indent=2))
             return
 
         write_csv(records, self.stdout)
-        # The count belongs on stderr: a stray line in a CSV is not a CSV.
+        # The count and the ask both belong on stderr: a stray line in a CSV is not a CSV.
         logger.info("%d of %d %s · %d row(s) printed",
                     result.produced, result.goal.count, result.goal.unit, len(records))
+        logger.info("%s", render_next_action(action))
 
     # ── logging ──────────────────────────────────────────────────
 
