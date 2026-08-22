@@ -838,16 +838,31 @@ explicitly, since the code no longer sits beside it; `local.yml` mounts `./data`
   `eracle/hub.openoutreach.app`. Image tags: `latest` (default branch only), `sha-<commit>`, and
   semver (`v*` tags only).
 
-  **There is no release gate.** Merging to `main` republishes `:latest` — so code and **schema
-  migrations reach anyone pulling `latest` on merge, not on a tag**. No `v*` tag has ever been cut,
-  so no semver tag exists and there is nothing pinned to roll back to. `sha-<commit>` tags only the
-  **pushed tip**: commits buried inside a multi-commit push never get their own image, so a
-  migration can go from unpublished to live in one push.
+  **There is no release gate, on either artifact.** Merging to `main` republishes `:latest` *and*
+  publishes a new version to PyPI — so code and **schema migrations reach anyone pulling `latest`, or
+  installing the package, on merge**. `sha-<commit>` tags only the **pushed tip**: commits buried
+  inside a multi-commit push never get their own image, so a migration can go from unpublished to
+  live in one push.
 
-- **A `v*` tag is the release**, and the only thing that publishes to PyPI: `publish-pypi` builds an
-  sdist + wheel and uploads them through trusted publishing (OIDC, environment `pypi` — no API token
-  in the repo). The image's no-release-gate behaviour above is unchanged; the package's is the
-  opposite, and deliberately so.
+- **Every green push to `main` is a PyPI release** (`publish-pypi`): sdist + wheel through trusted
+  publishing (OIDC, environment `pypi` — no API token in the repo), with `skip-existing` so a re-run
+  is a no-op rather than a red build. **`needs: test` is the entire gate**, which makes `main` the
+  release branch in the literal sense.
+
+  **The version is derived, never committed.** `pyproject.toml`'s `version` is the *base*: major and
+  minor are declared there by hand, and the patch is `git rev-list --count v0.1.0..HEAD` at publish
+  time — monotonic across a base bump (`0.1.20` → `0.2.21`), unique per commit, and requiring no
+  bump commit. That is why the job checks out with `fetch-depth: 0`; a shallow clone cannot count.
+
+  **This replaced tag-gated releases on 2026-08-22, and the reason is worth keeping.** `v0.1.0` was
+  tagged by hand, then twelve commits of first-run work landed behind it — the run narrative, the
+  out-of-credits ask, and three real fixes — while `uvx openoutreach` kept serving the version from
+  before all of them. A release nobody has to remember cannot drift. The trade was made knowingly:
+  every commit that passes CI is now public and permanent, and a bad merge reaches installers in
+  minutes. **Tags no longer publish** — they stay useful as human markers and the image job still
+  reads them for semver tags, but a tag on an already-published commit would collide with the
+  version that commit already shipped. The `pypi` environment must **not** carry a required
+  reviewer, or every push waits on a click.
 
 ## Dependencies
 

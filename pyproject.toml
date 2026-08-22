@@ -4,6 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "openoutreach"
+# **The base, not the released version.** Major and minor are declared here and bumped by
+# hand when a change deserves it; the patch is derived at publish time from the number of
+# commits since `v0.1.0` (`.github/workflows/deploy.yml`, job `publish-pypi`), because
+# every green push to `main` releases and PyPI version numbers are single-use. A local
+# install reports this literal — `core/version.py` is what identifies a build precisely.
 version = "0.1.0"
 description = "Open-source AI lead finder: describe your product, get qualified leads with the reason each one fits."
 readme = "README.md"

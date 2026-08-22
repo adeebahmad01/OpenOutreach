@@ -1,8 +1,10 @@
 """What build of OpenOutreach is this instance running.
 
-There are no releases — instances deploy by ``git clone`` off ``main``, so the
-deployable unit is the commit and the commit *is* the version. This module names
-it two ways:
+**This is the build, not the package version.** The two answer different questions
+and neither replaces the other: PyPI carries a released number (`0.1.<commits since
+v0.1.0>`, derived at publish time), while a server deploys by ``git clone`` off
+``main`` and has no released number at all. The deployable unit there is the commit,
+so the commit *is* the version. This module names it two ways:
 
 * ``commit_sha`` — the identity. Unique, immutable, and reachable: from it the
   hub can look the build up in the published history.
