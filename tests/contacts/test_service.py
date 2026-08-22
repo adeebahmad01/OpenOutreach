@@ -218,6 +218,18 @@ class TestRegisterOperator:
         assert "emails" not in kwargs["json"]
         assert SiteConfig.load().contacts_api_token == "NEW"
 
+    def test_it_names_the_build_it_is_running(self):
+        """An install that never contributes reports its version here or nowhere."""
+        _config(token="")
+        with patch.object(
+            service.requests, "post", return_value=_resp(200, {"token": "NEW"}),
+        ) as post, patch.object(service.version, "commit_sha", return_value="abc123"), \
+                patch.object(service.version, "is_dirty", return_value=False):
+            assert service.register_operator() is True
+
+        assert post.call_args.kwargs["json"]["client_sha"] == "abc123"
+        assert post.call_args.kwargs["json"]["client_dirty"] is False
+
     def test_an_eea_operator_still_gets_a_token(self):
         """The jurisdiction rule governs *contributing records*, a different act.
 
@@ -250,8 +262,8 @@ class TestRegisterOperator:
         assert SiteConfig.load().contacts_api_token == ""
 
     def test_a_hub_that_still_demands_a_record_leaves_the_token_unset(self):
-        """The compatibility case: until the hub accepts a record-less register it
-        answers 400, and the first contribution mints the old way instead."""
+        """The compatibility case: a hub predating the record-less register answers
+        400, and the first contribution mints the old way instead."""
         _config(token="")
         with patch.object(service.requests, "post", return_value=_resp(400)):
             assert service.register_operator() is False

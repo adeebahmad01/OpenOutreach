@@ -142,6 +142,9 @@ def register_operator() -> bool:
     hub outage is a no-op the next run retries, and re-registering the same email
     returns the same token. Returns whether a token is in hand afterwards.
 
+    Carries the build sha, so which version an install runs is known from its first
+    minute rather than from its first contribution.
+
     *(This is not marketing consent. The newsletter opt-in in onboarding is that, and
     it is jurisdiction-aware. Keep the two separate.)*
     """
@@ -156,7 +159,9 @@ def register_operator() -> bool:
         logger.debug("hub: no operator email yet — nothing to register")
         return False
 
-    return _mint(config, {"operator_email": email})
+    # The build rides along: for an install that never contributes, this is the only
+    # time it ever names the version it runs.
+    return _mint(config, {"operator_email": email, **_build_fields()})
 
 
 def _register(config: SiteConfig, record: dict, lead) -> None:
