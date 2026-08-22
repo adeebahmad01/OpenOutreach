@@ -130,11 +130,16 @@ def run_one_action(campaign, buy_addresses: bool = False, max_new_lookups: int |
         acted = row(campaign)
         elapsed = time.monotonic() - started
         if acted:
-            logger.info("[%s] %s — %.1fs", campaign,
-                        colored(name, "cyan", attrs=["bold"]), elapsed)
+            # Which row of the hierarchy fired, and how long it took, is how *we* read a
+            # run. The operator reads the action's own block header instead.
+            logger.debug("[%s] %s — %.1fs", campaign,
+                         colored(name, "cyan", attrs=["bold"]), elapsed)
             return True
         logger.debug("[%s] %s: nothing (%.1fs)", campaign, name, elapsed)
-    logger.info("[%s] nothing to do — %s", campaign, pipeline_summary(campaign))
+    # At DEBUG because it is not the last word: the job turns this same summary into its
+    # `goal_unreached` line, and printing it twice would read as two different findings.
+    logger.debug("[%s] nothing to do — %s", campaign,
+                 pipeline_summary(campaign, buy_addresses=buy_addresses))
     return False
 
 
@@ -150,12 +155,16 @@ _WAITING_ON = (
 )
 
 
-def pipeline_summary(campaign) -> str:
+def pipeline_summary(campaign, buy_addresses: bool = True) -> str:
     """One line of counts: who is waiting on what, and which gate is holding them.
 
     Public because it is also the answer to *why did the job stop short* — a drained
     index and three addresses still on order are a dead end and a reason to run again in
     an hour, and "7 of 10" alone cannot tell them apart.
+
+    ``buy_addresses`` is the run's own permission to spend, which the caller holds and
+    this function cannot see. **A gate that is holding must be named**, and *the operator
+    did not ask for addresses* is the one most likely to be holding on a bare `find`.
     """
     from django.db.models import Count
 
@@ -170,13 +179,19 @@ def pipeline_summary(campaign) -> str:
     )
     waiting = [f"{counts.get(state, 0)} {phrase}" for state, phrase in _WAITING_ON]
 
-    # The one gate left, said as its consequence rather than as its name — a boolean
-    # tells you nothing. The consequence is *narrower than it reads*: without a key the
-    # row still resolves an address already on the lead and still reads the hub's cache,
-    # and only the paid leg is off. Discovery and qualification have no gate to report:
-    # they always run.
-    held = "" if bettercontact.is_configured() else (
-        " · no finder key, so free address sources only")
+    # Each gate said as its consequence rather than as its name — a boolean tells you
+    # nothing — and **every consequence it has**. The finder key is one key doing two
+    # jobs, so losing it stops the walk finding anybody *and* stops the paid lookup;
+    # naming only the second sent the operator after the wrong thing. What it does not
+    # stop is the free address sources: an address already on the lead and the hub's
+    # cache are both still read. Qualification has no gate to report — it always runs.
+    ranked = counts.get(DealState.READY_TO_FIND_EMAIL, 0)
+    if not bettercontact.is_configured():
+        held = " · no finder key, so no new discovery and free address sources only"
+    elif not buy_addresses and ranked:
+        held = f" · {ranked} ranked but addresses not requested — add --emails to buy them"
+    else:
+        held = ""
     return f"{' · '.join(waiting)}{held}"
 
 

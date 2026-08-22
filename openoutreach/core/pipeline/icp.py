@@ -177,10 +177,13 @@ def generate_seed(campaign) -> list[tuple[str, str]]:
     if updates:
         campaign.save(update_fields=updates)
 
-    logger.info("[%s] %s: %s · headcount %d–%d", campaign,
-                colored("discovery seed", "cyan", attrs=["bold"]),
-                colored(describe_node(keywords), "cyan"),
-                spec.headcount_min, spec.headcount_max)
+    # The seed is a *query*, not a description of a buyer — it says `founder cto` where
+    # the operator asked for "engineering leaders at small SaaS firms". The operator's
+    # echo is `log_icp_echo` below; this one stays for the maintainer reading the walk.
+    logger.debug("[%s] %s: %s · headcount %d–%d", campaign,
+                 colored("discovery seed", "cyan", attrs=["bold"]),
+                 colored(describe_node(keywords), "cyan"),
+                 spec.headcount_min, spec.headcount_max)
     return keywords
 
 
@@ -284,6 +287,27 @@ def ensure_anchors(campaign) -> np.ndarray | None:
     campaign.anchor_profiles = profiles + fresh
     campaign.anchor_embeddings = embeddings.tobytes()
     campaign.save(update_fields=["anchor_profiles", "anchor_embeddings"])
-    logger.info("[%s] %s: +%d synthetic ideal profile(s) (%d total)", campaign,
-                colored("anchors", "cyan", attrs=["bold"]), len(fresh), len(embeddings))
+    logger.debug("[%s] %s: +%d synthetic ideal profile(s) (%d total)", campaign,
+                 colored("anchors", "cyan", attrs=["bold"]), len(fresh), len(embeddings))
+    log_icp_echo(campaign)
     return embeddings
+
+
+def log_icp_echo(campaign) -> None:
+    """Tell the operator who the system thinks this campaign sells to. No-op unanchored.
+
+    **This is the earliest proof the product description was understood**, and therefore
+    the earliest chance to correct it — the loop the README sells. The material costs
+    nothing to print: the anchors are already computed, already one line each in
+    ``profile_text``'s shape, and until now only their *count* was ever shown.
+
+    Printed on the pass that writes them and again at the start of every later run, so
+    the operator meets it before the first search rather than only on a cold start.
+    """
+    profiles = list(campaign.anchor_profiles or [])
+    if not profiles:
+        return
+
+    logger.info("%s", colored("Looking for people like:", "cyan", attrs=["bold"]))
+    for profile in profiles:
+        logger.info("    · %s", profile)

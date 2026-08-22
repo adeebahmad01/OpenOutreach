@@ -82,7 +82,7 @@ def _ensure_frontier(campaign, store) -> list[tuple[str, str]]:
 
     if not existing:
         opened = select.seed_frontier(campaign, keywords)
-        logger.info("[%s] frontier opened with %d keyword(s)", campaign, opened)
+        logger.debug("[%s] frontier opened with %d keyword(s)", campaign, opened)
         return keywords
 
     # The vocabulary grew since the last pass — a new token is only ever a *child* of an
@@ -144,7 +144,7 @@ def _handle_empty(node, offset: int, page) -> str | None:
     if offset == 0:
         # One spaced retry before believing a zero. The record it would otherwise write is
         # permanent and prunes a whole subtree, so it is worth 5 seconds to be sure.
-        logger.info("%s", step_line(
+        logger.debug("%s", step_line(
             "fetch", f"empty and no count — re-asking in {EMPTY_RETRY_DELAY_S:.0f}s before "
                      f"believing it", glyph="↻", color="yellow"))
         time.sleep(EMPTY_RETRY_DELAY_S)
@@ -163,7 +163,9 @@ def _handle_empty(node, offset: int, page) -> str | None:
         "capped": f"hit the {select.REACH_CAP:,}-row reach cap — node retired, but its "
                   f"children open fresh windows",
     }
-    logger.info("%s", step_line("fetch", messages[verdict], glyph="✗", color="yellow"))
+    # Nodes, subtrees, offsets and the reach cap are the walk's own vocabulary — the
+    # retirement is real and worth reading, by whoever is reading the walk.
+    logger.debug("%s", step_line("fetch", messages[verdict], glyph="✗", color="yellow"))
     return verdict
 
 
@@ -202,8 +204,9 @@ def discover(campaign, qualifier=None) -> int:
         node = select.next_node(campaign, store)
         if node is None:
             logger.info(colored(
-                f"■ discovery saturated · {campaign} — frontier spanned "
-                f"({retired} node(s) retired this pass)", "blue"))
+                f"■ no more people left to find for {campaign} — every search this "
+                f"campaign knows how to make is exhausted", "blue"))
+            logger.debug("frontier spanned · %d node(s) retired this pass", retired)
             return 0
 
         offset = node.next_offset
@@ -221,6 +224,8 @@ def discover(campaign, qualifier=None) -> int:
         select.advance(node, leads_found=page.leads_found)
         grown = select.expand(node, store, keywords)
         logger.info("%s", step_line(
-            "fetch", f"{created} new lead(s) from {len(page.leads)} row(s) · "
-                     f"+{grown} node(s) on the frontier", glyph="✓", color="green"))
+            "fetch", f"{created} new lead(s) from {len(page.leads)} row(s)",
+            glyph="✓", color="green"))
+        logger.debug("%s", step_line(
+            "frontier", f"+{grown} node(s) from this page", glyph="+", color="cyan"))
         return created

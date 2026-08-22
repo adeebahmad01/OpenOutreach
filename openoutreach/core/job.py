@@ -23,7 +23,10 @@ timestamp on the row would identify.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
+
+from termcolor import colored
 
 from openoutreach.core.errors import ErrorType
 
@@ -60,6 +63,9 @@ class JobResult:
 
     detail: str = ""
 
+    elapsed: float = 0.0
+    """Wall-clock seconds the job ran. Reported, not enforced — there is no timeout."""
+
     @property
     def produced(self) -> int:
         return len(self.produced_ids)
@@ -81,7 +87,20 @@ def run_job(campaign, goal: Goal, on_new_lead=None, buy_addresses: bool = False)
     what to count, never what may be paid for, and keeping those separate is what stops
     a run counting *leads* from quietly buying an address for whatever cleared the
     confidence gate on an earlier pass. That is what it used to do.
+
+    The clock it keeps is **reported, never enforced** — see the module docstring for why
+    there is no timeout. It exists so milestones can carry elapsed time, which is also how
+    the first-run number stays measured rather than measured once.
     """
+    started = time.monotonic()
+    result = _work_to_goal(campaign, goal, on_new_lead, buy_addresses, started)
+    result.elapsed = time.monotonic() - started
+    return result
+
+
+def _work_to_goal(campaign, goal: Goal, on_new_lead, buy_addresses: bool,
+                  started: float) -> JobResult:
+    """The loop itself. Every exit is a ``JobResult``; none of them raises."""
     from openoutreach.core.cycle import HALTING_ERRORS, run_one_action
     from openoutreach.enrichment.bettercontact import BetterContactUnavailable
 
@@ -94,7 +113,7 @@ def run_job(campaign, goal: Goal, on_new_lead=None, buy_addresses: bool = False)
             acted = run_one_action(
                 campaign, buy_addresses=buy_addresses,
                 max_new_lookups=_lookup_budget(campaign, goal, presented_baseline))
-            _collect(campaign, goal, baseline, result, on_new_lead)
+            _collect(campaign, goal, baseline, result, on_new_lead, started)
         except HALTING_ERRORS as exc:
             # A bad LLM key is not a transient fault: every action would raise it. The
             # daemon stopped the loop loudly for this; a job ends with an answer.
@@ -123,7 +142,7 @@ def run_job(campaign, goal: Goal, on_new_lead=None, buy_addresses: bool = False)
 
         if not acted and result.produced < goal.count:
             result.stopped_because = ErrorType.GOAL_UNREACHED
-            result.detail = _why_idle(campaign, result)
+            result.detail = _why_idle(campaign, result, buy_addresses)
             return result
 
     return result
@@ -182,8 +201,9 @@ def _lookup_budget(campaign, goal: Goal, presented_baseline: set[int] | None) ->
     return max(0, goal.count - new_presented)
 
 
-def _collect(campaign, goal: Goal, baseline: set[int], result: JobResult, on_new_lead) -> None:
-    """Record whatever entered the goal since the job started, once each."""
+def _collect(campaign, goal: Goal, baseline: set[int], result: JobResult, on_new_lead,
+             started: float) -> None:
+    """Record whatever entered the goal since the job started, once each, and say so."""
     from openoutreach.crm.models import Lead
 
     fresh = _unit_ids(campaign, goal.unit) - baseline - set(result.produced_ids)
@@ -194,9 +214,31 @@ def _collect(campaign, goal: Goal, baseline: set[int], result: JobResult, on_new
         result.produced_ids.append(lead.pk)
         if on_new_lead is not None:
             on_new_lead(lead)
+        _log_progress(campaign, goal, result, time.monotonic() - started)
 
 
-def _why_idle(campaign, result: JobResult) -> str:
+def _log_progress(campaign, goal: Goal, result: JobResult, elapsed: float) -> None:
+    """Distance to the goal, in the unit the operator typed.
+
+    **The number they typed is the denominator.** Reporting state-machine names instead
+    made the operator do the arithmetic in a vocabulary that is ours, not theirs. The
+    first one gets its own milestone, because *how long until anything at all happens* is
+    the question a first run is really asking.
+    """
+    from openoutreach.core.logging import format_elapsed
+    from openoutreach.crm.models import Deal
+
+    stamp = format_elapsed(elapsed)
+    if result.produced == 1:
+        logger.info("%s", colored(f"★ first {goal.unit[:-1]} · {stamp}", "green", attrs=["bold"]))
+
+    seen = Deal.objects.filter(campaign=campaign).count()
+    logger.info("  %s  %d of %d %s · %d seen · %s",
+                colored("·", "cyan", attrs=["bold"]),
+                result.produced, goal.count, goal.unit, seen, stamp)
+
+
+def _why_idle(campaign, result: JobResult, buy_addresses: bool) -> str:
     """What the job is short by, and what it is waiting on, in one line.
 
     *Nothing may be reported as an empty result*: "7 of 10" alone leaves the reader unable
@@ -207,5 +249,5 @@ def _why_idle(campaign, result: JobResult) -> str:
 
     return (
         f"{result.produced} of {result.goal} — nothing left to do right now. "
-        f"{pipeline_summary(campaign)}"
+        f"{pipeline_summary(campaign, buy_addresses=buy_addresses)}"
     )

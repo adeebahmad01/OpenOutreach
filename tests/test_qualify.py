@@ -119,6 +119,58 @@ class TestRunQualification:
 
 
 @pytest.mark.django_db
+class TestBothVerdictsAreVisible:
+    """Watching it turn people down is what makes the acceptances credible.
+
+    A log of nothing but hits reads like a row dump — and the reason the LLM wrote is the
+    product either way, so it is printed either way.
+    """
+
+    def _qualify(self, campaign, label, reason, caplog):
+        _make_lead()
+        with (
+            patch("openoutreach.core.ml.qualifier.qualify_with_llm",
+                  return_value=(label, reason)),
+            patch("openoutreach.core.db.leads.promote_lead_to_deal"),
+            patch("openoutreach.core.db.deals.create_disqualified_deal"),
+            caplog.at_level("INFO"),
+        ):
+            run_qualification(campaign, BayesianQualifier(seed=42))
+        return caplog.text
+
+    def test_a_rejection_carries_its_reason(self, campaign, caplog):
+        text = self._qualify(campaign, 0, "sells to enterprise, not our buyer", caplog)
+
+        assert "sells to enterprise, not our buyer" in text
+        assert "✗" in text
+
+    def test_an_acceptance_is_distinguishable_at_a_glance(self, campaign, caplog):
+        text = self._qualify(campaign, 1, "runs a six-person team on CI", caplog)
+
+        assert "runs a six-person team on CI" in text
+        assert "✓" in text and "✗" not in text
+
+    def test_the_acquisition_strategy_is_not_addressed_to_the_operator(self, campaign, caplog):
+        """The GP choosing *which* candidate to spend the call on is the engine
+        reasoning about itself. It stays — at DEBUG."""
+        _make_lead("https://www.linkedin.com/in/first/", "first", _axis(0))
+        _make_lead("https://www.linkedin.com/in/second/", "second", _axis(1))
+        qualifier = BayesianQualifier(seed=42)
+        qualifier.update(_axis(0), 1)
+        qualifier.update(_axis(1), 0)
+
+        with (
+            patch("openoutreach.core.ml.qualifier.qualify_with_llm",
+                  return_value=(0, "Bad fit")),
+            patch("openoutreach.core.db.deals.create_disqualified_deal"),
+            caplog.at_level("INFO"),
+        ):
+            run_qualification(campaign, qualifier)
+
+        assert "Strategy:" not in caplog.text
+
+
+@pytest.mark.django_db
 class TestUnanchoredSelection:
     """The degraded path: anchoring failed, so the label set is still single-class and
     no posterior exists to rank with. Oldest first — nothing here can rank."""

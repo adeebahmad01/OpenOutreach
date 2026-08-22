@@ -78,9 +78,12 @@ def promote_to_ready(campaign, qualifier: Qualifier) -> int:
             # print the same transition again without the number. The score cannot
             # ride in `reason`: that column holds the LLM's qualification rationale,
             # and writing a probability over it would destroy why the lead qualified.
-            logger.info("%s %s (P(f>0.5)=%.3f ≥ %.2f)", pid,
-                        colored("READY_TO_FIND_EMAIL", "yellow", attrs=["bold"]),
-                        prob, threshold)
+            # At DEBUG: a posterior probability against a threshold is the spend gate
+            # explaining itself, in a vocabulary written for whoever tuned it. The
+            # operator learns the same fact from the address that arrives.
+            logger.debug("%s %s (P(f>0.5)=%.3f ≥ %.2f)", pid,
+                         colored("READY_TO_FIND_EMAIL", "yellow", attrs=["bold"]),
+                         prob, threshold)
             set_profile_state(campaign, p["profile_url"],
                               DealState.READY_TO_FIND_EMAIL.value, log=False)
             promoted += 1

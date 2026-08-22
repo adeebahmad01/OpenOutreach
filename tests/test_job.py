@@ -271,6 +271,46 @@ def test_a_lead_already_there_is_never_announced(campaign):
     assert old.lead.pk not in [lead.pk for lead in seen]
 
 
+# ── what the operator is told while it works ──────────────────────
+
+
+@pytest.mark.django_db
+class TestTheProgressNarrative:
+    """The number the operator typed is the denominator.
+
+    Reporting through the state machine's names made them do the arithmetic in a
+    vocabulary that is ours, not theirs.
+    """
+
+    def test_each_lead_reports_distance_to_the_goal(self, campaign, caplog):
+        with _finds(campaign), caplog.at_level("INFO"):
+            run_job(campaign, Goal(2))
+
+        assert "1 of 2 leads" in caplog.text and "2 of 2 leads" in caplog.text
+
+    def test_the_first_one_gets_its_own_milestone(self, campaign, caplog):
+        """*How long until anything at all happens* is what a first run is really
+        asking, and it is the number the whole first-run design is judged on."""
+        with _finds(campaign), caplog.at_level("INFO"):
+            run_job(campaign, Goal(2))
+
+        milestones = [r.getMessage() for r in caplog.records if "first lead" in r.getMessage()]
+        assert len(milestones) == 1
+
+    def test_the_unit_the_operator_typed_is_the_one_reported(self, campaign, caplog):
+        with _finds(campaign, email="ada@acme.com"), caplog.at_level("INFO"):
+            run_job(campaign, Goal(1, EMAILS))
+
+        assert "1 of 1 emails" in caplog.text and "first email" in caplog.text
+
+    def test_the_result_carries_how_long_it_took(self, campaign):
+        """Reported, never enforced — there is still no timeout."""
+        with _finds(campaign):
+            result = run_job(campaign, Goal(1))
+
+        assert result.elapsed > 0
+
+
 @pytest.mark.django_db
 def test_the_unit_helper_reads_the_export_not_a_state(campaign):
     """`status` and a goal must agree on what "ten leads" means, so both count the rows

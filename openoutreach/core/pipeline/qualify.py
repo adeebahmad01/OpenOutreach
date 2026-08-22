@@ -68,8 +68,10 @@ def run_qualification(campaign, qualifier: BayesianQualifier, candidates=None) -
             candidate = candidates[best_idx]
             selection_score = (strategy, float(scores[best_idx]))
             n_neg, n_pos = qualifier.class_counts
-            logger.info("Strategy: %s (neg=%d, pos=%d)",
-                        colored(strategy, "cyan", attrs=["bold"]), n_neg, n_pos)
+            # Which acquisition strategy picked this candidate is the engine reasoning
+            # about itself — real, and addressed to the maintainer.
+            logger.debug("Strategy: %s (neg=%d, pos=%d)",
+                         colored(strategy, "cyan", attrs=["bold"]), n_neg, n_pos)
 
     profile_url = candidate.profile_url
     embedding = candidate.embedding_array
@@ -95,11 +97,38 @@ def run_qualification(campaign, qualifier: BayesianQualifier, candidates=None) -
         product_docs=campaign.product_docs,
         campaign_target=campaign.campaign_target,
     )
-    _save_qualification_result(campaign, qualifier, profile_url, embedding, label, reason)
+    _save_qualification_result(campaign, qualifier, candidate, embedding, label, reason)
     return profile_url
 
 
-def _save_qualification_result(campaign, qualifier: BayesianQualifier, profile_url: str, embedding: np.ndarray, label: int, reason: str):
+def _who(lead) -> str:
+    """The lead as the operator would name them, falling back to the URL.
+
+    Every part is nullable — ``NULL`` means the provider never told us — so this
+    assembles whatever is there rather than assuming a shape.
+    """
+    from openoutreach.core.logging import hyperlink
+
+    who = " · ".join(part for part in (
+        lead.full_name,
+        ", ".join(part for part in (lead.job_title, getattr(lead.company, "name", None)) if part),
+    ) if part)
+    return who or hyperlink(lead.profile_url)
+
+
+def _verdict_line(glyph: str, color: str, who: str, reason: str) -> str:
+    """One judgement, indented under the ``▶ qualify`` header.
+
+    ``logblock.step_line`` is not the right primitive here: its fixed-width label column
+    exists to align short plumbing labels (``bettercontact``, ``hub cache``), and a
+    person's name overflows it on every row. The glyph and the name carry the colour; the
+    reason stays default-weight, because the eye scans the column of ✓ and ✗ first.
+    """
+    tint = lambda text: colored(text, color, attrs=["bold"])  # noqa: E731
+    return f"  {tint(glyph)}  {tint(who)} — {reason}"
+
+
+def _save_qualification_result(campaign, qualifier: BayesianQualifier, lead, embedding: np.ndarray, label: int, reason: str):
     # LLM rejections are tracked as FAILED Deals with "Disqualified" closing reason
     # (campaign-scoped), not as Lead.disqualified (permanent account-level exclusion).
     #
@@ -111,8 +140,12 @@ def _save_qualification_result(campaign, qualifier: BayesianQualifier, profile_u
     from openoutreach.core.db.deals import create_disqualified_deal
     from openoutreach.core.db.leads import promote_lead_to_deal
 
+    profile_url = lead.profile_url
     qualifier.update(embedding, label)
 
+    # **Both verdicts are printed, and they differ at a glance.** Watching it turn people
+    # down is what makes the acceptances credible; a log of nothing but hits reads like a
+    # row dump, and the reason it writes is the product either way.
     if label == 1:
         try:
             promote_lead_to_deal(campaign, profile_url, reason=reason)
@@ -120,6 +153,8 @@ def _save_qualification_result(campaign, qualifier: BayesianQualifier, profile_u
             logger.warning("Cannot promote %s: %s — disqualifying", profile_url, e)
             create_disqualified_deal(campaign, profile_url, reason=str(e))
             return
-        logger.info("%s %s: %s", profile_url, colored("QUALIFIED", "green", attrs=["bold"]), reason)
+        logger.info("%s", _verdict_line("✓", "green", _who(lead), reason))
     else:
         create_disqualified_deal(campaign, profile_url, reason=reason)
+        logger.info("%s", _verdict_line("✗", "yellow", _who(lead), reason))
+    logger.debug("%s labelled %d: %s", profile_url, label, reason)

@@ -44,7 +44,10 @@ import json
 import logging
 import webbrowser
 
+from termcolor import colored
+
 from openoutreach.core.errors import ErrorType, OpenOutreachError
+from openoutreach.core.logging import format_elapsed
 from openoutreach.core.export import lead_records, write_csv
 from openoutreach.core.job import EMAILS, LEADS, UNITS, Goal, JobResult, run_job
 from openoutreach.core.management.base import OpenOutreachCommand
@@ -108,6 +111,7 @@ class Command(OpenOutreachCommand):
         campaign = _select_campaign(options.get("campaign"))
         goal = Goal(count=options["count"], unit=options["unit"])
 
+        _announce_the_run(campaign, goal, buy_addresses)
         result = run_job(campaign, goal, on_new_lead=opener,
                          buy_addresses=buy_addresses)
         self._report(campaign, result, options)
@@ -150,8 +154,9 @@ class Command(OpenOutreachCommand):
 
         write_csv(records, self.stdout)
         # The count and the ask both belong on stderr: a stray line in a CSV is not a CSV.
-        logger.info("%d of %d %s · %d row(s) printed",
-                    result.produced, result.goal.count, result.goal.unit, len(records))
+        logger.info("%d of %d %s · %s · %d row(s) printed",
+                    result.produced, result.goal.count, result.goal.unit,
+                    format_elapsed(result.elapsed), len(records))
         logger.info("%s", render_next_action(action))
 
     # ── logging ──────────────────────────────────────────────────
@@ -161,6 +166,32 @@ class Command(OpenOutreachCommand):
 
         configure_logging(level=resolve_log_level(log_level, verbosity))
         print_banner()
+
+
+# ── minute 0 ─────────────────────────────────────────────────────
+
+
+def _announce_the_run(campaign, goal: Goal, buy_addresses: bool) -> None:
+    """State the deal before any work: the campaign, the goal, and whether this can spend.
+
+    **A run that cannot buy addresses says so before it starts, not after.** Spending is
+    opt-in at every layer, which is a good default and an invisible one — an operator who
+    expected addresses should learn it in the first line rather than from an empty column
+    at the end.
+
+    Then the ICP echo: who the system thinks this campaign sells to. It is the earliest
+    chance to notice the product description was misread, and on a first run there is
+    nothing to echo yet — the anchors are written during the job, and print themselves
+    there.
+    """
+    from openoutreach.core.pipeline.icp import log_icp_echo
+
+    spending = ("buying addresses, one credit each" if buy_addresses
+                else "finding only, no addresses bought")
+    work = f"goal: {goal}" if goal.count else "no work — printing what is already there"
+    logger.info("%s · %s · %s",
+                colored(str(campaign), "cyan", attrs=["bold"]), work, spending)
+    log_icp_echo(campaign)
 
 
 # ── choosing what to work on ─────────────────────────────────────

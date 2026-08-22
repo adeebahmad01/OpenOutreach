@@ -95,6 +95,21 @@ def brand(service: str, text: str | None = None) -> str:
     return f"\033[38;2;{r};{g};{b}m{label}\033[0m"
 
 
+def format_elapsed(seconds: float) -> str:
+    """A duration read at a glance: ``52s``, ``4m09s``, ``1h04m``.
+
+    Milestones carry elapsed time because a run that takes minutes has to say how many —
+    it is also how the first-run number stays measured rather than measured once.
+    """
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    minutes, secs = divmod(int(seconds), 60)
+    if minutes < 60:
+        return f"{minutes}m{secs:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m"
+
+
 def hyperlink(url: str, text: str | None = None) -> str:
     """Render `text` (default: the URL) as an OSC 8 clickable terminal link.
 

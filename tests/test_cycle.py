@@ -327,12 +327,39 @@ class TestOneActionAtATime:
 
     def test_nothing_to_do_says_what_it_is_waiting_on(self, campaign, steps, caplog):
         """*Nothing may be reported as an empty result*: a job that stops short has to
-        be able to say whether the index is drained or an address is on order."""
+        be able to say whether the index is drained or an address is on order.
+
+        The line itself sits at DEBUG, because the operator meets the same summary once,
+        as the job's `goal_unreached` detail — see `tests/test_job.py`. Printing it here
+        too would read as two different findings.
+        """
         _deal(campaign, DealState.FINDING_EMAIL, lookup_request_id="req1",
               not_before=timezone.now() + timedelta(hours=1))
 
-        with caplog.at_level("INFO"):
+        with caplog.at_level("DEBUG"):
             assert cycle.run_one_action(campaign) is False
 
         idle = [r.getMessage() for r in caplog.records if "nothing to do" in r.getMessage()]
         assert len(idle) == 1 and "address on order" in idle[0]
+
+    def test_a_keyless_run_says_discovery_stopped_too_not_just_the_lookup(self, campaign):
+        """One key does two jobs, so losing it has two consequences and both get named.
+
+        Naming only the address half sent the operator after the wrong thing: without a
+        key the walk finds nobody at all, which is the larger of the two.
+        """
+        with patch("openoutreach.enrichment.bettercontact.is_configured", return_value=False):
+            summary = cycle.pipeline_summary(campaign)
+
+        assert "no new discovery" in summary and "free address sources only" in summary
+
+    def test_ranked_leads_and_no_emails_flag_names_that_gate(self, campaign):
+        """The gate most likely to be holding on a bare `find` is the one it never
+        mentioned: spending is opt-in, and an operator expecting addresses has to be
+        told which flag turns it on."""
+        _deal(campaign, DealState.READY_TO_FIND_EMAIL)
+
+        with patch("openoutreach.enrichment.bettercontact.is_configured", return_value=True):
+            summary = cycle.pipeline_summary(campaign, buy_addresses=False)
+
+        assert "--emails" in summary

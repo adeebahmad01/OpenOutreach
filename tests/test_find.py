@@ -254,6 +254,43 @@ class TestTheCommandContract:
         assert exc.value.error_type == ErrorType.BAD_CONFIG
         action.assert_not_called()
 
+    def test_minute_zero_states_the_goal_and_whether_it_can_spend(self, campaign, booted, caplog):
+        """Spending is opt-in at every layer, which is a good default and an invisible
+        one. An operator who expected addresses should learn it in the first line, not
+        from an empty column at the end."""
+        with caplog.at_level(logging.INFO):
+            call_command("find", "0", stdout=io.StringIO())
+
+        assert "finding only, no addresses bought" in caplog.text
+
+    def test_asking_to_buy_says_so_before_any_work(self, campaign, booted, caplog):
+        with patch("openoutreach.core.cycle.run_one_action", return_value=False), \
+                caplog.at_level(logging.INFO):
+            with pytest.raises(OpenOutreachError):
+                call_command("find", "1", "--emails", stdout=io.StringIO())
+
+        assert "buying addresses, one credit each" in caplog.text
+
+    def test_the_icp_echo_names_who_it_is_looking_for(self, campaign, booted, caplog):
+        """The earliest possible proof the product description was understood — and the
+        earliest chance to correct it, which is the loop the README sells."""
+        campaign.anchor_profiles = ["vp of engineering saas acme senior california united states"]
+        campaign.save(update_fields=["anchor_profiles"])
+
+        with caplog.at_level(logging.INFO):
+            call_command("find", "0", stdout=io.StringIO())
+
+        assert "Looking for people like:" in caplog.text
+        assert "vp of engineering saas acme" in caplog.text
+
+    def test_an_unanchored_campaign_echoes_nothing(self, campaign, booted, caplog):
+        """A first run has no anchors yet — they are written during the job, and print
+        themselves there. Silence beats a heading with nothing under it."""
+        with caplog.at_level(logging.INFO):
+            call_command("find", "0", stdout=io.StringIO())
+
+        assert "Looking for people like:" not in caplog.text
+
     def test_the_run_ends_with_the_ask_and_the_csv_stays_a_csv(self, campaign, booted, caplog):
         """A run that leaves ranked leads behind and an empty wallet has to say so.
 

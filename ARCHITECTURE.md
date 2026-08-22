@@ -198,6 +198,53 @@ What a program depends on, and the reason both exist as one place rather than a 
   implements exactly this, `Retry-After` included; `tenacity` retries on *exceptions*, so using it
   here would mean raising one just to make it fire.
 
+## The Run's Narrative (`core/logging.py`, `core/logblock.py`, and the log lines)
+
+What `find` prints on stderr while it works **is** the product surface: it is what a first-time
+operator watches and what an agent summarises for its human. stdout is the CSV and stays result-only.
+The script it follows is written down in `openoutreach-docs/docs/first-run-design.md` §6 — the UX
+definition came first and the code implements it, rather than the other way round.
+
+**Two levels, and nothing is deleted between them.** INFO is addressed to the operator: every line
+answers a question they would ask. DEBUG (`--debug`) is addressed to the maintainer and carries
+**everything INFO ever said plus the engine's own reasoning** — the GP's acquisition strategy and
+class counts (`qualify.py`), the posterior behind the spend gate (`ready_pool.py`), the frontier, node
+retirements and page offsets (`discover.py`), the machine discovery seed and the anchor top-up
+(`icp.py`), and the cycle's per-row decisions and timings (`cycle.py`). A line that stops being
+operator-facing is **demoted, never removed**: the redesign changed who a line is addressed to, not
+what the tool is willing to say.
+
+The beats, in order:
+
+- **Minute 0 states the deal** — campaign, the goal the operator typed, and whether this run may
+  spend (`find._announce_the_run`). Spending is opt-in at every layer, which is a good default and an
+  invisible one; an operator who expected addresses learns it in the first line, not from an empty
+  column at the end.
+- **The ICP echo** (`icp.log_icp_echo`) — the synthetic ideal profiles, printed as *"Looking for
+  people like:"*. They were already computed, already one line each in `profile_text`'s shape, and
+  until now only their *count* was shown. It is the earliest proof the product description was
+  understood, and therefore the earliest chance to correct it. A first run has none yet — they are
+  written during the job and print themselves there.
+- **Both verdicts** (`qualify._verdict_line`) — a rejection carries its reason exactly as an
+  acceptance does, `✗` against `✓`. *Watching it turn people down is what makes the acceptances
+  credible*; a log of nothing but hits reads like a row dump. `logblock.step_line` is not the
+  primitive here: its fixed-width label column aligns short plumbing labels, and a person's name
+  overflows it on every row.
+- **Progress counts toward the goal** (`job._log_progress`) — `2 of 10 leads · 58 seen · 1m34s`, in
+  the unit the operator typed, with `★ first lead · 52s` as its own milestone because *how long until
+  anything at all happens* is what a first run is really asking. `JobResult.elapsed` is **reported,
+  never enforced** — there is still no timeout.
+- **The gate that is actually holding is named** (`cycle.pipeline_summary`) — and **every consequence
+  it has**. The finder key is one key doing two jobs, so losing it stops the walk finding anybody
+  *and* stops the paid lookup; naming only the second sent the operator after the wrong thing. It
+  does not stop the free address sources. `buy_addresses` is passed in because the run holds that
+  permission and the summary cannot see it: *addresses not requested* is the gate most likely to be
+  holding on a bare `find`.
+- **The run ends with the next action** — see the `find` section above.
+
+`logblock.py`'s grammar (a `▶` header naming one action, aligned step lines under it) is the
+foundation and was not replaced; the redesign happened inside it.
+
 ## Status (`core/status.py`)
 
 `build_status()` assembles one dict and reads nothing else; the command renders it. SQLite runs in
@@ -742,7 +789,7 @@ Paths relative to `openoutreach/`.
 - **`enrichment/bettercontact.py`** — the provider client. The paid finder is the two-leg `submit(query) → request_id` + `poll_once(request_id) → PollOutcome`, so a run never blocks on a poll; the free Lead Finder index uses the blocking `submit_and_poll` transport from the same module, since `discovery.search` genuinely wants a page back. `is_configured()` reads `SiteConfig.bettercontact_api_key` — one key, two endpoints, and only one of them bills.
 - **`enrichment/lookup.py`** — the two pipeline steps, `buy_address` / `check_lookup` / `reclaim_lookup`, plus `_store_identity` (the name parts the provider echoes back with the address) and the backoff helpers. The enrichment query is **URL-only by decision** — the provider accepts name and company and resolves better with them, but the less of a lead's record leaves for a third party the better, and URL-only measures ~42% usable. The docstring says not to widen it without a decision to widen it.
 - **`core/business_time.py`** — `business_days_between(start, end)`: whole Mon–Fri days elapsed. It was the agent's only sense of a thread's age; with no agent it is now unused by the pipeline and kept as a small, correct utility. Public holidays are not modelled (per-country data we don't carry).
-- **`core/logging.py`** — `configure_logging` + `print_banner`; `SILENCED_LOGGERS` quiets urllib3/httpx/pydantic_ai/openai/fastembed/etc.
+- **`core/logging.py`** — `configure_logging` + `print_banner`; `SILENCED_LOGGERS` quiets urllib3/httpx/pydantic_ai/openai/fastembed/etc.; `format_elapsed` (`52s` / `4m09s` / `1h04m`) for the milestones.
 - **`contacts/service.py`** — the hub client: `resolve(lead)` (free read before the paid finder; `/resolve` returns an `emails[]` list, first taken), `contribute(lead, emails, origin)` (give-back at a fresh paid hit, non-EEA only, registers + mints the token on first use; optionally attaches the cached embedding). Reads `SiteConfig.contacts_api_token`/`contacts_api_url`.
 
 ## Configuration
