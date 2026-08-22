@@ -472,6 +472,7 @@ def _finalize_account(operator_email: str, country: str, newsletter: bool) -> No
     made the whole account step unsatisfiable without a connected inbox — one of the
     two places the finder was welded to the sender.
     """
+    from openoutreach.contacts.service import register_operator
     from openoutreach.core.models import Campaign, SiteConfig
     from openoutreach.core.newsletter import subscribe_to_newsletter
 
@@ -483,6 +484,14 @@ def _finalize_account(operator_email: str, country: str, newsletter: bool) -> No
     if newsletter:
         subscribe_to_newsletter(operator_email)
     logger.info("Operator account '%s' created (email=%s).", user.username, operator_email)
+
+    # Identity, not entitlement, and not consent: the hub token names this install so it
+    # can hold a balance, be metered and be revoked. It is minted here because the email
+    # is already in hand — no new question — and **regardless of jurisdiction**, since the
+    # EEA/UK/CH rule governs contributing records, which is a different act. Best-effort:
+    # a hub that is down or that still demands a record leaves the token unset, and the
+    # first contribution mints it the old way.
+    register_operator()
 
 
 def _create_operator(campaign, email: str):

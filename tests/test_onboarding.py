@@ -79,6 +79,46 @@ def test_account_is_created_without_a_mailbox():
 
 
 @pytest.mark.django_db
+def test_the_account_step_mints_the_hub_token():
+    """Identity is minted where the email is already collected — no new question.
+
+    It used to be a side effect of a first contribution, which meant an install that
+    never contributes had no identity at all and was invisible to the hub for life.
+    """
+    from openoutreach.core.models import Campaign
+
+    Campaign.objects.create(name="C", product_docs="p", campaign_target="o")
+
+    with patch("openoutreach.core.onboarding.wiz.text", side_effect=["me@x.com", "US"]), \
+         patch("openoutreach.core.onboarding.wiz.confirm", side_effect=[True, True]), \
+         patch("openoutreach.contacts.service.register_operator") as register:
+        onboarding._run_account()
+
+    register.assert_called_once_with()
+
+
+@pytest.mark.django_db
+def test_a_hub_outage_does_not_block_onboarding():
+    """Best-effort, like every other hub call: the next run retries."""
+    from django.contrib.auth.models import User
+
+    from openoutreach.core.models import Campaign
+
+    Campaign.objects.create(name="C", product_docs="p", campaign_target="o")
+
+    with patch("openoutreach.core.onboarding.wiz.text", side_effect=["me@x.com", "US"]), \
+         patch("openoutreach.core.onboarding.wiz.confirm", side_effect=[True, True]), \
+         patch("openoutreach.contacts.service.register_operator",
+               side_effect=AssertionError("must be caught by the client, not raised here")):
+        with pytest.raises(AssertionError):
+            onboarding._run_account()
+
+    # The account itself is already persisted — the mint is the last thing the step
+    # does, so a failure there cannot cost the operator their answers.
+    assert User.objects.filter(email="me@x.com").exists()
+
+
+@pytest.mark.django_db
 def test_account_not_done_for_blank_email_user():
     """A staff user with a blank email (e.g. predating the address prompt) must NOT
     satisfy the account step — else the address prompt is skipped and BCC/newsletter

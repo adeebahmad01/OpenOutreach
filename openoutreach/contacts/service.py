@@ -122,38 +122,87 @@ def _attach_embedding(lead, record: dict) -> None:
     record["embedding"] = lead.embedding_array.tolist()
 
 
-def _register(config: SiteConfig, record: dict, lead) -> None:
-    """Mint + persist the operator token via the folded first contribution.
+def register_operator() -> bool:
+    """Mint + persist this install's hub token from the operator's email alone.
 
-    Keyed to the operator's own email — the single operator identity the hub uses
-    for "one token per operator" and as the provenance / revocation handle.
+    **Identity is not entitlement.** The token says *which install this is*; the
+    balance says what it may read. They used to be the same act — a token was minted
+    only as a side effect of a first contribution — which meant an install that
+    cannot contribute had no identity at all and stayed invisible to the hub for its
+    whole life. Every later idea needs the identity and none of them need the
+    contribution: quotas, revocation, per-install metering, showing an operator their
+    own balance, and any starter-balance experiment.
+
+    Called from onboarding, where the email is already collected, so there is **no
+    new question to ask**. Runs regardless of jurisdiction — the EEA/UK/CH rule is
+    about *contributing records*, which is a different act and still gated in
+    ``contribute``.
+
+    Best-effort and idempotent: an install that already holds a token does nothing, a
+    hub outage is a no-op the next run retries, and re-registering the same email
+    returns the same token. Returns whether a token is in hand afterwards.
+
+    *(This is not marketing consent. The newsletter opt-in in onboarding is that, and
+    it is jurisdiction-aware. Keep the two separate.)*
     """
-    body = {
-        "operator_email": get_active_user().email,
-        **record,
-    }
+    from openoutreach.core.models import SiteConfig
+
+    config = SiteConfig.load()
+    if config.contacts_api_token:
+        return True
+
+    email = get_active_user().email
+    if not email:
+        logger.debug("hub: no operator email yet — nothing to register")
+        return False
+
+    return _mint(config, {"operator_email": email})
+
+
+def _register(config: SiteConfig, record: dict, lead) -> None:
+    """Mint the token by folding it into a first contribution.
+
+    The compatibility path, and the only one a hub that still requires a record will
+    accept. ``register_operator`` is the one that should normally have run, at
+    onboarding; this catches the install whose hub was down that day and which has now
+    reached a contribution anyway.
+    """
+    _mint(config, {"operator_email": get_active_user().email, **record}, lead)
+
+
+def _mint(config: SiteConfig, body: dict, lead=None) -> bool:
+    """POST to ``register`` and persist whatever token comes back."""
     response = _send(config, "register", body, lead)
     token = response.get("token") if response else None
     if not token:
-        return
+        return False
     config.contacts_api_token = token
     config.save(update_fields=["contacts_api_token"])
-    logger.info("hub: registered — API token earned and stored")
+    logger.info("hub: registered — API token stored")
+    return True
 
 
-def _send(config: SiteConfig, path: str, body: dict, lead, headers: dict | None = None) -> dict | None:
-    """POST one record; log + swallow any transport failure. Returns the JSON
-    body on success, else ``None``."""
+def _send(config: SiteConfig, path: str, body: dict, lead=None,
+          headers: dict | None = None) -> dict | None:
+    """POST one body; log + swallow any transport failure. ``None`` on failure.
+
+    ``lead`` is the record's subject when there is one. A register that carries no
+    record has none, and must not be narrated as a contribution — it gave nothing,
+    and the hub may answer it without a ``credits`` field at all.
+    """
     try:
         resp = requests.post(_endpoint(config, path), json=body,
                              headers=headers or _headers(), timeout=_TIMEOUT_S)
         resp.raise_for_status()
     except requests.RequestException as exc:
-        logger.info("hub: give-back unavailable for %s: %s", lead.profile_url, exc)
+        subject = lead.profile_url if lead is not None else "operator identity"
+        logger.info("hub: unavailable for %s: %s", subject, exc)
         return None
+
     payload = resp.json()
-    logger.info("hub: contributed %s (%s) to the central store — %s credits available",
-                lead.profile_url, lead.country_code, payload["credits"])
+    if lead is not None:
+        logger.info("hub: contributed %s (%s) to the central store — %s credits available",
+                    lead.profile_url, lead.country_code, payload.get("credits"))
     return payload
 
 

@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
+import requests
 
 from openoutreach.core.management.setup_crm import setup_crm
 from tests.factories import UserFactory
@@ -16,6 +17,26 @@ def _ensure_crm_data(db):
     Since transaction=True tests rollback, we re-create data each time.
     """
     setup_crm()
+
+
+@pytest.fixture(autouse=True)
+def _no_live_writes_to_our_own_services():
+    """No test may write to the real hub or the real mailing list.
+
+    Both are reached by *completing onboarding*, which many tests do incidentally on
+    their way to something else: `_finalize_account` mints the operator's hub token
+    and, on a yes, subscribes them to the newsletter. Unguarded, anyone's `make test`
+    POSTs a fabricated operator into **production** — a service holding other
+    people's contributions — and signs a fake address up to the list.
+
+    Both callers are best-effort by design, so a refused connection is exactly the
+    no-op they already handle. Tests that exercise either client patch the same
+    target themselves and win, because their patch is applied inside this one.
+    """
+    refuse = requests.ConnectionError("no network in tests")
+    with patch("openoutreach.contacts.service.requests.post", side_effect=refuse), \
+         patch("openoutreach.core.newsletter.requests.post", side_effect=refuse):
+        yield
 
 
 @pytest.fixture(autouse=True)

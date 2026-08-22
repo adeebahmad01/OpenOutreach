@@ -191,6 +191,74 @@ class TestContribute:
         assert "embedding" not in post.call_args.kwargs["json"]
 
 
+# ── identity, minted at onboarding ───────────────────────────────────
+
+
+@pytest.mark.django_db
+class TestRegisterOperator:
+    """Identity is not entitlement.
+
+    The token says *which install this is*; the balance says what it may read. They
+    used to be one act — a token existed only as a side effect of a first
+    contribution — so an install that cannot contribute had no identity at all.
+    """
+
+    def test_it_mints_from_the_email_alone_with_no_record(self):
+        _config(token="")
+        with patch.object(
+            service.requests, "post", return_value=_resp(200, {"token": "NEW"}),
+        ) as post:
+            assert service.register_operator() is True
+
+        url, kwargs = post.call_args.args[0], post.call_args.kwargs
+        assert url.endswith("/api/v2/register/")
+        assert kwargs["json"]["operator_email"] == "me@x.com"
+        # No record rides along — that is the whole point of the standalone mint.
+        assert "public_identifier" not in kwargs["json"]
+        assert "emails" not in kwargs["json"]
+        assert SiteConfig.load().contacts_api_token == "NEW"
+
+    def test_an_eea_operator_still_gets_a_token(self):
+        """The jurisdiction rule governs *contributing records*, a different act.
+
+        Minting was gated on it only because the two were the same call. An install
+        that can never contribute must still be addressable, or it is invisible to
+        the hub for its whole life.
+        """
+        _config(token="", country_code="de")
+        with patch.object(
+            service.requests, "post", return_value=_resp(200, {"token": "NEW"}),
+        ):
+            assert service.register_operator() is True
+
+        assert SiteConfig.load().contacts_api_token == "NEW"
+
+    def test_an_install_that_already_has_one_asks_for_nothing(self):
+        _config(token="tok")
+        with patch.object(service.requests, "post") as post:
+            assert service.register_operator() is True
+
+        post.assert_not_called()
+
+    def test_a_hub_outage_is_a_no_op_the_next_run_retries(self):
+        _config(token="")
+        with patch.object(
+            service.requests, "post", side_effect=requests.ConnectionError("boom"),
+        ):
+            assert service.register_operator() is False  # must not raise
+
+        assert SiteConfig.load().contacts_api_token == ""
+
+    def test_a_hub_that_still_demands_a_record_leaves_the_token_unset(self):
+        """The compatibility case: until the hub accepts a record-less register it
+        answers 400, and the first contribution mints the old way instead."""
+        _config(token="")
+        with patch.object(service.requests, "post", return_value=_resp(400)):
+            assert service.register_operator() is False
+
+        assert SiteConfig.load().contacts_api_token == ""
+
+
 # ── which build sent it ──────────────────────────────────────────────
 
 
