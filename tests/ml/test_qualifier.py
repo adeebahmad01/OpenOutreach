@@ -241,11 +241,9 @@ class TestAnchors:
         assert qualifier.n_obs == 4
         assert qualifier.has_real_positive is False
 
-    def test_a_real_positive_retires_one_anchor_not_all_of_them(self):
-        """The handover is gradual. Dropping every anchor at the first acceptance took
-        the positive class from dozens to one against a pile of rejections in a single
-        step — the flat posterior the anchors exist to prevent, one lead into the real
-        evidence."""
+    def test_a_real_positive_leaves_every_anchor_standing(self):
+        """The anchors are permanent — a real acceptance grows the positive class
+        alongside them, it never displaces one."""
         qualifier = BayesianQualifier(seed=42)
         rng = np.random.RandomState(1)
         for _ in range(10):
@@ -255,10 +253,10 @@ class TestAnchors:
         qualifier.update(np.ones(384, dtype=np.float32), 1)
 
         assert qualifier.has_real_positive is True
-        assert qualifier.is_cold is True          # 3 - 1 real positive, two still standing
-        assert qualifier.class_counts == (10, 3)  # one real positive + two anchors
+        assert qualifier.is_cold is True          # 1 real positive < ANCHOR_COUNT (3)
+        assert qualifier.class_counts == (10, 4)  # one real positive + all three anchors
 
-    def test_the_anchors_are_gone_once_positives_reach_anchor_count(self):
+    def test_the_cold_phase_ends_once_real_positives_reach_anchor_count(self):
         qualifier = BayesianQualifier(seed=42)
         rng = np.random.RandomState(1)
         for _ in range(2):
@@ -269,11 +267,12 @@ class TestAnchors:
             qualifier.update(np.ones(384, dtype=np.float32), 1)
 
         assert qualifier.is_cold is False
-        assert qualifier.class_counts == (2, 3)  # the guess fully replaced by ground truth
-        assert qualifier.n_obs == 5
+        assert qualifier.n_anchors == 3  # still standing — only the phase clock moved
+        assert qualifier.class_counts == (2, 6)  # three real positives, three anchors
+        assert qualifier.n_obs == 8
 
     def test_a_rejection_keeps_the_anchors(self):
-        """Only a positive ends the cold phase — rejections are what it is made of."""
+        """Only real positives move the phase clock — rejections are what it is made of."""
         qualifier = BayesianQualifier(seed=42)
         qualifier.set_anchors(self._anchors())
 
@@ -282,16 +281,16 @@ class TestAnchors:
         assert qualifier.class_counts == (1, 3)
         assert qualifier.has_real_positive is False
 
-    def test_anchoring_is_trimmed_to_the_countdown_on_every_call(self):
-        """Safe to call on every daemon boot — a campaign whose real positives have
-        already retired padding must not be re-padded to the full set."""
+    def test_anchoring_is_not_trimmed_by_prior_real_positives(self):
+        """Safe to call on every daemon boot — restoring the stored set must not read the
+        real positives already on the qualifier as a reason to drop any of it."""
         qualifier = BayesianQualifier(seed=42)
         qualifier.update(np.ones(384, dtype=np.float32), 1)
         qualifier.update(np.zeros(384, dtype=np.float32), 0)
 
         qualifier.set_anchors(self._anchors())
 
-        assert qualifier.class_counts == (1, 3)  # one real positive + two anchors
+        assert qualifier.class_counts == (1, 4)  # one real positive + all three anchors
         assert qualifier.is_cold is True
 
     def test_anchoring_twice_does_not_stack(self):
@@ -345,9 +344,9 @@ class TestColdPhaseAcquisition:
             q = self._cold(rejections, anchors)
             assert q.acquisition_mode() == "exploit (p)", (rejections, anchors)
 
-    def test_the_axis_returns_to_the_balance_only_when_the_last_anchor_goes(self):
-        """A first acceptance does not end the phase — it retires one anchor. The axis
-        stays on exploit while any invented positive is still propping the class up."""
+    def test_the_axis_returns_to_the_balance_once_real_positives_reach_anchor_count(self):
+        """A first acceptance does not end the phase — the anchors stay standing and the
+        axis keeps exploiting until real positives themselves reach ANCHOR_COUNT."""
         q = self._cold(n_rejections=3, n_anchors=3)
         q.update(np.random.RandomState(1).rand(8), 1)
 
@@ -358,7 +357,8 @@ class TestColdPhaseAcquisition:
             q.update(np.random.RandomState(2).rand(8), 1)
 
         assert q.is_cold is False
-        assert q.class_counts == (3, 3)  # three real positives, no padding left
+        assert q.n_anchors == 3  # the anchors never left
+        assert q.class_counts == (3, 6)  # three real positives plus the three anchors
         assert q.acquisition_mode() == "explore (BALD)"  # real positives caught up
 
     def test_unfitted_model_still_reports_no_axis(self):

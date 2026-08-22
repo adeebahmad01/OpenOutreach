@@ -197,8 +197,8 @@ class BayesianQualifier:
         self._X: list[np.ndarray] = []
         self._y: list[int] = []
         # Synthetic ideal-lead embeddings, all label 1 — kept apart from the real
-        # observations so retiring them is a slice of one list and can never drop a
-        # real label with them. See ``set_anchors`` and ``_retire_anchors``.
+        # observations, and permanent: they are never trimmed as real positives
+        # arrive. See ``set_anchors``.
         self._anchor_X: list[np.ndarray] = []
         self._fitted = False
         self._rng = np.random.RandomState(seed)
@@ -211,48 +211,47 @@ class BayesianQualifier:
     def class_counts(self) -> tuple[int, int]:
         """Return (n_negatives, n_positives) — anchors counted as positives.
 
-        The anchors are what the model actually fits on while the cold phase lasts, so
-        anything reading the balance has to see them. What ``acquisition_mode`` reads past
-        the cold phase, by which point ``_retire_anchors`` has emptied the padding and both
-        sides of this count are real.
+        The anchors are permanent, so they always contribute to the positive count,
+        not just while the cold phase lasts.
         """
         n_pos = sum(self._y) + len(self._anchor_X)
         return len(self._y) - sum(self._y), n_pos
 
     @property
     def n_anchors(self) -> int:
-        """How many invented positives are still standing."""
+        """How many invented positives are standing — always ``ANCHOR_COUNT`` once set."""
         return len(self._anchor_X)
 
     @property
     def n_real_positives(self) -> int:
-        """How many real leads have qualified — the anchors' retirement clock."""
+        """How many real leads have qualified."""
         return sum(self._y)
 
     @property
     def has_real_positive(self) -> bool:
         """Whether a real lead has ever qualified.
 
-        Not the phase test (that is ``is_cold``): the first acceptance starts the
-        handover from invented positives to real ones, it does not finish it.
+        Not the phase test (that is ``is_cold``): the anchors stand regardless, so this
+        only tells the caller whether ground truth exists alongside them.
         """
         return any(self._y)
 
     @property
     def is_cold(self) -> bool:
-        """Whether any invented positive is still standing — the engine's phase test.
+        """Whether the positive class is still mostly invented — the engine's phase test.
 
-        Equivalently ``n_real_positives < ANCHOR_COUNT``, since the countdown in
-        ``anchor_budget`` reads nothing but the real positives. That independence is what
-        keeps an empty anchor set from being absorbing: no rule governing the anchors
-        depends on how many anchors are left.
-
-        The cold phase ends when the last anchor retires, not at the first real positive.
-        A model-fitting test ("is it fitted?") cannot stand in for it: with anchors the GP
-        fits from the first pass, so it says nothing about whether the campaign knows
-        anything or has only been told what to hope for.
+        The anchors themselves are permanent (``set_anchors`` never trims them), but the
+        phase clock is independent of that: it is ``n_real_positives < ANCHOR_COUNT``, the
+        same threshold the anchors were sized to. Once real acceptances reach that count,
+        balancing (``_balance``) and the explore/exploit split (``top_up._advance``) take
+        over even though the anchors keep contributing to every fit after that — there is
+        simply enough real evidence for the balance to be meaningful around them.
         """
-        return bool(self._anchor_X)
+        from openoutreach.core.pipeline.icp import ANCHOR_COUNT
+
+        if not self._anchor_X:
+            return False
+        return self.n_real_positives < ANCHOR_COUNT
 
     @property
     def pipeline(self):
@@ -267,15 +266,12 @@ class BayesianQualifier:
     def update(self, embedding: np.ndarray, label: int):
         """Record a new labelled observation.  Model is lazily re-fitted.
 
-        A positive label does not end the cold phase — it retires **one** anchor (see
-        ``_retire_anchors``), handing the positive class over to ground truth one lead at
-        a time.
+        The anchors are never touched here — a positive label adds to the real
+        positive class alongside them, it does not displace any of the invented ones.
         """
         self._X.append(embedding.astype(np.float64).ravel())
         self._y.append(int(label))
         self._fitted = False
-        if label == 1:
-            self._retire_anchors()
 
     # ------------------------------------------------------------------
     # Anchors  (synthetic positives for the cold phase)
@@ -291,82 +287,12 @@ class BayesianQualifier:
 
         **Replaces** the anchor set rather than adding to it — the caller owns the whole
         set (``icp.ensure_anchors`` returns every profile written so far), so passing the
-        stored set again on a daemon boot is a no-op.
-
-        The retirement countdown is re-applied afterwards, so a boot can never restore an
-        anchor a real positive has already displaced.
+        stored set again on a daemon boot is a no-op. They are never trimmed afterwards:
+        the anchors stand for the campaign's whole life, alongside whatever real
+        positives arrive.
         """
         self._anchor_X = [np.asarray(e, dtype=np.float64).ravel() for e in embeddings]
         self._fitted = False
-        self._retire_anchors()
-
-    @property
-    def anchor_budget(self) -> int:
-        """How many invented positives are still justified — one countdown, no ratios.
-
-        The anchors are a guess at the ICP and the campaign's own accepted leads are what
-        replace it, one for one: each real positive retires one anchor, so the padding is
-        gone once ground truth has produced as many positives as the guess did.
-
-        Counting *rejections* here — the previous rule, ``n_neg - n_real_pos``, "keep the
-        positive class level with the negatives" — collapsed to 0 on a campaign that
-        accepted a lead before it rejected one. The first acceptance then dropped every
-        anchor at once and left a positive class of exactly one, which ``_balance`` pinned
-        the whole training set to (9 observations fitted on 3, the same P for every lead).
-        A ratio against the rejections is also a bet on the accept rate: it only empties
-        if the campaign accepts more leads than it rejects, which no funnel does.
-        """
-        from openoutreach.core.pipeline.icp import ANCHOR_COUNT
-
-        return max(0, ANCHOR_COUNT - self.n_real_positives)
-
-    def _retire_anchors(self):
-        """Trim the anchors down to the budget, in memory and on the campaign.
-
-        Retires **newest first**, so the profiles written first — the campaign's original
-        statement of its ICP — are the last to go.
-
-        The abrupt version of this — drop every anchor on the first acceptance — could
-        not converge: it took a positive class of dozens down to one against hundreds of
-        rejections in a single step, flattening the posterior toward "no" everywhere and
-        undoing exactly what the anchors were introduced to fix, one lead into the
-        campaign's real evidence.
-        """
-        if not self._anchor_X:
-            return
-        keep = min(len(self._anchor_X), self.anchor_budget)
-        if keep == len(self._anchor_X):
-            return
-
-        dropped = len(self._anchor_X) - keep
-        self._anchor_X = self._anchor_X[:keep]
-        self._fitted = False
-        self._persist_anchors(keep)
-        if keep:
-            logger.info("Campaign %s: retired %d anchor(s) — %d real positive(s) now "
-                        "carry the class, %d invented one(s) left", self._campaign,
-                        dropped, self.n_real_positives, keep)
-        else:
-            logger.info("Cold phase over for campaign %s — last %d anchor(s) retired, "
-                        "%d real positive(s) against %d rejection(s)", self._campaign,
-                        dropped, self.n_real_positives,
-                        len(self._y) - self.n_real_positives)
-
-    def _persist_anchors(self, keep: int):
-        """Truncate the campaign's stored anchors to the surviving ``keep``.
-
-        The store is read back by the daemon on boot *and* by the discovery walk's
-        ``select.LabelStore``, which counts anchor profiles as positives — so a
-        retirement that lived only in memory would leave the walk counting invented
-        evidence the qualifier had already discarded.
-        """
-        if self._campaign is None:
-            return
-        self._campaign.anchor_profiles = list(self._campaign.anchor_profiles or [])[:keep]
-        self._campaign.anchor_embeddings = (
-            np.array(self._anchor_X[:keep], dtype=np.float32).tobytes() if keep else None
-        )
-        self._campaign.save(update_fields=["anchor_profiles", "anchor_embeddings"])
 
     def _training_arrays(self) -> tuple[np.ndarray, np.ndarray]:
         """Real observations plus any anchors, as ``(X, y)`` — what the GP fits on."""
@@ -399,9 +325,10 @@ class BayesianQualifier:
         from sklearn.preprocessing import StandardScaler
 
         # Balancing guards against one *observed* class swamping the other, and is skipped
-        # while the anchors stand: subsampling would throw away real rejections to match a
-        # positive class that is still partly invented. It takes over when the last anchor
-        # retires — which is exactly when both classes are real.
+        # during the cold phase: subsampling would throw away real rejections to match a
+        # positive class still mostly invented. It takes over once real acceptances reach
+        # ANCHOR_COUNT — the anchors keep contributing after that, but there is now enough
+        # real evidence for the balance to mean something.
         X_fit, y_fit = (X_arr, y_arr) if self.is_cold else self._balance(X_arr, y_arr)
         n = X_fit.shape[0]
 
@@ -691,11 +618,10 @@ def qualifier_for(campaign):
     if len(X) > 0:
         qualifier.warm_start(X, y)
 
-    # Cold phase — the positive class is still partly invented. With no acceptance at
-    # all the labels are one class and the GP cannot fit, so generate the anchors;
-    # once real positives have started arriving, restore whatever survived their
-    # retirement (``_retire_anchors``) but never invent more — the padding only ever
-    # shrinks from there.
+    # Cold phase — the positive class is partly invented, permanently. With no
+    # acceptance at all the labels are one class and the GP cannot fit, so generate
+    # the anchors; once real positives have started arriving, restore the same
+    # stored set rather than inventing more — it never grows or shrinks again.
     anchors = stored_anchors(campaign) if qualifier.has_real_positive else ensure_anchors(campaign)
     if anchors is not None:
         qualifier.set_anchors(anchors)

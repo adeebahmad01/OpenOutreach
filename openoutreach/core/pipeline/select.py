@@ -121,11 +121,10 @@ class LabelStore:
         The synthetic ideal profiles break it: they are written in ``profile_text``'s
         shape, so they tokenize like any lead and say which words describe the people
         this campaign wants — which is exactly the claim co-occurrence needs. It is the
-        same bargain the GP already takes, on the same evidence, with the same expiry:
-        ``BayesianQualifier`` retires one stored profile per real acceptance and the field
-        empties when real positives reach the rejection count, so reading it needs no
-        phase check — the invented evidence thins out of this count at exactly the rate
-        ground truth replaces it, and is gone when the cold phase is.
+        same bargain the GP already takes, on the same evidence: ``BayesianQualifier``
+        keeps the anchor profiles permanently, so this store always counts them alongside
+        whatever real qualified profiles have accumulated — a small, constant nudge that
+        matters early and is swamped by real evidence as the campaign grows.
 
         They deliberately do **not** feed the vocabulary (``vocabulary.refresh``): an
         anchor is one flat string with no per-field structure, and splitting it by guess

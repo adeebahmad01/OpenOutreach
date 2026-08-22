@@ -2,6 +2,8 @@
 from django.contrib import admin
 
 from openoutreach.core.models import Campaign, Keyword, QueryNode, SiteConfig
+from openoutreach.crm.models import DealState
+from openoutreach.crm.models.deal import Deal
 from openoutreach.discovery import describe_filters
 
 
@@ -23,15 +25,24 @@ class CampaignAdmin(admin.ModelAdmin):
 
     @admin.display(description="phase")
     def phase(self, obj):
-        """Cold (still part-steering on invented profiles) vs learning (padding retired).
+        """Cold (still part-steering on invented profiles) vs learning (real evidence rules).
 
-        The anchors change what the engine does — the GP fits on them, acquisition stays
-        on exploit, every pass discovers as well as labels — so which phase a campaign is
-        in should not need a log dig to answer. The count falls by one per real
-        acceptance, so it doubles as the handover's progress bar.
+        The anchors are permanent, so this can no longer read their count — it mirrors
+        ``BayesianQualifier.is_cold`` instead: cold until real acceptances reach
+        ``ANCHOR_COUNT``, learning from there, with the (also permanent) anchor count
+        shown alongside so the two never look conflated.
         """
-        n = len(obj.anchor_profiles or [])
-        return f"cold ({n} anchor{'' if n == 1 else 's'})" if n else "learning"
+        from openoutreach.core.pipeline.icp import ANCHOR_COUNT
+
+        n_anchors = len(obj.anchor_profiles or [])
+        n_real = Deal.objects.filter(
+            campaign=obj, lead_id__isnull=False,
+        ).exclude(state=DealState.FAILED).count()
+        if not n_anchors:
+            return "learning (unanchored)"
+        if n_real < ANCHOR_COUNT:
+            return f"cold ({n_real}/{ANCHOR_COUNT} real, {n_anchors} anchor{'' if n_anchors == 1 else 's'})"
+        return f"learning ({n_anchors} anchor{'' if n_anchors == 1 else 's'} + {n_real} real)"
 
 
 @admin.register(QueryNode)

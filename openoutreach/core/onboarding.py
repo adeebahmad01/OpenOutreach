@@ -190,7 +190,12 @@ def _run_campaign() -> None:
     print(
         "\n  Campaign — describe what you sell and who you're selling to. This is the\n"
         "  whole input: it writes the opening search and trains the qualifier that\n"
-        "  decides which leads fit. Be specific — a vague target yields vague targeting."
+        "  decides which leads fit. Name the traits that matter — industry, seniority,\n"
+        "  company size — but don't over-narrow: a target specific enough to describe\n"
+        "  one imagined person (an exact title at an exact kind of company doing an exact\n"
+        "  thing) reads to the LLM as a checklist, and it will reject real leads for\n"
+        "  missing some trait you never actually required. Describe the kind of\n"
+        "  organization or role that fits, not a single ideal example of one."
     )
     Campaign.objects.create(
         name=DEFAULT_CAMPAIGN_NAME,
@@ -200,8 +205,10 @@ def _run_campaign() -> None:
             "build-tracking; cuts flaky-test triage from hours to minutes')"
         )),
         campaign_target=_required(wiz.multiline(
-            "Campaign target — who you're going after and the outcome you want "
-            "(e.g. 'book demos with CTOs at Series-A SaaS')"
+            "Campaign target — who you're going after and the outcome you want. Broad enough "
+            "to cover a real range of companies or roles, not one hyper-specific persona "
+            "(e.g. 'book demos with engineering leaders at growth-stage SaaS companies', not "
+            "'the VP of Platform Engineering at a 200-person Series B fintech using Kubernetes')"
         )),
     )
     logger.info("Campaign '%s' created.", DEFAULT_CAMPAIGN_NAME)

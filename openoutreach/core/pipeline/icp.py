@@ -16,8 +16,8 @@ before any lead has been judged, and the engine needs them expressed two ways:
   what lets the model fit at all on a campaign whose every real verdict so far is a
   rejection — a single-class label set never produces a posterior, so without them BALD,
   P(f>0.5), and every piece of steering that reads them stay unavailable for the whole
-  cold phase. They are retired one per real acceptance (see
-  ``BayesianQualifier.anchor_budget``).
+  cold phase. They are permanent: once written they stand alongside whatever real
+  positives arrive, for the campaign's whole life.
 
 Profiles rather than the product text itself because the space they have to land in is
 one of *lead* embeddings: marketing prose about the product embeds nowhere near a row of
@@ -256,9 +256,8 @@ def ensure_anchors(campaign) -> np.ndarray | None:
     nothing is stored — callers treat that as "no anchors", never as an error. A failed
     fill-up keeps whatever is already there.
 
-    Never called once a real lead has qualified: from that point the set only shrinks, one
-    profile per acceptance (``BayesianQualifier._retire_anchors``, which truncates the same
-    two fields), and the daemon restores the survivors with ``stored_anchors`` instead.
+    Never called once a real lead has qualified: from that point the set is permanent,
+    and the daemon restores it with ``stored_anchors`` instead of inventing more.
     """
     from openoutreach.discovery import embed_profile
 

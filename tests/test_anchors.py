@@ -4,7 +4,7 @@ lead has qualified.
 
 The LLM call (``run_agent_sync``) and the embedder are stubbed, so these assert the
 lifecycle rather than the model: generated once, persisted on the campaign, reloaded
-without a second LLM call, and retired one at a time as real acceptances replace them.
+without a second LLM call, and kept permanently once real acceptances start arriving.
 """
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
@@ -157,7 +157,8 @@ def _rejections(qualifier, n):
 
 
 class TestAnchorLifecycle:
-    """Retirement is one countdown: ``ANCHOR_COUNT - n_real_positives``, nothing else."""
+    """The anchors are permanent: ``n_anchors`` never falls. ``is_cold`` is a separate
+    clock, ``n_real_positives < ANCHOR_COUNT``, that ends the phase without touching them."""
 
     def _anchored(self, campaign, profiles, rejections=0):
         with _llm_returns(profiles), _stub_embed():
@@ -167,50 +168,42 @@ class TestAnchorLifecycle:
         qualifier.set_anchors(anchors)
         return qualifier
 
-    def test_a_real_positive_retires_one_stored_anchor(self):
-        """The handover is one-for-one: ground truth displaces the guess a lead at a
-        time, so the positive class never lurches from dozens to one."""
+    def test_a_real_positive_leaves_every_anchor_standing(self):
         campaign = _campaign()
         qualifier = self._anchored(
             campaign, ["cmo acme", "cto northwind", "vp sales bo"], rejections=3)
 
         qualifier.update(np.zeros(384, dtype=np.float32), 0)
         campaign.refresh_from_db()
-        assert len(campaign.anchor_profiles) == 3  # a rejection retires nothing
+        assert len(campaign.anchor_profiles) == 3
 
         qualifier.update(np.ones(384, dtype=np.float32), 1)
 
         campaign.refresh_from_db()
-        # newest first — the campaign's opening statement of its ICP goes last
-        assert campaign.anchor_profiles == ["cmo acme", "cto northwind"]
-        assert qualifier.n_anchors == 2
+        assert campaign.anchor_profiles == ["cmo acme", "cto northwind", "vp sales bo"]
+        assert qualifier.n_anchors == 3
         assert qualifier.is_cold is True
 
-    def test_an_acceptance_before_any_rejection_retires_only_one(self):
-        """The live regression: the budget used to be ``n_neg - n_real_pos``, which is 0
-        on a campaign whose first verdict is an acceptance — so the first good lead
-        dropped every anchor at once and left a positive class of exactly one."""
+    def test_an_acceptance_before_any_rejection_keeps_every_anchor(self):
         campaign = _campaign()
         qualifier = self._anchored(campaign, ["cmo acme", "cto northwind", "vp sales bo"])
 
         qualifier.update(np.ones(384, dtype=np.float32), 1)
 
-        assert qualifier.n_anchors == 2
+        assert qualifier.n_anchors == 3
         assert qualifier.is_cold is True
-        assert qualifier.class_counts == (0, 3)
+        assert qualifier.class_counts == (0, 4)
 
     def test_the_padding_survives_a_pile_of_rejections(self):
-        """Rejections are not the clock. A campaign 8 rejections deep with one real
-        positive still fits on a positive class of 3, not of 1."""
         campaign = _campaign()
         qualifier = self._anchored(
             campaign, ["cmo acme", "cto northwind", "vp sales bo"], rejections=8)
         qualifier.update(np.ones(384, dtype=np.float32), 1)
 
-        assert qualifier.n_anchors == 2
-        assert qualifier.class_counts == (8, 3)
+        assert qualifier.n_anchors == 3
+        assert qualifier.class_counts == (8, 4)
 
-    def test_the_last_anchor_goes_when_positives_reach_anchor_count(self):
+    def test_the_cold_phase_ends_when_real_positives_reach_anchor_count_but_anchors_stay(self):
         campaign = _campaign()
         qualifier = self._anchored(
             campaign, ["cmo acme", "cto northwind", "vp sales bo"], rejections=2)
@@ -219,14 +212,12 @@ class TestAnchorLifecycle:
             qualifier.update(np.ones(384, dtype=np.float32), 1)
 
         campaign.refresh_from_db()
-        assert campaign.anchor_profiles == []
-        assert campaign.anchor_embeddings is None
+        assert campaign.anchor_profiles == ["cmo acme", "cto northwind", "vp sales bo"]
+        assert campaign.anchor_embeddings is not None
         assert qualifier.is_cold is False
-        assert qualifier.class_counts == (2, 3)
+        assert qualifier.class_counts == (2, 6)
 
-    def test_a_retired_anchor_cannot_be_restored_by_a_later_boot(self):
-        """The countdown is re-applied on every ``set_anchors``, so a stale stored set can
-        never resurrect an anchor a real positive displaced."""
+    def test_a_later_boot_restores_the_same_permanent_set(self):
         campaign = _campaign()
         qualifier = self._anchored(campaign, ["cmo acme", "cto northwind", "vp sales bo"])
         stale = np.ones((3, 384), dtype=np.float32)
@@ -235,5 +226,5 @@ class TestAnchorLifecycle:
             qualifier.update(np.ones(384, dtype=np.float32), 1)
         qualifier.set_anchors(stale)
 
-        assert qualifier.n_anchors == 0
-        assert qualifier.class_counts == (0, 3)
+        assert qualifier.n_anchors == 3
+        assert qualifier.class_counts == (0, 6)
