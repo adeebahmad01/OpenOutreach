@@ -49,3 +49,13 @@ tests/
 - **Mock at the boundary.** Patch the BetterContact HTTP client, the hub client and the pydantic-ai model — not the pipeline functions that call them.
 - **CRM objects** come from `factories.py` (factory-boy) or direct model creation.
 - **No browser, no network.** There is nothing to launch and no live API to hit; the tool is browserless and every external call is stubbed.
+
+## What the suite does not cover
+
+**A `find` that actually finds.** Every external call is stubbed, so no test — and no manual
+run — has yet taken the happy path end to end with live `OPENOUTREACH_LLM_API_KEY` and
+`OPENOUTREACH_BETTERCONTACT_API_KEY`. That includes the Claude Code plugin: the skill is
+inventoried and fires correctly on the refusal paths (it runs `status`, reads
+`onboarding_incomplete`, names the right variables and declines to accept the legal notice
+for the user), but a session that returns leads has never been observed. Exercising it costs
+one BetterContact credit per verified hit.
