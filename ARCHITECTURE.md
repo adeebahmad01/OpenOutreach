@@ -263,6 +263,7 @@ the job.
 | `onboarding` | `complete`, the satisfied steps, and per-step the variables that would satisfy the rest |
 | `campaigns` / `totals` | the pipeline counts, per campaign and summed |
 | `credits` | `balance` + `error` — `GET /api/v2/account` → `credits_left` |
+| `hub` | `balance` + `known` — the give-to-get counter (`contacts.service.hub_balance`), a different number on a different service than `credits` |
 | `blocked` | what stands between now and more qualified rows, typed from `core/errors.py` |
 | `next_action` | the one thing to do next, with what it unlocks and the command or URL that does it |
 
@@ -280,6 +281,13 @@ Three decisions inside it:
   not break the *never before value* rule — `ranked_for_lookup > 0` is itself the proof that
   qualified leads with written reasons exist, and a campaign that has qualified nobody is asked for
   no money, only told to go and find some (`find_leads`).
+- **The hub balance is not the `Credits:` line.** `credits` is BetterContact's own prepaid balance
+  (`GET /api/v2/account`); `hub` is the give-to-get counter on the contacts store — a different
+  number on a different service, so it gets its own key rather than being folded into or shown
+  beside `credits` under one label. Read via `hub_balance()`, which piggybacks on `register` (a
+  record-less call is idempotent server-side and already returns `credits`), so checking it spends
+  nothing. `known: False` (no token yet, or a hub outage) must render as *unknown*, never as zero —
+  the same rule the provider balance already follows.
 
 ## Onboarding (`core/onboarding.py`)
 
@@ -790,7 +798,7 @@ Paths relative to `openoutreach/`.
 - **`enrichment/lookup.py`** — the two pipeline steps, `buy_address` / `check_lookup` / `reclaim_lookup`, plus `_store_identity` (the name parts the provider echoes back with the address) and the backoff helpers. The enrichment query is **URL-only by decision** — the provider accepts name and company and resolves better with them, but the less of a lead's record leaves for a third party the better, and URL-only measures ~42% usable. The docstring says not to widen it without a decision to widen it.
 - **`core/business_time.py`** — `business_days_between(start, end)`: whole Mon–Fri days elapsed. It was the agent's only sense of a thread's age; with no agent it is now unused by the pipeline and kept as a small, correct utility. Public holidays are not modelled (per-country data we don't carry).
 - **`core/logging.py`** — `configure_logging` + `print_banner`; `SILENCED_LOGGERS` quiets urllib3/httpx/pydantic_ai/openai/fastembed/etc.; `format_elapsed` (`52s` / `4m09s` / `1h04m`) for the milestones.
-- **`contacts/service.py`** — the hub client: `resolve(lead)` (free read before the paid finder; `/resolve` returns an `emails[]` list, first taken), `contribute(lead, emails, origin)` (give-back at a fresh paid hit, non-EEA only, registers + mints the token on first use; optionally attaches the cached embedding). Reads `SiteConfig.contacts_api_token`/`contacts_api_url`.
+- **`contacts/service.py`** — the hub client: `resolve(lead)` (free read before the paid finder; `/resolve` returns an `emails[]` list plus `credits` on both the hit and the miss, first email taken — a miss logs *no balance* when `credits <= 0` and *no stored email* otherwise, since a permanent zero must not read like an ordinary miss), `contribute(lead, emails, origin)` (give-back at a fresh paid hit, non-EEA only, registers + mints the token on first use; optionally attaches the cached embedding), `hub_balance()` (the give-to-get counter for `status`, read via a record-less `register` call — idempotent server-side, so checking spends nothing; `known: False` on no token or an outage, never a balance of zero). Reads `SiteConfig.contacts_api_token`/`contacts_api_url`.
 
 ## Configuration
 

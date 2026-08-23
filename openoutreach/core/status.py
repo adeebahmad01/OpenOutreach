@@ -37,6 +37,7 @@ def build_status() -> dict:
     onboarding_state = _onboarding_state(onboarding)
     campaigns = _campaign_counts()
     credits = _credits()
+    hub = _hub_balance()
     totals = _totals(campaigns)
     blocked = _blocked(onboarding_state, credits, totals)
 
@@ -45,6 +46,7 @@ def build_status() -> dict:
         "campaigns": campaigns,
         "totals": totals,
         "credits": credits,
+        "hub": hub,
         "blocked": blocked,
         "next_action": next_action(onboarding_state, credits, totals),
     }
@@ -132,6 +134,16 @@ def _credits() -> dict:
     except bettercontact.BetterContactUnavailable as exc:
         logger.debug("Could not read the credit balance: %s", exc)
         return {"balance": None, "error": exc.error_type, "detail": str(exc)}
+
+
+def _hub_balance() -> dict:
+    """The give-to-get counter — a different number on a different service than
+    ``_credits()``, which is BetterContact's own prepaid balance. Showing one while
+    calling it the other would be worse than showing neither, so it gets its own key.
+    """
+    from openoutreach.contacts.service import hub_balance
+
+    return hub_balance()
 
 
 # ── what is blocked, and why ─────────────────────────────────────

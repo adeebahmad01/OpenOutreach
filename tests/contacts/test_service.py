@@ -90,6 +90,26 @@ class TestResolve:
         ):
             assert service.resolve(lead) is None
 
+    def test_zero_balance_miss_logs_as_no_balance_not_as_a_store_miss(self, caplog):
+        """A permanent zero must not read like a miss — the client can tell the two
+        zeros apart on the wire (``credits``) and must say which it is."""
+        _config()
+        lead = LeadFactory(profile_url="jane-doe")
+        with patch.object(service.requests, "get", return_value=_resp(404, {"credits": 0})):
+            with caplog.at_level("INFO"):
+                assert service.resolve(lead) is None
+        assert any("no balance" in r.message for r in caplog.records)
+        assert not any("no stored email" in r.message for r in caplog.records)
+
+    def test_positive_balance_miss_logs_as_a_store_miss(self, caplog):
+        _config()
+        lead = LeadFactory(profile_url="jane-doe")
+        with patch.object(service.requests, "get", return_value=_resp(404, {"credits": 3})):
+            with caplog.at_level("INFO"):
+                assert service.resolve(lead) is None
+        assert any("no stored email" in r.message for r in caplog.records)
+        assert not any("no balance" in r.message for r in caplog.records)
+
 
 # ── contribute ───────────────────────────────────────────────────────
 
@@ -315,3 +335,43 @@ class TestBuildReporting:
                           return_value=_resp(body={"token": "t", "credits": 1})) as post:
             service.contribute(lead, ["jane@acme.com"], service.ORIGIN_BETTERCONTACT)
         assert post.call_args.kwargs["json"]["client_sha"] == "b" * 40
+
+
+# ── the give-to-get balance, for status ───────────────────────────────
+
+
+@pytest.mark.django_db
+class TestHubBalance:
+    """Read-back for ``status`` — a different number than the provider's own
+    credits, read without spending the one it reports."""
+
+    def test_no_token_is_unknown_without_a_call(self):
+        _config(token="")
+        with patch.object(service.requests, "post") as post:
+            assert service.hub_balance() == {"balance": None, "known": False}
+        post.assert_not_called()
+
+    def test_known_balance_reuses_the_existing_token(self):
+        _config(token="tok")
+        with patch.object(
+            service.requests, "post", return_value=_resp(200, {"token": "tok", "credits": 4}),
+        ) as post:
+            assert service.hub_balance() == {"balance": 4, "known": True}
+        url, kwargs = post.call_args.args[0], post.call_args.kwargs
+        assert url.endswith("/api/v2/register/")
+        assert kwargs["headers"]["Authorization"] == "Bearer tok"
+        assert "public_identifier" not in kwargs["json"]
+
+    def test_zero_balance_is_known_not_unknown(self):
+        _config(token="tok")
+        with patch.object(
+            service.requests, "post", return_value=_resp(200, {"token": "tok", "credits": 0}),
+        ):
+            assert service.hub_balance() == {"balance": 0, "known": True}
+
+    def test_outage_is_unknown(self):
+        _config(token="tok")
+        with patch.object(
+            service.requests, "post", side_effect=requests.ConnectionError("boom"),
+        ):
+            assert service.hub_balance() == {"balance": None, "known": False}

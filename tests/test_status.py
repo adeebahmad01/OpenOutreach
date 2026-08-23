@@ -45,6 +45,15 @@ def has_key():
         yield
 
 
+@pytest.fixture
+def hub():
+    """Control the hub give-to-get balance without a network call."""
+    def _set(balance=None, known=False):
+        return patch("openoutreach.contacts.service.hub_balance",
+                     return_value={"balance": balance, "known": known})
+    return _set
+
+
 # ── the counts ───────────────────────────────────────────────────
 
 @pytest.mark.django_db
@@ -181,28 +190,76 @@ def test_a_campaign_with_nothing_yet_is_told_to_go_and_find_some(
     assert action["type"] == "find_leads"
 
 
+# ── the hub balance — a different number than the provider's own ──
+
+@pytest.mark.django_db
+def test_hub_balance_is_its_own_key_not_folded_into_credits(campaign, configured, has_key, balance, hub):
+    with balance(value=40), hub(balance=3, known=True):
+        document = status_module.build_status()
+
+    assert document["hub"] == {"balance": 3, "known": True}
+    assert document["credits"]["balance"] == 40  # unaffected — a different service
+
+
+@pytest.mark.django_db
+def test_unknown_hub_balance_is_not_reported_as_zero(campaign, configured, has_key, balance, hub):
+    with balance(value=40), hub(balance=None, known=False):
+        document = status_module.build_status()
+
+    assert document["hub"] == {"balance": None, "known": False}
+
+
 # ── rendering ────────────────────────────────────────────────────
 
 @pytest.mark.django_db
-def test_json_is_one_object_and_nothing_else(campaign, configured, has_key, balance, capsys):
+def test_json_is_one_object_and_nothing_else(campaign, configured, has_key, balance, hub, capsys):
     from django.core.management import call_command
 
-    with balance(value=40):
+    with balance(value=40), hub(balance=0, known=True):
         call_command("status", "--json")
 
     document = json.loads(capsys.readouterr().out)  # would raise on any stray line
     assert set(document) == {
-        "onboarding", "campaigns", "totals", "credits", "blocked", "next_action",
+        "onboarding", "campaigns", "totals", "credits", "hub", "blocked", "next_action",
     }
 
 
 @pytest.mark.django_db
-def test_human_summary_reports_the_balance_and_the_next_action(campaign, configured, has_key, balance):
+def test_human_summary_reports_the_balance_and_the_next_action(campaign, configured, has_key, balance, hub):
     DealFactory(campaign=campaign, lead=LeadFactory(), state=DealState.RESOLVED, reason="fits")
 
-    with balance(value=38):
+    with balance(value=38), hub(balance=0, known=True):
         text = render(status_module.build_status())
 
     assert "Credits: 38 left." in text
     assert "1 exportable" in text
     assert "Next: 1 qualified lead(s) ready." in text
+
+
+@pytest.mark.django_db
+def test_human_summary_distinguishes_the_hub_balance_from_bettercontact_credits(
+    campaign, configured, has_key, balance, hub
+):
+    """The give-to-get counter must never be shown as, or beside, the ``Credits:``
+    line — that is BetterContact's own prepaid balance, a different service."""
+    with balance(value=40), hub(balance=2, known=True):
+        text = render(status_module.build_status())
+
+    assert "Hub store: 2 free read(s)" in text
+    assert "Credits: 40 left." in text
+
+
+@pytest.mark.django_db
+def test_human_summary_names_a_permanent_zero_hub_balance(campaign, configured, has_key, balance, hub):
+    with balance(value=40), hub(balance=0, known=True):
+        text = render(status_module.build_status())
+
+    assert "Hub store: no balance — contribute an address to earn a read." in text
+
+
+@pytest.mark.django_db
+def test_human_summary_names_an_unknown_hub_balance(campaign, configured, has_key, balance, hub):
+    with balance(value=40), hub(balance=None, known=False):
+        text = render(status_module.build_status())
+
+    assert "Hub store: no balance on record" in text

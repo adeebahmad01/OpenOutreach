@@ -61,6 +61,9 @@ def resolve(lead) -> str | None:
     if email:
         logger.info("hub: resolved %s for %s (saved a paid lookup) — %s credits available",
                     email, lead.profile_url, credits)
+    elif credits is not None and credits <= 0:
+        logger.info("hub: no balance to read the store for %s — falling back to BetterContact "
+                    "(contribute an address to earn a read)", lead.profile_url)
     else:
         logger.info("hub: no stored email for %s — falling back to BetterContact (store balance: %s credits)",
                     lead.profile_url, credits)
@@ -162,6 +165,31 @@ def register_operator() -> bool:
     # The build rides along: for an install that never contributes, this is the only
     # time it ever names the version it runs.
     return _mint(config, {"operator_email": email, **_build_fields()})
+
+
+def hub_balance() -> dict:
+    """This install's give-to-get balance, read without spending it.
+
+    Piggybacks on ``register``: a record-less call is idempotent
+    (``ApiToken.objects.get_or_create``) and already returns ``credits``, so a repeat
+    call reuses the existing token and costs nothing. Best-effort like every other hub
+    call — no token yet, or an outage, both report *unknown*, never a balance of zero,
+    since the two must not look alike to a caller deciding whether to explain the
+    store as empty or as closed.
+    """
+    config = SiteConfig.load()
+    if not config.contacts_api_token:
+        return {"balance": None, "known": False}
+
+    email = get_active_user().email
+    if not email:
+        return {"balance": None, "known": False}
+
+    payload = _send(config, "register", {"operator_email": email, **_build_fields()},
+                    headers=_auth(config.contacts_api_token))
+    if payload is None or "credits" not in payload:
+        return {"balance": None, "known": False}
+    return {"balance": payload["credits"], "known": True}
 
 
 def _register(config: SiteConfig, record: dict, lead) -> None:

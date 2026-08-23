@@ -46,6 +46,7 @@ def render(status: dict) -> str:
         _render_config(status["onboarding"]),
         _render_pipeline(status["campaigns"], status["totals"]),
         _render_credits(status["credits"]),
+        _render_hub(status["hub"]),
         _render_blocked(status["blocked"]),
         render_next_action(status["next_action"]),
     )
@@ -86,6 +87,14 @@ def _render_credits(credits: dict) -> str:
     if credits["balance"] is not None:
         return f"Credits: {credits['balance']} left."
     return f"Credits: unknown ({credits['error']})."
+
+
+def _render_hub(hub: dict) -> str:
+    if not hub["known"]:
+        return "Hub store: no balance on record — a hub outage, or not registered yet."
+    if hub["balance"] > 0:
+        return f"Hub store: {hub['balance']} free read(s) — earned by contributing addresses."
+    return "Hub store: no balance — contribute an address to earn a read."
 
 
 def _render_blocked(blocked: list[dict]) -> str:
